@@ -31,7 +31,7 @@ pub enum Property {
 /// Additionally, property class resolution uses special
 /// logic, different from normal "runtime" class resolution,
 /// that allows private types to be referenced.
-#[derive(Debug, Collect, Clone)]
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub enum PropertyClass<'gc> {
     /// The type `*` (Multiname::is_any()). This allows
@@ -44,7 +44,7 @@ pub enum PropertyClass<'gc> {
 
 impl<'gc> PropertyClass<'gc> {
     pub fn name(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         name: Multiname<'gc>,
         unit: Option<TranslationUnit<'gc>>,
     ) -> Self {
@@ -56,9 +56,9 @@ impl<'gc> PropertyClass<'gc> {
     /// to cache a class resolution, and `false` if it was not modified.
     pub fn coerce(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         value: Value<'gc>,
-    ) -> Result<(Value<'gc>, bool), Error> {
+    ) -> Result<(Value<'gc>, bool), Error<'gc>> {
         let (class, changed) = match self {
             PropertyClass::Class(class) => (Some(*class), false),
             PropertyClass::Name(gc) => {
@@ -108,8 +108,7 @@ impl<'gc> PropertyClass<'gc> {
                         }
 
                         return Err(Error::from(format!(
-                            "Attempted to perform (private) resolution of nonexistent type {:?}",
-                            name
+                            "Attempted to perform (private) resolution of nonexistent type {name:?}",
                         )));
                     }
                 };
@@ -143,8 +142,8 @@ enum ResolveOutcome<'gc> {
 fn resolve_class_private<'gc>(
     name: &Multiname<'gc>,
     unit: Option<TranslationUnit<'gc>>,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<ResolveOutcome<'gc>, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<ResolveOutcome<'gc>, Error<'gc>> {
     // A Property may have a type of '*' (which corresponds to 'Multiname::any()')
     // We don't want to perform any coercions in this case - in particular,
     // this means that the property can have a value of `Undefined`.
@@ -176,11 +175,11 @@ fn resolve_class_private<'gc>(
             txunit
                 .get_loaded_private_trait_script(name)
                 .ok_or_else(|| {
-                    Error::from(format!("Could not find script for class trait {:?}", name))
+                    Error::from(format!("Could not find script for class trait {name:?}"))
                 })?
                 .globals(&mut activation.context)?
         } else {
-            return Err(format!("Missing script and translation unit for class {:?}", name).into());
+            return Err(format!("Missing script and translation unit for class {name:?}").into());
         };
 
         Ok(globals

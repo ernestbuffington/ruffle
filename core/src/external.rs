@@ -1,8 +1,6 @@
-use crate::avm1::activation::{
-    Activation as Avm1Activation, ActivationIdentifier as Avm1ActivationIdentifier,
-};
-use crate::avm1::object::TObject as _;
+use crate::avm1::TObject as _;
 use crate::avm1::Value as Avm1Value;
+use crate::avm1::{Activation as Avm1Activation, ActivationIdentifier as Avm1ActivationIdentifier};
 use crate::avm1::{
     ArrayObject as Avm1ArrayObject, Error as Avm1Error, Object as Avm1Object,
     ScriptObject as Avm1ScriptObject,
@@ -121,7 +119,7 @@ impl From<Vec<Value>> for Value {
 
 impl Value {
     pub fn from_avm1<'gc>(
-        activation: &mut Avm1Activation<'_, 'gc, '_>,
+        activation: &mut Avm1Activation<'_, 'gc>,
         value: Avm1Value<'gc>,
     ) -> Result<Value, Avm1Error<'gc>> {
         Ok(match value {
@@ -152,12 +150,17 @@ impl Value {
         })
     }
 
-    pub fn into_avm1<'gc>(self, activation: &mut Avm1Activation<'_, 'gc, '_>) -> Avm1Value<'gc> {
+    pub fn into_avm1<'gc>(self, activation: &mut Avm1Activation<'_, 'gc>) -> Avm1Value<'gc> {
         match self {
             Value::Null => Avm1Value::Null,
             Value::Bool(value) => Avm1Value::Bool(value),
             Value::Number(value) => Avm1Value::Number(value),
             Value::String(value) => {
+                let value = if activation.swf_version() < 9 && value.trim().is_empty() {
+                    "null"
+                } else {
+                    &value
+                };
                 Avm1Value::String(AvmString::new_utf8(activation.context.gc_context, value))
             }
             Value::Object(values) => {
@@ -187,7 +190,6 @@ impl Value {
             Avm2Value::Undefined | Avm2Value::Null => Value::Null,
             Avm2Value::Bool(value) => value.into(),
             Avm2Value::Number(value) => value.into(),
-            Avm2Value::Unsigned(value) => value.into(),
             Avm2Value::Integer(value) => value.into(),
             Avm2Value::String(value) => Value::String(value.to_string()),
             Avm2Value::Object(object) => {
@@ -202,14 +204,14 @@ impl Value {
                         .collect();
                     Value::List(values)
                 } else {
-                    log::warn!("from_avm2 needs to be implemented for Avm2Value::Object");
+                    tracing::warn!("from_avm2 needs to be implemented for Avm2Value::Object");
                     Value::Null
                 }
             }
         }
     }
 
-    pub fn into_avm2<'gc>(self, activation: &mut Avm2Activation<'_, 'gc, '_>) -> Avm2Value<'gc> {
+    pub fn into_avm2<'gc>(self, activation: &mut Avm2Activation<'_, 'gc>) -> Avm2Value<'gc> {
         match self {
             Value::Null => Avm2Value::Null,
             Value::Bool(value) => Avm2Value::Bool(value),
@@ -218,7 +220,7 @@ impl Value {
                 Avm2Value::String(AvmString::new_utf8(activation.context.gc_context, value))
             }
             Value::Object(_values) => {
-                log::warn!("into_avm2 needs to be implemented for Value::Object");
+                tracing::warn!("into_avm2 needs to be implemented for Value::Object");
                 Avm2Value::Undefined
             }
             Value::List(values) => {
@@ -248,18 +250,16 @@ pub enum Callback<'gc> {
 impl<'gc> Callback<'gc> {
     pub fn call(
         &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         name: &str,
         args: impl IntoIterator<Item = Value>,
     ) -> Value {
         match self {
             Callback::Avm1 { this, method } => {
                 let base_clip = context.stage.root_clip();
-                let globals = context.avm1.global_object_cell();
                 let mut activation = Avm1Activation::from_nothing(
                     context.reborrow(),
                     Avm1ActivationIdentifier::root("[ExternalInterface]"),
-                    globals,
                     base_clip,
                 );
                 let this = this.coerce_to_object(&mut activation);
@@ -302,14 +302,14 @@ pub trait ExternalInterfaceProvider {
 }
 
 pub trait ExternalInterfaceMethod {
-    fn call(&self, context: &mut UpdateContext<'_, '_, '_>, args: &[Value]) -> Value;
+    fn call(&self, context: &mut UpdateContext<'_, '_>, args: &[Value]) -> Value;
 }
 
 impl<F> ExternalInterfaceMethod for F
 where
-    F: Fn(&mut UpdateContext<'_, '_, '_>, &[Value]) -> Value,
+    F: Fn(&mut UpdateContext<'_, '_>, &[Value]) -> Value,
 {
-    fn call(&self, context: &mut UpdateContext<'_, '_, '_>, args: &[Value]) -> Value {
+    fn call(&self, context: &mut UpdateContext<'_, '_>, args: &[Value]) -> Value {
         self(context, args)
     }
 }

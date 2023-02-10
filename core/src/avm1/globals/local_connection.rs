@@ -13,16 +13,11 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn domain<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let movie = if let Some(movie) = activation.base_clip().movie() {
-        movie
-    } else {
-        log::error!("LocalConnection::domain: Movie was None");
-        return Ok(Value::Null);
-    };
+    let movie = activation.base_clip().movie();
 
     let domain = if let Some(url) = movie.url() {
         if let Ok(url) = url::Url::parse(url) {
@@ -35,7 +30,7 @@ pub fn domain<'gc>(
                 "localhost".into()
             }
         } else {
-            log::error!("LocalConnection::domain: Unable to parse movie URL");
+            tracing::error!("LocalConnection::domain: Unable to parse movie URL");
             return Ok(Value::Null);
         }
     } else {
@@ -47,7 +42,7 @@ pub fn domain<'gc>(
 }
 
 pub fn constructor<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {

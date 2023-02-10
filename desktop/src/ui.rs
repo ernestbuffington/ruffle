@@ -1,22 +1,24 @@
-use clipboard::{ClipboardContext, ClipboardProvider};
+use anyhow::{Context, Error};
+use arboard::Clipboard;
 use rfd::{MessageButtons, MessageDialog, MessageLevel};
 use ruffle_core::backend::ui::{FullscreenError, MouseCursor, UiBackend};
 use std::rc::Rc;
+use tracing::error;
 use winit::window::{Fullscreen, Window};
 
 pub struct DesktopUiBackend {
     window: Rc<Window>,
     cursor_visible: bool,
-    clipboard: ClipboardContext,
+    clipboard: Clipboard,
 }
 
 impl DesktopUiBackend {
-    pub fn new(window: Rc<Window>) -> Self {
-        Self {
+    pub fn new(window: Rc<Window>) -> Result<Self, Error> {
+        Ok(Self {
             window,
             cursor_visible: true,
-            clipboard: ClipboardProvider::new().unwrap(),
-        }
+            clipboard: Clipboard::new().context("Couldn't get platform clipboard")?,
+        })
     }
 }
 
@@ -52,7 +54,9 @@ impl UiBackend for DesktopUiBackend {
     }
 
     fn set_clipboard_content(&mut self, content: String) {
-        self.clipboard.set_contents(content).unwrap();
+        if let Err(e) = self.clipboard.set_text(content) {
+            error!("Couldn't set clipboard contents: {:?}", e);
+        }
     }
 
     fn set_fullscreen(&mut self, is_full: bool) -> Result<(), FullscreenError> {

@@ -1,35 +1,29 @@
 //! Audio decoders.
 
 mod adpcm;
-#[cfg(any(feature = "minimp3", feature = "symphonia"))]
+#[cfg(feature = "mp3")]
 mod mp3;
 #[cfg(feature = "nellymoser")]
 mod nellymoser;
 mod pcm;
 
 pub use adpcm::AdpcmDecoder;
-#[cfg(feature = "minimp3")]
-pub use mp3::minimp3::Mp3Decoder;
-#[cfg(all(feature = "symphonia", not(feature = "minimp3")))]
-pub use mp3::symphonia::Mp3Decoder;
+#[cfg(feature = "mp3")]
+pub use mp3::{mp3_metadata, Mp3Decoder};
 #[cfg(feature = "nellymoser")]
 pub use nellymoser::NellymoserDecoder;
 pub use pcm::PcmDecoder;
 
-use crate::tag_utils::SwfSlice;
+use crate::tag_utils::{ControlFlow, SwfSlice};
 use std::io::{Cursor, Read};
 use swf::{AudioCompression, SoundFormat, TagCode};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[cfg(feature = "minimp3")]
-    #[error("Couldn't decode MP3 using minimp3")]
-    InvalidMp3(#[from] mp3::minimp3::Error),
-
-    #[cfg(all(feature = "symphonia", not(feature = "minimp3")))]
-    #[error("Couldn't decode MP3 using symphonia")]
-    InvalidMp3(#[from] mp3::symphonia::Error),
+    #[cfg(all(feature = "mp3"))]
+    #[error("Couldn't decode MP3")]
+    InvalidMp3(#[from] mp3::Error),
 
     #[error("Couldn't decode ADPCM")]
     InvalidAdpcm(#[from] adpcm::Error),
@@ -56,7 +50,7 @@ pub fn make_decoder<R: 'static + Read + Send + Sync>(
     let decoder: Box<dyn Decoder> = match format.compression {
         AudioCompression::UncompressedUnknownEndian => {
             // Cross fingers that it's little endian.
-            log::warn!("make_decoder: PCM sound is unknown endian; assuming little endian");
+            tracing::warn!("make_decoder: PCM sound is unknown endian; assuming little endian");
             Box::new(PcmDecoder::new(
                 data,
                 format.is_stereo,
@@ -75,7 +69,7 @@ pub fn make_decoder<R: 'static + Read + Send + Sync>(
             format.is_stereo,
             format.sample_rate,
         )?),
-        #[cfg(any(feature = "minimp3", feature = "symphonia"))]
+        #[cfg(feature = "mp3")]
         AudioCompression::Mp3 => Box::new(Mp3Decoder::new(data)?),
         #[cfg(feature = "nellymoser")]
         AudioCompression::Nellymoser => {
@@ -313,23 +307,25 @@ impl Iterator for StreamTagReader {
                             // RESEARCHME: How does Flash Player actually determine when there is an audio gap or not?
                             // If an MP3 audio track has gaps, Flash Player will often play it out of sync (too early).
                             // Seems closely related to `stream_info.num_samples_per_block`.
-                            let num_samples =
-                                u16::from_le_bytes(audio_block[..2].try_into().unwrap());
+                            let num_samples = u16::from_le_bytes(
+                                audio_block[..2].try_into().expect("2 bytes fit into a u16"),
+                            );
                             self.mp3_samples_buffered += i32::from(num_samples);
                             audio_block = &audio_block[4..];
                         }
                         *audio_data = swf_data.to_subslice(audio_block);
-                        Ok(())
+                        Ok(ControlFlow::Continue)
                     }
                     TagCode::ShowFrame if compression == AudioCompression::Mp3 => {
                         self.mp3_samples_buffered -= i32::from(self.mp3_samples_per_block);
-                        Ok(())
+                        Ok(ControlFlow::Exit)
                     }
-                    _ => Ok(()),
+                    TagCode::ShowFrame => Ok(ControlFlow::Exit),
+                    _ => Ok(ControlFlow::Continue),
                 };
 
             let mut reader = self.swf_data.read_from(self.pos as u64);
-            let _ = crate::tag_utils::decode_tags(&mut reader, tag_callback, TagCode::ShowFrame);
+            let _ = crate::tag_utils::decode_tags(&mut reader, tag_callback);
             self.pos = reader.get_ref().as_ptr() as usize - swf_data.as_ref().as_ptr() as usize;
 
             // If we hit a SoundStreamBlock within this frame, return it. Otherwise, the stream should end.
@@ -338,7 +334,10 @@ impl Iterator for StreamTagReader {
             if found {
                 break Some(self.current_audio_data.clone());
             } else if compression != AudioCompression::Mp3
-                || self.mp3_samples_buffered <= 0
+                // FIXME: The next condition should logically end with `<= 0`.
+                // It was changed as a quick HACK to fix #7524 by not detecting an
+                // underrun too soon. We are still not yet sure what exactly to do here.
+                || self.mp3_samples_buffered <= -(self.mp3_samples_per_block as i32)
                 || reader.get_ref().is_empty()
             {
                 break None;
@@ -364,4 +363,10 @@ impl Read for StreamTagReader {
         self.current_audio_data.start += len;
         Ok(len)
     }
+}
+
+#[derive(Debug)]
+pub struct Mp3Metadata {
+    pub sample_rate: u16,
+    pub num_sample_frames: u32,
 }

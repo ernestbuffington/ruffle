@@ -32,7 +32,7 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn is_down<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -48,7 +48,7 @@ pub fn is_down<'gc>(
 }
 
 pub fn get_ascii<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -57,7 +57,7 @@ pub fn get_ascii<'gc>(
 }
 
 pub fn get_code<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -67,12 +67,12 @@ pub fn get_code<'gc>(
 
 pub fn create_key_object<'gc>(
     gc_context: MutationContext<'gc, '_>,
-    proto: Option<Object<'gc>>,
+    proto: Object<'gc>,
     fn_proto: Object<'gc>,
     broadcaster_functions: BroadcasterFunctions<'gc>,
     array_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let key = ScriptObject::new(gc_context, proto);
+    let key = ScriptObject::new(gc_context, Some(proto));
     broadcaster_functions.initialize(gc_context, key.into(), array_proto);
     define_properties_on(OBJECT_DECLS, gc_context, key, fn_proto);
     key.into()

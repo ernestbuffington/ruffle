@@ -20,10 +20,10 @@ use swf::Twips;
 
 /// Implements `flash.display.Sprite`'s instance constructor.
 pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         activation.super_init(this, &[])?;
 
@@ -44,30 +44,47 @@ pub fn instance_init<'gc>(
 
 /// Implements `flash.display.Sprite`'s class constructor.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
+}
+
+/// Implements `dropTarget`'s getter
+pub fn drop_target<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(mc) = this
+        .and_then(|o| o.as_display_object())
+        .and_then(|o| o.as_movie_clip())
+        .and_then(|o| o.drop_target())
+    {
+        return Ok(mc.object2());
+    }
+
+    Ok(Value::Null)
 }
 
 /// Implements `graphics`.
 pub fn graphics<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(mut this) = this {
         if let Some(dobj) = this.as_display_object() {
             // Lazily initialize the `Graphics` object in a hidden property.
             let graphics = match this.get_property(
-                &QName::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics").into(),
+                &Multiname::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics"),
                 activation,
             )? {
                 Value::Undefined | Value::Null => {
                     let graphics = Value::from(StageObject::graphics(activation, dobj)?);
                     this.set_property(
-                        &QName::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics").into(),
+                        &Multiname::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics"),
                         graphics,
                         activation,
                     )?;
@@ -84,10 +101,10 @@ pub fn graphics<'gc>(
 
 /// Implements `soundTransform`'s getter
 pub fn sound_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(dobj) = this.and_then(|o| o.as_display_object()) {
         let dobj_st = dobj.base().sound_transform().clone();
 
@@ -99,10 +116,10 @@ pub fn sound_transform<'gc>(
 
 /// Implements `soundTransform`'s setter
 pub fn set_sound_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(dobj) = this.and_then(|o| o.as_display_object()) {
         let as3_st = args
             .get(0)
@@ -119,10 +136,10 @@ pub fn set_sound_transform<'gc>(
 
 /// Implements `buttonMode`'s getter
 pub fn button_mode<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(mc) = this
         .and_then(|o| o.as_display_object())
         .and_then(|o| o.as_movie_clip())
@@ -135,10 +152,10 @@ pub fn button_mode<'gc>(
 
 /// Implements `buttonMode`'s setter
 pub fn set_button_mode<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(mc) = this
         .and_then(|o| o.as_display_object())
         .and_then(|o| o.as_movie_clip())
@@ -158,10 +175,10 @@ pub fn set_button_mode<'gc>(
 /// Starts dragging this display object, making it follow the cursor.
 /// Runs via the `startDrag` method or `StartDrag` AVM1 action.
 pub fn start_drag<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(display_object) = this.and_then(|this| this.as_display_object()) {
         let lock_center = args.get(0).map(|o| o.coerce_to_boolean()).unwrap_or(false);
 
@@ -194,12 +211,24 @@ pub fn start_drag<'gc>(
                 .get_property(&Multiname::public("height"), activation)?
                 .coerce_to_number(activation)?;
 
+            // Normalize the bounds.
+            let mut x_min = Twips::from_pixels(x);
+            let mut y_min = Twips::from_pixels(y);
+            let mut x_max = Twips::from_pixels(x + width);
+            let mut y_max = Twips::from_pixels(y + height);
+            if x_max.get() < x_min.get() {
+                std::mem::swap(&mut x_min, &mut x_max);
+            }
+            if y_max.get() < y_min.get() {
+                std::mem::swap(&mut y_min, &mut y_max);
+            }
+
             BoundingBox {
                 valid: true,
-                x_min: Twips::from_pixels(x),
-                y_min: Twips::from_pixels(y),
-                x_max: Twips::from_pixels(x + width),
-                y_max: Twips::from_pixels(y + height),
+                x_min,
+                y_min,
+                x_max,
+                y_max,
             }
         } else {
             // No constraints.
@@ -217,10 +246,10 @@ pub fn start_drag<'gc>(
 }
 
 fn stop_drag<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     // It doesn't matter which clip we call this on; it simply stops any active drag.
 
     // we might not have had an opportunity to call `update_drag`
@@ -232,17 +261,52 @@ fn stop_drag<'gc>(
     Ok(Value::Undefined)
 }
 
+/// Implements `useHandCursor`'s getter
+pub fn use_hand_cursor<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(mc) = this
+        .and_then(|this| this.as_display_object())
+        .and_then(|this| this.as_movie_clip())
+    {
+        return Ok(mc.use_hand_cursor().into());
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `useHandCursor`'s setter
+pub fn set_use_hand_cursor<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(mc) = this
+        .and_then(|this| this.as_display_object())
+        .and_then(|this| this.as_movie_clip())
+    {
+        mc.set_use_hand_cursor(
+            &mut activation.context,
+            args.get(0)
+                .cloned()
+                .unwrap_or(Value::Undefined)
+                .coerce_to_boolean(),
+        );
+    }
+
+    Ok(Value::Undefined)
+}
+
 /// Construct `Sprite`'s class.
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
         QName::new(Namespace::package("flash.display"), "Sprite"),
-        Some(
-            QName::new(
-                Namespace::package("flash.display"),
-                "DisplayObjectContainer",
-            )
-            .into(),
-        ),
+        Some(Multiname::new(
+            Namespace::package("flash.display"),
+            "DisplayObjectContainer",
+        )),
         Method::from_builtin(instance_init, "<Sprite instance initializer>", mc),
         Method::from_builtin(class_init, "<Sprite class initializer>", mc),
         mc,
@@ -258,12 +322,18 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         Option<NativeMethodImpl>,
     )] = &[
         ("graphics", Some(graphics), None),
+        ("dropTarget", Some(drop_target), None),
         (
             "soundTransform",
             Some(sound_transform),
             Some(set_sound_transform),
         ),
         ("buttonMode", Some(button_mode), Some(set_button_mode)),
+        (
+            "useHandCursor",
+            Some(use_hand_cursor),
+            Some(set_use_hand_cursor),
+        ),
     ];
     write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
 
@@ -274,7 +344,7 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
     // Slot for lazy-initialized Graphics object.
     write.define_instance_trait(Trait::from_slot(
         QName::new(Namespace::private(NS_RUFFLE_INTERNAL), "graphics"),
-        QName::new(Namespace::package("flash.display"), "Graphics").into(),
+        Multiname::new(Namespace::package("flash.display"), "Graphics"),
         None,
     ));
 

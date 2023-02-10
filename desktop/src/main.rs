@@ -1,3 +1,4 @@
+#![deny(clippy::unwrap_used)]
 // By default, Windows creates an additional console window for our program.
 //
 //
@@ -20,13 +21,16 @@ use clap::Parser;
 use isahc::{config::RedirectPolicy, prelude::*, HttpClient};
 use rfd::FileDialog;
 use ruffle_core::{
-    config::Letterbox, events::KeyCode, tag_utils::SwfMovie, Player, PlayerBuilder, PlayerEvent,
-    StageDisplayState, StaticCallstack, ViewportDimensions,
+    config::Letterbox, events::KeyCode, tag_utils::SwfMovie, LoadBehavior, Player, PlayerBuilder,
+    PlayerEvent, StageDisplayState, StaticCallstack, ViewportDimensions,
 };
+use ruffle_render::backend::RenderBackend;
+use ruffle_render::quality::StageQuality;
+use ruffle_render_wgpu::backend::WgpuRenderBackend;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
-use ruffle_render_wgpu::WgpuRenderBackend;
 use std::cell::RefCell;
 use std::io::Read;
+use std::panic::PanicInfo;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -37,54 +41,67 @@ use winit::event::{
     ElementState, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta, VirtualKeyCode,
     WindowEvent,
 };
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
 use winit::window::{Fullscreen, Icon, Window, WindowBuilder};
 
 thread_local! {
     static CALLSTACK: RefCell<Option<StaticCallstack>> = RefCell::default();
+    static RENDER_INFO: RefCell<Option<String>> = RefCell::default();
+    static SWF_INFO: RefCell<Option<String>> = RefCell::default();
 }
+
+#[cfg(feature = "tracy")]
+#[global_allocator]
+static GLOBAL: tracing_tracy::client::ProfiledAllocator<std::alloc::System> =
+    tracing_tracy::client::ProfiledAllocator::new(std::alloc::System, 0);
+
+static RUFFLE_VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version-info.txt"));
 
 #[derive(Parser, Debug)]
 #[clap(
     name = "Ruffle",
     author,
-    version = include_str!(concat!(env!("OUT_DIR"), "/version-info.txt")),
+    version = RUFFLE_VERSION,
 )]
 struct Opt {
-    /// Path to a Flash movie (SWF) to play.
-    #[clap(name = "FILE", value_parser)]
+    /// Path or URL of a Flash movie (SWF) to play.
+    #[clap(name = "FILE")]
     input_path: Option<PathBuf>,
 
     /// A "flashvars" parameter to provide to the movie.
     /// This can be repeated multiple times, for example -Pkey=value -Pfoo=bar.
-    #[clap(short = 'P', number_of_values = 1, action = clap::ArgAction::Append)]
+    #[clap(short = 'P', action = clap::ArgAction::Append)]
     parameters: Vec<String>,
 
     /// Type of graphics backend to use. Not all options may be supported by your current system.
     /// Default will attempt to pick the most supported graphics backend.
-    #[clap(long, short, default_value = "default", arg_enum, value_parser)]
+    #[clap(long, short, default_value = "default")]
     graphics: GraphicsBackend,
 
     /// Power preference for the graphics device used. High power usage tends to prefer dedicated GPUs,
     /// whereas a low power usage tends prefer integrated GPUs.
-    #[clap(long, short, default_value = "high", arg_enum, value_parser)]
+    #[clap(long, short, default_value = "high")]
     power: PowerPreference,
 
     /// Width of window in pixels.
-    #[clap(long, display_order = 1, value_parser)]
+    #[clap(long, display_order = 1)]
     width: Option<f64>,
 
     /// Height of window in pixels.
-    #[clap(long, display_order = 2, value_parser)]
+    #[clap(long, display_order = 2)]
     height: Option<f64>,
 
+    /// Default quality of the movie.
+    #[clap(long, short, default_value = "high")]
+    quality: StageQuality,
+
     /// Location to store a wgpu trace output
-    #[clap(long, value_parser)]
+    #[clap(long)]
     #[cfg(feature = "render_trace")]
     trace_path: Option<PathBuf>,
 
     /// Proxy to use when loading movies via URL.
-    #[clap(long, value_parser)]
+    #[clap(long)]
     proxy: Option<Url>,
 
     /// Replace all embedded HTTP URLs with HTTPS.
@@ -98,8 +115,24 @@ struct Opt {
     #[clap(long, action)]
     timedemo: bool,
 
+    /// Start application without ActionScript 3 warning.
     #[clap(long, action)]
     dont_warn_on_unsupported_content: bool,
+
+    #[clap(long, default_value = "streaming")]
+    load_behavior: LoadBehavior,
+
+    /// Specify how Ruffle should handle areas outside the movie stage.
+    #[clap(long, default_value = "on")]
+    letterbox: Letterbox,
+
+    /// Spoofs the root SWF URL provided to ActionScript.
+    #[clap(long, value_parser)]
+    spoof_url: Option<Url>,
+
+    /// The version of the player to emulate
+    #[clap(long)]
+    player_version: Option<u8>,
 }
 
 #[cfg(feature = "render_trace")]
@@ -143,16 +176,21 @@ fn parse_parameters(opt: &Opt) -> impl '_ + Iterator<Item = (String, String)> {
 
 fn pick_file() -> Option<PathBuf> {
     FileDialog::new()
-        .add_filter(".swf", &["swf"])
+        .add_filter("Flash Files", &["swf", "spl"])
+        .add_filter("All Files", &["*"])
         .set_title("Load a Flash File")
         .pick_file()
 }
 
 fn load_movie(url: &Url, opt: &Opt) -> Result<SwfMovie, Error> {
     let mut movie = if url.scheme() == "file" {
-        SwfMovie::from_path(url.to_file_path().unwrap(), None)
-            .map_err(|e| anyhow!(e.to_string()))
-            .context("Couldn't load swf")?
+        SwfMovie::from_path(
+            url.to_file_path()
+                .map_err(|_| anyhow!("Invalid swf path"))?,
+            None,
+        )
+        .map_err(|e| anyhow!(e.to_string()))
+        .context("Couldn't load swf")?
     } else {
         let proxy = opt.proxy.as_ref().and_then(|url| url.as_str().parse().ok());
         let builder = HttpClient::builder()
@@ -161,7 +199,7 @@ fn load_movie(url: &Url, opt: &Opt) -> Result<SwfMovie, Error> {
         let client = builder.build().context("Couldn't create HTTP client")?;
         let response = client
             .get(url.to_string())
-            .with_context(|| format!("Couldn't load URL {}", url))?;
+            .with_context(|| format!("Couldn't load URL {url}"))?;
         let mut buffer: Vec<u8> = Vec::new();
         response
             .into_body()
@@ -193,7 +231,7 @@ impl App {
             None => pick_file().map(std::borrow::Cow::Owned),
         };
         let movie_url = if let Some(path) = path {
-            Some(parse_url(&path).context("Couldn't load specified path")?)
+            parse_url(&path).context("Couldn't load specified path")?
         } else {
             shutdown();
             std::process::exit(0);
@@ -203,18 +241,14 @@ impl App {
         let icon =
             Icon::from_rgba(icon_bytes.to_vec(), 32, 32).context("Couldn't load app icon")?;
 
-        let event_loop: EventLoop<RuffleEvent> = EventLoop::with_user_event();
+        let event_loop = EventLoopBuilder::with_user_event().build();
 
-        let title = if let Some(movie_url) = &movie_url {
-            let filename = movie_url
-                .path_segments()
-                .and_then(|segments| segments.last())
-                .unwrap_or_else(|| movie_url.as_str());
-
-            format!("Ruffle - {}", filename)
-        } else {
-            "Ruffle".into()
-        };
+        let filename = movie_url
+            .path_segments()
+            .and_then(|segments| segments.last())
+            .unwrap_or_else(|| movie_url.as_str());
+        let title = format!("Ruffle - {filename}");
+        SWF_INFO.with(|i| *i.borrow_mut() = Some(filename.to_string()));
 
         let window = WindowBuilder::new()
             .with_visible(false)
@@ -228,13 +262,13 @@ impl App {
         match audio::CpalAudioBackend::new() {
             Ok(audio) => builder = builder.with_audio(audio),
             Err(e) => {
-                log::error!("Unable to create audio device: {}", e);
+                tracing::error!("Unable to create audio device: {}", e);
             }
         };
 
         let (executor, channel) = GlutinAsyncExecutor::new(event_loop.create_proxy());
         let navigator = navigator::ExternalNavigatorBackend::new(
-            movie_url.as_ref().unwrap().to_owned(),
+            movie_url.to_owned(),
             channel,
             event_loop.create_proxy(),
             opt.proxy.clone(),
@@ -251,38 +285,44 @@ impl App {
         )
         .map_err(|e| anyhow!(e.to_string()))
         .context("Couldn't create wgpu rendering backend")?;
+        RENDER_INFO.with(|i| *i.borrow_mut() = Some(renderer.debug_info().to_string()));
 
         let window = Rc::new(window);
+
+        if cfg!(feature = "software_video") {
+            builder =
+                builder.with_video(ruffle_video_software::backend::SoftwareVideoBackend::new());
+        }
 
         builder = builder
             .with_navigator(navigator)
             .with_renderer(renderer)
-            .with_storage(storage::DiskStorageBackend::new())
-            .with_ui(ui::DesktopUiBackend::new(window.clone()))
-            .with_software_video()
+            .with_storage(storage::DiskStorageBackend::new()?)
+            .with_ui(ui::DesktopUiBackend::new(window.clone())?)
             .with_autoplay(true)
-            .with_letterbox(Letterbox::On)
+            .with_letterbox(opt.letterbox)
             .with_warn_on_unsupported_content(!opt.dont_warn_on_unsupported_content)
-            .with_fullscreen(opt.fullscreen);
+            .with_fullscreen(opt.fullscreen)
+            .with_load_behavior(opt.load_behavior)
+            .with_spoofed_url(opt.spoof_url.clone().map(|url| url.to_string()))
+            .with_player_version(opt.player_version);
 
         let player = builder.build();
 
-        if let Some(movie_url) = movie_url {
-            let event_loop_proxy = event_loop.create_proxy();
-            let on_metadata = move |swf_header: &ruffle_core::swf::HeaderExt| {
-                let _ = event_loop_proxy.send_event(RuffleEvent::OnMetadata(swf_header.clone()));
-            };
+        let event_loop_proxy = event_loop.create_proxy();
+        let on_metadata = move |swf_header: &ruffle_core::swf::HeaderExt| {
+            let _ = event_loop_proxy.send_event(RuffleEvent::OnMetadata(swf_header.clone()));
+        };
 
-            player.lock().unwrap().fetch_root_movie(
-                movie_url.to_string(),
-                parse_parameters(&opt).collect(),
-                Box::new(on_metadata),
-            );
+        player.lock().expect("Cannot reenter").fetch_root_movie(
+            movie_url.to_string(),
+            parse_parameters(&opt).collect(),
+            Box::new(on_metadata),
+        );
 
-            CALLSTACK.with(|callstack| {
-                *callstack.borrow_mut() = Some(player.lock().unwrap().callstack());
-            })
-        }
+        CALLSTACK.with(|callstack| {
+            *callstack.borrow_mut() = Some(player.lock().expect("Cannot reenter").callstack());
+        });
 
         Ok(Self {
             opt,
@@ -320,7 +360,7 @@ impl App {
                             ..
                         } if modifiers.alt() => {
                             if !fullscreen_down {
-                                self.player.lock().unwrap().update(|uc| {
+                                self.player.lock().expect("Cannot reenter").update(|uc| {
                                     uc.stage.toggle_display_state(uc);
                                 });
                             }
@@ -338,7 +378,7 @@ impl App {
                             state: ElementState::Pressed,
                             virtual_keycode: Some(VirtualKeyCode::Escape),
                             ..
-                        } => self.player.lock().unwrap().update(|uc| {
+                        } => self.player.lock().expect("Cannot reenter").update(|uc| {
                             uc.stage.set_display_state(uc, StageDisplayState::Normal);
                         }),
                         _ => (),
@@ -347,7 +387,10 @@ impl App {
 
                 match event {
                     winit::event::Event::LoopDestroyed => {
-                        self.player.lock().unwrap().flush_shared_objects();
+                        self.player
+                            .lock()
+                            .expect("Cannot reenter")
+                            .flush_shared_objects();
                         shutdown();
                         return;
                     }
@@ -358,7 +401,7 @@ impl App {
                         let dt = new_time.duration_since(time).as_micros();
                         if dt > 0 {
                             time = new_time;
-                            let mut player_lock = self.player.lock().unwrap();
+                            let mut player_lock = self.player.lock().expect("Cannot reenter");
                             player_lock.tick(dt as f64 / 1000.0);
                             next_frame_time = new_time + player_lock.time_til_next_frame();
                             if player_lock.needs_render() {
@@ -371,7 +414,11 @@ impl App {
                     winit::event::Event::RedrawRequested(_) => {
                         // Don't render when minimized to avoid potential swap chain errors in `wgpu`.
                         if !minimized {
-                            self.player.lock().unwrap().render();
+                            self.player.lock().expect("Cannot reenter").render();
+                            #[cfg(feature = "tracy")]
+                            tracing_tracy::client::Client::running()
+                                .expect("tracy client must be running")
+                                .frame_mark();
                         }
                     }
 
@@ -385,7 +432,7 @@ impl App {
                             minimized = size.width == 0 && size.height == 0;
 
                             let viewport_scale_factor = self.window.scale_factor();
-                            let mut player_lock = self.player.lock().unwrap();
+                            let mut player_lock = self.player.lock().expect("Cannot reenter");
                             player_lock.set_viewport_dimensions(ViewportDimensions {
                                 width: size.width,
                                 height: size.height,
@@ -394,7 +441,7 @@ impl App {
                             self.window.request_redraw();
                         }
                         WindowEvent::CursorMoved { position, .. } => {
-                            let mut player_lock = self.player.lock().unwrap();
+                            let mut player_lock = self.player.lock().expect("Cannot reenter");
                             mouse_pos = position;
                             let event = PlayerEvent::MouseMove {
                                 x: position.x,
@@ -407,7 +454,7 @@ impl App {
                         }
                         WindowEvent::MouseInput { button, state, .. } => {
                             use ruffle_core::events::MouseButton as RuffleMouseButton;
-                            let mut player_lock = self.player.lock().unwrap();
+                            let mut player_lock = self.player.lock().expect("Cannot reenter");
                             let x = mouse_pos.x;
                             let y = mouse_pos.y;
                             let button = match button {
@@ -427,7 +474,7 @@ impl App {
                         }
                         WindowEvent::MouseWheel { delta, .. } => {
                             use ruffle_core::events::MouseWheelDelta;
-                            let mut player_lock = self.player.lock().unwrap();
+                            let mut player_lock = self.player.lock().expect("Cannot reenter");
                             let delta = match delta {
                                 MouseScrollDelta::LineDelta(_, dy) => {
                                     MouseWheelDelta::Lines(dy.into())
@@ -441,7 +488,7 @@ impl App {
                             }
                         }
                         WindowEvent::CursorLeft { .. } => {
-                            let mut player_lock = self.player.lock().unwrap();
+                            let mut player_lock = self.player.lock().expect("Cannot reenter");
                             player_lock.handle_event(PlayerEvent::MouseLeave);
                             if player_lock.needs_render() {
                                 self.window.request_redraw();
@@ -450,7 +497,7 @@ impl App {
                         // Allow KeyboardInput.modifiers (ModifiersChanged event not functional yet).
                         #[allow(deprecated)]
                         WindowEvent::KeyboardInput { input, .. } => {
-                            let mut player_lock = self.player.lock().unwrap();
+                            let mut player_lock = self.player.lock().expect("Cannot reenter");
                             if let Some(key) = input.virtual_keycode {
                                 let key_code = winit_to_ruffle_key_code(key);
                                 let key_char = winit_key_to_char(
@@ -472,7 +519,7 @@ impl App {
                             }
                         }
                         WindowEvent::ReceivedCharacter(codepoint) => {
-                            let mut player_lock = self.player.lock().unwrap();
+                            let mut player_lock = self.player.lock().expect("Cannot reenter");
                             let event = PlayerEvent::TextInput { codepoint };
                             player_lock.handle_event(event);
                             if player_lock.needs_render() {
@@ -487,13 +534,8 @@ impl App {
                         .expect("active executor reference")
                         .poll_all(),
                     winit::event::Event::UserEvent(RuffleEvent::OnMetadata(swf_header)) => {
-                        // TODO: Re-use `SwfMovie::width` and `SwfMovie::height`.
-                        let movie_width = (swf_header.stage_size().x_max
-                            - swf_header.stage_size().x_min)
-                            .to_pixels();
-                        let movie_height = (swf_header.stage_size().y_max
-                            - swf_header.stage_size().y_min)
-                            .to_pixels();
+                        let movie_width = swf_header.stage_size().width().to_pixels();
+                        let movie_height = swf_header.stage_size().height().to_pixels();
 
                         let window_size: Size = match (self.opt.width, self.opt.height) {
                             (None, None) => LogicalSize::new(movie_width, movie_height).into(),
@@ -521,7 +563,7 @@ impl App {
 
                         let viewport_size = self.window.inner_size();
                         let viewport_scale_factor = self.window.scale_factor();
-                        let mut player_lock = self.player.lock().unwrap();
+                        let mut player_lock = self.player.lock().expect("Cannot reenter");
                         player_lock.set_viewport_dimensions(ViewportDimensions {
                             width: viewport_size.width,
                             height: viewport_size.height,
@@ -756,6 +798,11 @@ fn winit_key_to_char(key_code: VirtualKeyCode, is_shift_down: bool) -> Option<ch
         (VirtualKeyCode::Numpad7, false) => '7',
         (VirtualKeyCode::Numpad8, false) => '8',
         (VirtualKeyCode::Numpad9, false) => '9',
+        (VirtualKeyCode::NumpadEnter, _) => '\r',
+
+        (VirtualKeyCode::Tab, _) => '\t',
+        (VirtualKeyCode::Return, _) => '\r',
+        (VirtualKeyCode::Back, _) => '\u{0008}',
 
         _ => return None,
     })
@@ -783,15 +830,20 @@ fn run_timedemo(opt: Opt) -> Result<(), Error> {
     .map_err(|e| anyhow!(e.to_string()))
     .context("Couldn't create wgpu rendering backend")?;
 
-    let player = PlayerBuilder::new()
+    let mut builder = PlayerBuilder::new();
+
+    if cfg!(feature = "software_video") {
+        builder = builder.with_video(ruffle_video_software::backend::SoftwareVideoBackend::new());
+    }
+
+    let player = builder
         .with_renderer(renderer)
-        .with_software_video()
         .with_movie(movie)
         .with_viewport_dimensions(viewport_width, viewport_height, viewport_scale_factor)
         .with_autoplay(true)
         .build();
 
-    let mut player_lock = player.lock().unwrap();
+    let mut player_lock = player.lock().expect("Cannot reenter");
 
     println!("Running {}...", path.to_string_lossy());
 
@@ -806,7 +858,7 @@ fn run_timedemo(opt: Opt) -> Result<(), Error> {
     let end = Instant::now();
     let duration = end.duration_since(start);
 
-    println!("Ran {} frames in {}s.", num_frames, duration.as_secs_f32());
+    println!("Ran {num_frames} frames in {}s.", duration.as_secs_f32());
 
     Ok(())
 }
@@ -824,18 +876,84 @@ fn init() {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         prev_hook(info);
-        panic_hook();
+        panic_hook(info);
     }));
 
-    env_logger::init();
+    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .finish();
+    #[cfg(feature = "tracy")]
+    let subscriber = {
+        use tracing_subscriber::layer::SubscriberExt;
+        let tracy_subscriber = tracing_tracy::TracyLayer::new();
+        subscriber.with(tracy_subscriber)
+    };
+    tracing::subscriber::set_global_default(subscriber).expect("Couldn't set up global subscriber");
 }
 
-fn panic_hook() {
+fn panic_hook(info: &PanicInfo) {
     CALLSTACK.with(|callstack| {
         if let Some(callstack) = &*callstack.borrow() {
-            callstack.avm2(|callstack| println!("AVM2 stack trace: {}", callstack))
+            callstack.avm2(|callstack| println!("AVM2 stack trace: {callstack}"))
         }
     });
+
+    // [NA] Let me just point out that PanicInfo::message() exists but isn't stable and that sucks.
+    let panic_text = info.to_string();
+    let message = if let Some(text) = panic_text.strip_prefix("panicked at '") {
+        let location = info.location().map(|l| l.to_string()).unwrap_or_default();
+        if let Some(text) = text.strip_suffix(&format!("', {location}")) {
+            text.trim()
+        } else {
+            text.trim()
+        }
+    } else {
+        panic_text.trim()
+    };
+    if rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Ruffle")
+        .set_description(&format!(
+            "Ruffle has encountered a fatal error, this is a bug.\n\n\
+            {message}\n\n\
+            Please report this to us so that we can fix it. Thank you!\n\
+            Pressing Yes will open a browser window."
+        ))
+        .set_buttons(rfd::MessageButtons::YesNo)
+        .show()
+    {
+        let mut params = vec![
+            ("panic_text", info.to_string()),
+            ("platform", "Desktop app".to_string()),
+            ("operating_system", os_info::get().to_string()),
+            ("ruffle_version", RUFFLE_VERSION.to_string()),
+        ];
+        let mut extra_info = vec![];
+        SWF_INFO.with(|i| {
+            if let Some(swf_name) = i.take() {
+                extra_info.push(format!("Filename: {swf_name}\n"));
+                params.push(("title", format!("Crash on {swf_name}")));
+            }
+        });
+        CALLSTACK.with(|callstack| {
+            if let Some(callstack) = &*callstack.borrow() {
+                callstack.avm2(|callstack| {
+                    extra_info.push(format!("### AVM2 Callstack\n```{callstack}\n```\n"));
+                });
+            }
+        });
+        RENDER_INFO.with(|i| {
+            if let Some(render_info) = i.take() {
+                extra_info.push(format!("### Render Info\n{render_info}\n"));
+            }
+        });
+        if !extra_info.is_empty() {
+            params.push(("extra_info", extra_info.join("\n")));
+        }
+        if let Ok(url) = Url::parse_with_params("https://github.com/ruffle-rs/ruffle/issues/new?assignees=&labels=bug&template=crash_report.yml", &params) {
+            let _ = webbrowser::open(url.as_str());
+        }
+    }
 }
 
 fn shutdown() {

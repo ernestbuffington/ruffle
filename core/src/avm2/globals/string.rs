@@ -7,6 +7,7 @@ use crate::avm2::object::{primitive_allocator, Object, TObject};
 use crate::avm2::regexp::RegExpFlags;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
 use crate::avm2::{ArrayObject, ArrayStorage};
@@ -16,10 +17,10 @@ use std::iter;
 
 /// Implements `String`'s instance initializer.
 pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         activation.super_init(this, &[])?;
 
@@ -39,19 +40,19 @@ pub fn instance_init<'gc>(
 
 /// Implements `String`'s class initializer.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
 }
 
 /// Implements `length` property's getter
 fn length<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Value::String(s) = this.value_of(activation.context.gc_context)? {
             return Ok(s.len().into());
@@ -63,10 +64,10 @@ fn length<'gc>(
 
 /// Implements `String.charAt`
 fn char_at<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Value::String(s) = this.value_of(activation.context.gc_context)? {
             // This function takes Number, so if we use coerce_to_i32 instead of coerce_to_number, the value may overflow.
@@ -93,10 +94,10 @@ fn char_at<'gc>(
 
 /// Implements `String.charCodeAt`
 fn char_code_at<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         if let Value::String(s) = this.value_of(activation.context.gc_context)? {
             // This function takes Number, so if we use coerce_to_i32 instead of coerce_to_number, the value may overflow.
@@ -119,10 +120,10 @@ fn char_code_at<'gc>(
 
 /// Implements `String.concat`
 fn concat<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let mut ret = WString::from(Value::from(this).coerce_to_string(activation)?.as_wstr());
         for arg in args {
@@ -137,10 +138,10 @@ fn concat<'gc>(
 
 /// Implements `String.fromCharCode`
 fn from_char_code<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let mut out = WString::with_capacity(args.len(), false);
     for arg in args {
         let i = arg.coerce_to_u32(activation)? as u16;
@@ -155,10 +156,10 @@ fn from_char_code<'gc>(
 
 /// Implements `String.indexOf`
 fn index_of<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let this = Value::from(this).coerce_to_string(activation)?;
         let pattern = match args.get(0) {
@@ -183,10 +184,10 @@ fn index_of<'gc>(
 
 /// Implements `String.lastIndexOf`
 fn last_index_of<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let this = Value::from(this).coerce_to_string(activation)?;
         let pattern = match args.get(0) {
@@ -213,12 +214,47 @@ fn last_index_of<'gc>(
     Ok(Value::Undefined)
 }
 
-/// Implements `String.match`
-fn match_s<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+/// Implements String.localeCompare
+/// NOTE: Despite the declaration of this function in the documentation, FP does not support multiple strings in comparison
+fn locale_compare<'gc>(
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(this) = this {
+        let this = Value::from(this).coerce_to_string(activation)?;
+        let other = match args.get(0) {
+            None => Value::Undefined.coerce_to_string(activation)?,
+            Some(s) => s.clone().coerce_to_string(activation)?,
+        };
+
+        for (tc, oc) in this.iter().zip(other.iter()) {
+            let res = (tc as i32) - (oc as i32);
+            if res != 0 {
+                return Ok(Value::Integer(res));
+            }
+        }
+
+        if this.len() < other.len() {
+            return Ok(Value::Integer(-1));
+        }
+
+        if this.len() > other.len() {
+            return Ok(Value::Integer(1));
+        }
+
+        return Ok(Value::Integer(0));
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `String.match`
+fn match_s<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
     if let (Some(this), pattern) = (this, args.get(0).unwrap_or(&Value::Undefined)) {
         let this = Value::from(this).coerce_to_string(activation)?;
 
@@ -282,10 +318,10 @@ fn match_s<'gc>(
 
 /// Implements `String.replace`
 fn replace<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let this = Value::from(this).coerce_to_string(activation)?;
         let pattern = args.get(0).unwrap_or(&Value::Undefined);
@@ -327,12 +363,49 @@ fn replace<'gc>(
     Ok(Value::Undefined)
 }
 
-/// Implements `String.slice`
-fn slice<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+/// Implements `String.search`
+fn search<'gc>(
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let (Some(this), pattern) = (this, args.get(0).unwrap_or(&Value::Undefined)) {
+        let this = Value::from(this).coerce_to_string(activation)?;
+
+        let regexp_class = activation.avm2().classes().regexp;
+        let pattern = if !pattern.is_of_type(activation, regexp_class) {
+            let string = pattern.coerce_to_string(activation)?;
+            regexp_class.construct(activation, &[Value::String(string)])?
+        } else {
+            pattern.coerce_to_object(activation)?
+        };
+
+        if let Some(mut regexp) = pattern.as_regexp_mut(activation.context.gc_context) {
+            let old = regexp.last_index();
+            regexp.set_last_index(0);
+            if let Some(result) = regexp.exec(this) {
+                let found_index = result.groups().flatten().next().unwrap_or_default().start as i32;
+
+                regexp.set_last_index(old);
+                return Ok(Value::Integer(found_index));
+            } else {
+                regexp.set_last_index(old);
+                // If the pattern parameter is a String or a non-global regular expression
+                // and no match is found, the method returns -1
+                return Ok(Value::Integer(-1));
+            }
+        };
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// Implements `String.slice`
+fn slice<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let this = Value::from(this).coerce_to_string(activation)?;
         let start_index = match args.get(0) {
@@ -361,10 +434,10 @@ fn slice<'gc>(
 
 /// Implements `String.split`
 fn split<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let delimiter = args.get(0).unwrap_or(&Value::Undefined);
         if matches!(delimiter, Value::Undefined) {
@@ -421,10 +494,10 @@ fn split<'gc>(
 
 /// Implements `String.substr`
 fn substr<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let this_val = Value::from(this);
         let this = this_val.coerce_to_string(activation)?;
@@ -460,10 +533,10 @@ fn substr<'gc>(
 
 /// Implements `String.substring`
 fn substring<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let this_val = Value::from(this);
         let this = this_val.coerce_to_string(activation)?;
@@ -499,10 +572,10 @@ fn substring<'gc>(
 
 /// Implements `String.toLowerCase`
 fn to_lower_case<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let this_val = Value::from(this);
         let this = this_val.coerce_to_string(activation)?;
@@ -519,10 +592,10 @@ fn to_lower_case<'gc>(
 
 /// Implements `String.toUpperCase`
 fn to_upper_case<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let this_val = Value::from(this);
         let this = this_val.coerce_to_string(activation)?;
@@ -541,7 +614,7 @@ fn to_upper_case<'gc>(
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
         QName::new(Namespace::public(), "String"),
-        Some(QName::new(Namespace::public(), "Object").into()),
+        Some(Multiname::public("Object")),
         Method::from_builtin(instance_init, "<String instance initializer>", mc),
         Method::from_builtin(class_init, "<String class initializer>", mc),
         mc,
@@ -564,12 +637,16 @@ pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>
         ("concat", concat),
         ("indexOf", index_of),
         ("lastIndexOf", last_index_of),
+        ("localeCompare", locale_compare),
         ("match", match_s),
         ("replace", replace),
+        ("search", search),
         ("slice", slice),
         ("split", split),
         ("substr", substr),
         ("substring", substring),
+        ("toLocaleLowerCase", to_lower_case),
+        ("toLocaleUpperCase", to_upper_case),
         ("toLowerCase", to_lower_case),
         ("toUpperCase", to_upper_case),
     ];

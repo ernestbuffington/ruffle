@@ -1,10 +1,11 @@
 //! Function prototype
 
+use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{ExecutionName, ExecutionReason};
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{activation::Activation, AvmString};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
+use crate::string::AvmString;
 use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
@@ -14,7 +15,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 
 /// Implements `new Function()`
 pub fn constructor<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -23,7 +24,7 @@ pub fn constructor<'gc>(
 
 /// Implements `Function()`
 pub fn function<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -37,12 +38,12 @@ pub fn function<'gc>(
 
 /// Implements `Function.prototype.call`
 pub fn call<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     func: Object<'gc>,
     myargs: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = match myargs.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => activation.context.avm1.globals,
+        Value::Undefined | Value::Null => activation.context.avm1.global_object(),
         this_val => this_val.coerce_to_object(activation),
     };
     let empty = [];
@@ -68,12 +69,12 @@ pub fn call<'gc>(
 
 /// Implements `Function.prototype.apply`
 pub fn apply<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     func: Object<'gc>,
     myargs: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let this = match myargs.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => activation.context.avm1.globals,
+        Value::Undefined | Value::Null => activation.context.avm1.global_object(),
         this_val => this_val.coerce_to_object(activation),
     };
     let args_object = myargs.get(1).cloned().unwrap_or(Value::Undefined);

@@ -1,3 +1,4 @@
+use anyhow::{Context, Error};
 use ruffle_core::backend::storage::StorageBackend;
 use std::fs;
 use std::fs::File;
@@ -10,22 +11,24 @@ pub struct DiskStorageBackend {
 }
 
 impl DiskStorageBackend {
-    pub fn new() -> Self {
-        let base_path = dirs::data_local_dir().unwrap().join("ruffle");
+    pub fn new() -> Result<Self, Error> {
+        let base_path = dirs::data_local_dir()
+            .context("Couldn't find a valid data_local dir")?
+            .join("ruffle");
         let shared_objects_path = base_path.join("SharedObjects");
 
         // Create a base dir if one doesn't exist yet
         if !shared_objects_path.exists() {
-            log::info!("Creating storage dir");
+            tracing::info!("Creating storage dir");
             if let Err(r) = fs::create_dir_all(&base_path) {
-                log::warn!("Unable to create storage dir {}", r);
+                tracing::warn!("Unable to create storage dir {}", r);
             }
         }
 
-        DiskStorageBackend {
+        Ok(DiskStorageBackend {
             base_path,
             shared_objects_path,
-        }
+        })
     }
 
     /// Verifies that the path contains no `..` components to prevent accessing files outside of the Ruffle directory.
@@ -34,7 +37,7 @@ impl DiskStorageBackend {
     }
 
     fn get_shared_object_path(&self, name: &str) -> PathBuf {
-        self.shared_objects_path.join(format!("{}.sol", name))
+        self.shared_objects_path.join(format!("{name}.sol"))
     }
 
     fn get_back_compat_shared_object_path(&self, name: &str) -> PathBuf {
@@ -58,13 +61,13 @@ impl StorageBackend for DiskStorageBackend {
                 match std::fs::read(path) {
                     Ok(data) => Some(data),
                     Err(e) => {
-                        log::warn!("Unable to read file {:?}", e);
+                        tracing::warn!("Unable to read file {:?}", e);
                         None
                     }
                 }
             }
             Err(e) => {
-                log::warn!("Unable to read file {:?}", e);
+                tracing::warn!("Unable to read file {:?}", e);
                 None
             }
         }
@@ -78,7 +81,7 @@ impl StorageBackend for DiskStorageBackend {
         if let Some(parent_dir) = path.parent() {
             if !parent_dir.exists() {
                 if let Err(r) = fs::create_dir_all(&parent_dir) {
-                    log::warn!("Unable to create storage dir {}", r);
+                    tracing::warn!("Unable to create storage dir {}", r);
                     return false;
                 }
             }
@@ -87,14 +90,14 @@ impl StorageBackend for DiskStorageBackend {
         match File::create(path) {
             Ok(mut file) => {
                 if let Err(r) = file.write_all(value) {
-                    log::warn!("Unable to write file content {:?}", r);
+                    tracing::warn!("Unable to write file content {:?}", r);
                     false
                 } else {
                     true
                 }
             }
             Err(r) => {
-                log::warn!("Unable to save file {:?}", r);
+                tracing::warn!("Unable to save file {:?}", r);
                 false
             }
         }

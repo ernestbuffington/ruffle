@@ -3,7 +3,7 @@ use crate::matrix::Matrix;
 use smallvec::SmallVec;
 use swf::{CharacterId, FillStyle, LineStyle, Shape, ShapeRecord, Twips};
 
-pub fn calculate_shape_bounds(shape_records: &[swf::ShapeRecord]) -> swf::Rectangle {
+pub fn calculate_shape_bounds(shape_records: &[swf::ShapeRecord]) -> swf::Rectangle<Twips> {
     let mut bounds = swf::Rectangle {
         x_min: Twips::new(i32::MAX),
         y_min: Twips::new(i32::MAX),
@@ -178,14 +178,14 @@ impl PathSegment {
         self.points.len() <= 1
     }
 
-    fn start(&self) -> (Twips, Twips) {
-        let pt = &self.points.first().unwrap();
-        (pt.x, pt.y)
+    fn start(&self) -> Option<(Twips, Twips)> {
+        let pt = &self.points.first()?;
+        Some((pt.x, pt.y))
     }
 
-    fn end(&self) -> (Twips, Twips) {
-        let pt = &self.points.last().unwrap();
-        (pt.x, pt.y)
+    fn end(&self) -> Option<(Twips, Twips)> {
+        let pt = &self.points.last()?;
+        Some((pt.x, pt.y))
     }
 
     fn is_closed(&self) -> bool {
@@ -195,7 +195,7 @@ impl PathSegment {
     fn to_draw_commands(&self) -> impl '_ + Iterator<Item = DrawCommand> {
         assert!(!self.is_empty());
         let mut i = self.points.iter();
-        let first = i.next().unwrap();
+        let first = i.next().expect("Points should not be empty");
         std::iter::once(DrawCommand::MoveTo {
             x: first.x,
             y: first.y,
@@ -1269,9 +1269,7 @@ fn solve_cubic(a: f64, b: f64, c: f64, d: f64) -> SmallVec<[f64; 3]> {
         let t0 = r * f64::cos(theta / 3.0) - offset;
         let t1 = r * f64::cos((theta + 2.0 * std::f64::consts::PI) / 3.0) - offset;
         let t2 = r * f64::cos((theta + 4.0 * std::f64::consts::PI) / 3.0) - offset;
-        roots.push(t0);
-        roots.push(t1);
-        roots.push(t2);
+        roots.extend([t0, t1, t2]);
     } else {
         let gamma1 = f64::cbrt(q + f64::sqrt(-disc));
         let gamma2 = f64::cbrt(q - f64::sqrt(-disc));

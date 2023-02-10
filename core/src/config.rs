@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// When letterboxed, black bars will be rendered around the exterior
 /// margins of the content.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Collect, Serialize, Deserialize)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Collect, Serialize, Deserialize)]
 #[collect(require_static)]
 #[serde(rename = "letterbox")]
 pub enum Letterbox {
@@ -16,7 +17,6 @@ pub enum Letterbox {
 
     /// The content will only be letterboxed if the content is running fullscreen.
     #[serde(rename = "fullscreen")]
-    #[default]
     Fullscreen,
 
     /// The content will always be letterboxed.

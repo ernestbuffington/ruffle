@@ -2,18 +2,16 @@ use crate::avm2::activation::Activation;
 use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
 use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{
-    ClassObject, FunctionObject, NamespaceObject, Object, ScriptObject, TObject,
-};
+use crate::avm2::object::{ClassObject, FunctionObject, Object, ScriptObject, TObject};
 use crate::avm2::scope::{Scope, ScopeChain};
 use crate::avm2::script::Script;
-use crate::avm2::value::Value;
 use crate::avm2::Avm2;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
 use crate::string::AvmString;
-use crate::tag_utils::{self, SwfMovie, SwfSlice, SwfStream};
+use crate::tag_utils::{self, ControlFlow, SwfMovie, SwfSlice, SwfStream};
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::sync::Arc;
 use swf::TagCode;
@@ -22,7 +20,8 @@ mod array;
 mod boolean;
 mod class;
 mod date;
-mod flash;
+mod error;
+pub mod flash;
 mod function;
 mod global_scope;
 mod int;
@@ -87,7 +86,6 @@ pub struct SystemClasses<'gc> {
     pub bitmapdata: ClassObject<'gc>,
     pub date: ClassObject<'gc>,
     pub qname: ClassObject<'gc>,
-    pub sharedobject: ClassObject<'gc>,
     pub mouseevent: ClassObject<'gc>,
     pub progressevent: ClassObject<'gc>,
     pub textevent: ClassObject<'gc>,
@@ -102,6 +100,21 @@ pub struct SystemClasses<'gc> {
     pub rectangle: ClassObject<'gc>,
     pub keyboardevent: ClassObject<'gc>,
     pub point: ClassObject<'gc>,
+    pub rangeerror: ClassObject<'gc>,
+    pub referenceerror: ClassObject<'gc>,
+    pub argumenterror: ClassObject<'gc>,
+    pub typeerror: ClassObject<'gc>,
+    pub verifyerror: ClassObject<'gc>,
+    pub ioerror: ClassObject<'gc>,
+    pub eoferror: ClassObject<'gc>,
+    pub uncaughterrorevents: ClassObject<'gc>,
+    pub statictext: ClassObject<'gc>,
+    pub textlinemetrics: ClassObject<'gc>,
+    pub stage3d: ClassObject<'gc>,
+    pub context3d: ClassObject<'gc>,
+    pub indexbuffer3d: ClassObject<'gc>,
+    pub vertexbuffer3d: ClassObject<'gc>,
+    pub program3d: ClassObject<'gc>,
 }
 
 impl<'gc> SystemClasses<'gc> {
@@ -158,7 +171,6 @@ impl<'gc> SystemClasses<'gc> {
             bitmapdata: object,
             date: object,
             qname: object,
-            sharedobject: object,
             mouseevent: object,
             progressevent: object,
             textevent: object,
@@ -173,18 +185,33 @@ impl<'gc> SystemClasses<'gc> {
             rectangle: object,
             keyboardevent: object,
             point: object,
+            rangeerror: object,
+            referenceerror: object,
+            argumenterror: object,
+            typeerror: object,
+            verifyerror: object,
+            ioerror: object,
+            eoferror: object,
+            uncaughterrorevents: object,
+            statictext: object,
+            textlinemetrics: object,
+            stage3d: object,
+            context3d: object,
+            indexbuffer3d: object,
+            vertexbuffer3d: object,
+            program3d: object,
         }
     }
 }
 
 /// Add a free-function builtin to the global scope.
 fn function<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     package: impl Into<AvmString<'gc>>,
     name: &'static str,
     nf: NativeMethodImpl,
     script: Script<'gc>,
-) -> Result<(), Error> {
+) -> Result<(), Error<'gc>> {
     let (_, mut global, mut domain) = script.init();
     let mc = activation.context.gc_context;
     let scope = activation.create_scopechain();
@@ -207,7 +234,7 @@ fn dynamic_class<'gc>(
     script: Script<'gc>,
     // The `ClassObject` of the `Class` class
     class_class: ClassObject<'gc>,
-) -> Result<(), Error> {
+) -> Result<(), Error<'gc>> {
     let (_, mut global, mut domain) = script.init();
     let class = class_object.inner_class_definition();
     let name = class.read().name();
@@ -221,15 +248,15 @@ fn dynamic_class<'gc>(
 /// This function returns the class object and class prototype as a class, which
 /// may be stored in `SystemClasses`
 fn class<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     class_def: GcCell<'gc, Class<'gc>>,
     script: Script<'gc>,
-) -> Result<ClassObject<'gc>, Error> {
+) -> Result<ClassObject<'gc>, Error<'gc>> {
     let (_, mut global, mut domain) = script.init();
 
     let class_read = class_def.read();
     let super_class = if let Some(sc_name) = class_read.super_class_name() {
-        let super_class: Result<Object<'gc>, Error> = activation
+        let super_class: Result<Object<'gc>, Error<'gc>> = activation
             .resolve_definition(sc_name)
             .ok()
             .and_then(|v| v)
@@ -268,41 +295,6 @@ fn class<'gc>(
     Ok(class_object)
 }
 
-/// Add a builtin constant to the global scope.
-fn constant<'gc>(
-    mc: MutationContext<'gc, '_>,
-    package: impl Into<AvmString<'gc>>,
-    name: impl Into<AvmString<'gc>>,
-    value: Value<'gc>,
-    script: Script<'gc>,
-    class: ClassObject<'gc>,
-) -> Result<(), Error> {
-    let (_, mut global, mut domain) = script.init();
-    let name = QName::new(Namespace::package(package), name);
-    domain.export_definition(name, script, mc)?;
-    global.install_const_late(mc, name, value, class);
-
-    Ok(())
-}
-
-fn namespace<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
-    package: impl Into<AvmString<'gc>>,
-    name: impl Into<AvmString<'gc>>,
-    uri: impl Into<AvmString<'gc>>,
-    script: Script<'gc>,
-) -> Result<(), Error> {
-    let namespace = NamespaceObject::from_namespace(activation, Namespace::Namespace(uri.into()))?;
-    constant(
-        activation.context.gc_context,
-        package,
-        name,
-        namespace.into(),
-        script,
-        activation.avm2().classes().namespace,
-    )
-}
-
 macro_rules! avm2_system_class {
     ($field:ident, $activation:ident, $class:expr, $script:expr) => {
         let class_object = class($activation, $class, $script)?;
@@ -319,9 +311,9 @@ macro_rules! avm2_system_class {
 /// stored on the AVM. All relevant declarations will also be attached to the
 /// given domain.
 pub fn load_player_globals<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     domain: Domain<'gc>,
-) -> Result<(), Error> {
+) -> Result<(), Error<'gc>> {
     let mc = activation.context.gc_context;
 
     let globals = ScriptObject::custom_object(activation.context.gc_context, None, None);
@@ -421,17 +413,49 @@ pub fn load_player_globals<'gc>(
     avm2_system_class!(array, activation, array::create_class(mc), script);
 
     function(activation, "", "trace", toplevel::trace, script)?;
+    function(
+        activation,
+        "__ruffle__",
+        "log_warn",
+        toplevel::log_warn,
+        script,
+    )?;
+    function(
+        activation,
+        "__ruffle__",
+        "stub_method",
+        toplevel::stub_method,
+        script,
+    )?;
+    function(
+        activation,
+        "__ruffle__",
+        "stub_getter",
+        toplevel::stub_getter,
+        script,
+    )?;
+    function(
+        activation,
+        "__ruffle__",
+        "stub_setter",
+        toplevel::stub_setter,
+        script,
+    )?;
+    function(
+        activation,
+        "__ruffle__",
+        "stub_constructor",
+        toplevel::stub_constructor,
+        script,
+    )?;
     function(activation, "", "isFinite", toplevel::is_finite, script)?;
     function(activation, "", "isNaN", toplevel::is_nan, script)?;
     function(activation, "", "parseInt", toplevel::parse_int, script)?;
     function(activation, "", "parseFloat", toplevel::parse_float, script)?;
     function(activation, "", "escape", toplevel::escape, script)?;
 
-    class(activation, json::create_class(mc), script)?;
     avm2_system_class!(regexp, activation, regexp::create_class(mc), script);
     avm2_system_class!(vector, activation, vector::create_class(mc), script);
-    avm2_system_class!(xml, activation, xml::create_class(mc), script);
-    avm2_system_class!(xml_list, activation, xml_list::create_class(mc), script);
 
     avm2_system_class!(date, activation, date::create_class(mc), script);
 
@@ -442,12 +466,6 @@ pub fn load_player_globals<'gc>(
         flash::system::application_domain::create_class(mc),
         script
     );
-    class(
-        activation,
-        flash::system::capabilities::create_class(mc),
-        script,
-    )?;
-    class(activation, flash::system::system::create_class(mc), script)?;
 
     class(
         activation,
@@ -460,31 +478,6 @@ pub fn load_player_globals<'gc>(
         flash::events::eventdispatcher::create_class(mc),
         script
     );
-
-    // package `flash.utils`
-    avm2_system_class!(
-        bytearray,
-        activation,
-        flash::utils::bytearray::create_class(mc),
-        script
-    );
-
-    domain.init_default_domain_memory(activation)?;
-
-    class(
-        activation,
-        flash::utils::dictionary::create_class(mc),
-        script,
-    )?;
-
-    namespace(
-        activation,
-        "flash.utils",
-        "flash_proxy",
-        flash::utils::NS_FLASH_PROXY,
-        script,
-    )?;
-    class(activation, flash::utils::proxy::create_class(mc), script)?;
 
     // package `flash.display`
     class(
@@ -530,12 +523,6 @@ pub fn load_player_globals<'gc>(
         movieclip,
         activation,
         flash::display::movieclip::create_class(mc),
-        script
-    );
-    avm2_system_class!(
-        framelabel,
-        activation,
-        flash::display::framelabel::create_class(mc),
         script
     );
     avm2_system_class!(
@@ -597,24 +584,6 @@ pub fn load_player_globals<'gc>(
         script
     );
 
-    // package `flash.ui`
-    class(activation, flash::ui::mouse::create_class(mc), script)?;
-    class(activation, flash::ui::keyboard::create_class(mc), script)?;
-
-    // package `flash.net`
-    avm2_system_class!(
-        sharedobject,
-        activation,
-        flash::net::sharedobject::create_class(mc),
-        script
-    );
-
-    class(
-        activation,
-        flash::net::object_encoding::create_class(mc),
-        script,
-    )?;
-
     // package `flash.text`
     avm2_system_class!(
         textfield,
@@ -629,15 +598,6 @@ pub fn load_player_globals<'gc>(
         script
     );
     class(activation, flash::text::font::create_class(mc), script)?;
-
-    // package `flash.crypto`
-
-    // package `flash.external`
-    class(
-        activation,
-        flash::external::externalinterface::create_class(mc),
-        script,
-    )?;
 
     // Inside this call, the macro `avm2_system_classes_playerglobal`
     // triggers classloading. Therefore, we run `load_playerglobal`
@@ -659,15 +619,17 @@ mod native {
 /// Loads classes from our custom 'playerglobal' (which are written in ActionScript)
 /// into the environment. See 'core/src/avm2/globals/README.md' for more information
 fn load_playerglobal<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     domain: Domain<'gc>,
-) -> Result<(), Error> {
+) -> Result<(), Error<'gc>> {
     activation.avm2().native_method_table = native::NATIVE_METHOD_TABLE;
     activation.avm2().native_instance_allocator_table = native::NATIVE_INSTANCE_ALLOCATOR_TABLE;
+    activation.avm2().native_instance_init_table = native::NATIVE_INSTANCE_INIT_TABLE;
 
-    let movie = Arc::new(SwfMovie::from_data(PLAYERGLOBAL, None, None)?);
+    let movie =
+        SwfMovie::from_data(PLAYERGLOBAL, None, None).expect("playerglobal.swf should be valid");
 
-    let slice = SwfSlice::from(movie);
+    let slice = SwfSlice::from(Arc::new(movie));
 
     let mut reader = slice.read_from(0);
 
@@ -679,20 +641,17 @@ fn load_playerglobal<'gc>(
             Avm2::do_abc(&mut activation.context, do_abc, domain)
                 .expect("playerglobal.swf should be valid");
         } else if tag_code != TagCode::End {
-            panic!(
-                "playerglobal should only contain `DoAbc` tag - found tag {:?}",
-                tag_code
-            )
+            panic!("playerglobal should only contain `DoAbc` tag - found tag {tag_code:?}")
         }
-        Ok(())
+        Ok(ControlFlow::Continue)
     };
 
-    let _ = tag_utils::decode_tags(&mut reader, tag_callback, TagCode::End);
+    let _ = tag_utils::decode_tags(&mut reader, tag_callback);
     macro_rules! avm2_system_classes_playerglobal {
         ($activation:expr, $script:expr, [$(($package:expr, $class_name:expr, $field:ident)),* $(,)?]) => {
             $(
-                let qname = QName::new(Namespace::package($package), $class_name);
-                let class_object = activation.resolve_class(&qname.into())?;
+                let name = Multiname::new(Namespace::package($package), $class_name);
+                let class_object = activation.resolve_class(&name)?;
                 let sc = $activation.avm2().system_classes.as_mut().unwrap();
                 sc.$field = class_object;
             )*
@@ -706,12 +665,27 @@ fn load_playerglobal<'gc>(
         activation,
         script,
         [
+            ("", "ArgumentError", argumenterror),
+            ("", "RangeError", rangeerror),
+            ("", "ReferenceError", referenceerror),
+            ("", "TypeError", typeerror),
+            ("", "VerifyError", verifyerror),
+            ("", "XML", xml),
+            ("", "XMLList", xml_list),
             ("flash.display", "Scene", scene),
+            ("flash.display", "FrameLabel", framelabel),
+            ("flash.display", "Stage3D", stage3d),
+            ("flash.display3D", "Context3D", context3d),
+            ("flash.display3D", "IndexBuffer3D", indexbuffer3d),
+            ("flash.display3D", "Program3D", program3d),
+            ("flash.display3D", "VertexBuffer3D", vertexbuffer3d),
             (
                 "flash.errors",
                 "IllegalOperationError",
                 illegaloperationerror
             ),
+            ("flash.errors", "IOError", ioerror),
+            ("flash.errors", "EOFError", eoferror),
             ("flash.events", "Event", event),
             ("flash.events", "TextEvent", textevent),
             ("flash.events", "ErrorEvent", errorevent),
@@ -721,13 +695,19 @@ fn load_playerglobal<'gc>(
             ("flash.events", "IOErrorEvent", ioerrorevent),
             ("flash.events", "MouseEvent", mouseevent),
             ("flash.events", "FullScreenEvent", fullscreenevent),
+            ("flash.events", "UncaughtErrorEvents", uncaughterrorevents),
             ("flash.geom", "Matrix", matrix),
             ("flash.geom", "Point", point),
             ("flash.geom", "Rectangle", rectangle),
             ("flash.geom", "Transform", transform),
             ("flash.geom", "ColorTransform", colortransform),
+            ("flash.utils", "ByteArray", bytearray),
+            ("flash.text", "StaticText", statictext),
+            ("flash.text", "TextLineMetrics", textlinemetrics),
         ]
     );
 
+    // Domain memory must be initialized after playerglobals is loaded because it relies on ByteArray.
+    domain.init_default_domain_memory(activation)?;
     Ok(())
 }

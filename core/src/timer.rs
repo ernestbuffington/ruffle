@@ -4,7 +4,7 @@
 //! The timers are stored in a priority queue, where we check if the nearest timer
 //! is ready to tick each frame.
 
-use crate::avm1::function::ExecutionReason;
+use crate::avm1::ExecutionReason;
 use crate::avm1::{
     Activation, ActivationIdentifier, Object as Avm1Object, TObject as _, Value as Avm1Value,
 };
@@ -29,7 +29,7 @@ pub struct Timers<'gc> {
 
 impl<'gc> Timers<'gc> {
     /// Ticks all timers and runs necessary callbacks.
-    pub fn update_timers(context: &mut UpdateContext<'_, 'gc, '_>, dt: f64) -> Option<f64> {
+    pub fn update_timers(context: &mut UpdateContext<'_, 'gc>, dt: f64) -> Option<f64> {
         context.timers.cur_time = context
             .timers
             .cur_time
@@ -40,13 +40,10 @@ impl<'gc> Timers<'gc> {
             return None;
         }
 
-        let globals = context.avm1.global_object_cell();
         let level0 = context.stage.root_clip();
-
         let mut activation = Activation::from_nothing(
             context.reborrow(),
             ActivationIdentifier::root("[Timer Callback]"),
-            globals,
             level0,
         );
 
@@ -87,12 +84,17 @@ impl<'gc> Timers<'gc> {
 
             let cancel_timer = match callback {
                 TimerCallback::Avm1Function { func, params } => {
-                    let _ = func.call(
+                    let result = func.call(
                         "[Timer Callback]".into(),
                         &mut activation,
                         Avm1Value::Undefined,
                         &params,
                     );
+
+                    if let Err(e) = result {
+                        tracing::error!("Unhandled AVM1 error in timer callback: {}", e);
+                    }
+
                     false
                 }
                 TimerCallback::Avm1Method {
@@ -100,21 +102,29 @@ impl<'gc> Timers<'gc> {
                     method_name,
                     params,
                 } => {
-                    let _ = this.call_method(
+                    let result = this.call_method(
                         method_name,
                         &params,
                         &mut activation,
                         ExecutionReason::Special,
                     );
+
+                    if let Err(e) = result {
+                        tracing::error!("Unhandled AVM1 error in timer callback: {}", e);
+                    }
+
                     false
                 }
                 TimerCallback::Avm2Callback { closure, params } => {
                     let mut avm2_activation =
                         Avm2Activation::from_nothing(activation.context.reborrow());
-                    closure
-                        .call(None, &params, &mut avm2_activation)
-                        .unwrap()
-                        .coerce_to_boolean()
+                    match closure.call(None, &params, &mut avm2_activation) {
+                        Ok(v) => v.coerce_to_boolean(),
+                        Err(e) => {
+                            tracing::error!("Unhandled AVM2 error in timer callback: {}", e);
+                            false
+                        }
+                    }
                 }
             };
 
@@ -282,7 +292,7 @@ impl Ord for Timer<'_> {
 }
 
 /// A callback fired by a `setInterval`/`setTimeout` timer.
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub enum TimerCallback<'gc> {
     Avm1Function {

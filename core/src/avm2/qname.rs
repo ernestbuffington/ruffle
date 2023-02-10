@@ -55,14 +55,14 @@ impl<'gc> QName<'gc> {
         translation_unit: TranslationUnit<'gc>,
         multiname_index: Index<AbcMultiname>,
         mc: MutationContext<'gc, '_>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error<'gc>> {
         if multiname_index.0 == 0 {
             return Err("Attempted to load a trait name of index zero".into());
         }
 
         let actual_index = multiname_index.0 as usize - 1;
         let abc = translation_unit.abc();
-        let abc_multiname: Result<_, Error> = abc
+        let abc_multiname: Result<_, Error<'gc>> = abc
             .constant_pool
             .multinames
             .get(actual_index)
@@ -90,7 +90,7 @@ impl<'gc> QName<'gc> {
 
         if let Some((package_name, local_name)) = parts {
             Self {
-                ns: Namespace::Package(AvmString::new(mc, package_name)),
+                ns: Namespace::Namespace(AvmString::new(mc, package_name)),
                 name: AvmString::new(mc, local_name),
             }
         } else {
@@ -131,6 +131,20 @@ impl<'gc> QName<'gc> {
         }
     }
 
+    // Like `to_qualified_name`, but uses a `.` instead of `::` separate
+    // the namespace and local name. This matches the output produced by
+    // Flash Player in error messages
+    pub fn to_qualified_name_err_message(self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
+        let mut buf = WString::new();
+        let uri = self.namespace().as_uri();
+        if !uri.is_empty() {
+            buf.push_str(&uri);
+            buf.push_char('.');
+        }
+        buf.push_str(&self.local_name());
+        AvmString::new(mc, buf)
+    }
+
     pub fn local_name(&self) -> AvmString<'gc> {
         self.name
     }
@@ -143,7 +157,6 @@ impl<'gc> QName<'gc> {
     pub fn as_uri(&self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
         let ns = match &self.ns {
             Namespace::Namespace(s) => s,
-            Namespace::Package(s) => s,
             Namespace::PackageInternal(s) => s,
             Namespace::Protected(s) => s,
             Namespace::Explicit(s) => s,
@@ -166,8 +179,8 @@ impl<'gc> QName<'gc> {
 impl<'gc> Debug for QName<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self.to_qualified_name_no_mc() {
-            Either::Left(name) => write!(f, "{}", name),
-            Either::Right(name) => write!(f, "{}", name),
+            Either::Left(name) => write!(f, "{name}"),
+            Either::Right(name) => write!(f, "{name}"),
         }
     }
 }

@@ -6,6 +6,7 @@ use crate::avm1::object::displacement_map_filter::DisplacementMapFilterObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, TObject, Value};
 use crate::string::{AvmString, WStr};
+use crate::types::F64Extension;
 use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
@@ -21,7 +22,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -39,7 +40,7 @@ pub fn constructor<'gc>(
 }
 
 pub fn alpha<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -51,7 +52,7 @@ pub fn alpha<'gc>(
 }
 
 pub fn set_alpha<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -59,7 +60,7 @@ pub fn set_alpha<'gc>(
         .get(0)
         .unwrap_or(&0.into())
         .coerce_to_f64(activation)
-        .map(|x| x.clamp(0.0, 1.0))?;
+        .map(|x| x.clamp_also_nan(0.0, 1.0))?;
 
     if let Some(filter) = this.as_displacement_map_filter_object() {
         filter.set_alpha(activation.context.gc_context, alpha);
@@ -69,7 +70,7 @@ pub fn set_alpha<'gc>(
 }
 
 pub fn color<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -81,7 +82,7 @@ pub fn color<'gc>(
 }
 
 pub fn set_color<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -98,7 +99,7 @@ pub fn set_color<'gc>(
 }
 
 pub fn component_x<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -110,7 +111,7 @@ pub fn component_x<'gc>(
 }
 
 pub fn set_component_x<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -124,7 +125,7 @@ pub fn set_component_x<'gc>(
 }
 
 pub fn component_y<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -136,7 +137,7 @@ pub fn component_y<'gc>(
 }
 
 pub fn set_component_y<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -150,7 +151,7 @@ pub fn set_component_y<'gc>(
 }
 
 pub fn map_bitmap<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -164,7 +165,7 @@ pub fn map_bitmap<'gc>(
 }
 
 pub fn set_map_bitmap<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -183,14 +184,14 @@ pub fn set_map_bitmap<'gc>(
 }
 
 pub fn map_point<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(object) = this.as_displacement_map_filter_object() {
         let (x, y) = object.map_point();
 
-        let proto = activation.context.avm1.prototypes.point_constructor;
+        let proto = activation.context.avm1.prototypes().point_constructor;
         let point = proto.construct(activation, &[x.into(), y.into()])?;
         return Ok(point);
     }
@@ -199,7 +200,7 @@ pub fn map_point<'gc>(
 }
 
 pub fn set_map_point<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -219,7 +220,7 @@ pub fn set_map_point<'gc>(
 }
 
 pub fn mode<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -232,7 +233,7 @@ pub fn mode<'gc>(
 }
 
 pub fn set_mode<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -249,7 +250,7 @@ pub fn set_mode<'gc>(
 }
 
 pub fn scale_x<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -261,7 +262,7 @@ pub fn scale_x<'gc>(
 }
 
 pub fn set_scale_x<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -275,7 +276,7 @@ pub fn set_scale_x<'gc>(
 }
 
 pub fn scale_y<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -287,7 +288,7 @@ pub fn scale_y<'gc>(
 }
 
 pub fn set_scale_y<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -305,8 +306,8 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let filter = DisplacementMapFilterObject::empty_object(gc_context, Some(proto));
-    let object = filter.as_script_object().unwrap();
+    let filter = DisplacementMapFilterObject::empty_object(gc_context, proto);
+    let object = filter.raw_script_object();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     filter.into()
 }

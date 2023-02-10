@@ -1,14 +1,18 @@
-use crate::avm1::property_map::PropertyMap as Avm1PropertyMap;
+use crate::avm1::PropertyMap as Avm1PropertyMap;
 use crate::avm2::{ClassObject as Avm2ClassObject, Domain as Avm2Domain};
 use crate::backend::audio::SoundHandle;
 use crate::character::Character;
+
 use crate::display_object::{Bitmap, Graphic, MorphShape, TDisplayObject, Text};
 use crate::font::{Font, FontDescriptor};
 use crate::prelude::*;
 use crate::string::AvmString;
 use crate::tag_utils::SwfMovie;
 use gc_arena::{Collect, MutationContext};
+use ruffle_render::backend::RenderBackend;
+use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::utils::remove_invalid_jpeg_data;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use swf::CharacterId;
@@ -116,13 +120,13 @@ impl<'gc> MovieLibrary<'gc> {
     pub fn register_character(&mut self, id: CharacterId, character: Character<'gc>) {
         // TODO(Herschel): What is the behavior if id already exists?
         if !self.contains_character(id) {
-            if let Character::Font(font) = character.clone() {
+            if let Character::Font(font) = character {
                 self.fonts.insert(font.descriptor().clone(), font);
             }
 
             self.characters.insert(id, character);
         } else {
-            log::error!("Character ID collision: Tried to register ID {} twice", id);
+            tracing::error!("Character ID collision: Tried to register ID {} twice", id);
         }
     }
 
@@ -138,7 +142,7 @@ impl<'gc> MovieLibrary<'gc> {
                 .insert(export_name, character.clone(), false);
             Some(character)
         } else {
-            log::warn!(
+            tracing::warn!(
                 "Can't register export {}: Character ID {} doesn't exist",
                 export_name,
                 id,
@@ -165,12 +169,12 @@ impl<'gc> MovieLibrary<'gc> {
         &self,
         id: CharacterId,
         gc_context: MutationContext<'gc, '_>,
-    ) -> Result<DisplayObject<'gc>, Box<dyn std::error::Error>> {
+    ) -> Result<DisplayObject<'gc>, &'static str> {
         if let Some(character) = self.characters.get(&id) {
             self.instantiate_display_object(character, gc_context)
         } else {
-            log::error!("Tried to instantiate non-registered character ID {}", id);
-            Err("Character id doesn't exist".into())
+            tracing::error!("Tried to instantiate non-registered character ID {}", id);
+            Err("Character id doesn't exist")
         }
     }
 
@@ -180,15 +184,15 @@ impl<'gc> MovieLibrary<'gc> {
         &self,
         export_name: AvmString<'gc>,
         gc_context: MutationContext<'gc, '_>,
-    ) -> Result<DisplayObject<'gc>, Box<dyn std::error::Error>> {
+    ) -> Result<DisplayObject<'gc>, &'static str> {
         if let Some(character) = self.export_characters.get(export_name, false) {
             self.instantiate_display_object(character, gc_context)
         } else {
-            log::error!(
+            tracing::error!(
                 "Tried to instantiate non-registered character {}",
                 export_name
             );
-            Err("Character id doesn't exist".into())
+            Err("Character id doesn't exist")
         }
     }
 
@@ -198,9 +202,9 @@ impl<'gc> MovieLibrary<'gc> {
         &self,
         character: &Character<'gc>,
         gc_context: MutationContext<'gc, '_>,
-    ) -> Result<DisplayObject<'gc>, Box<dyn std::error::Error>> {
+    ) -> Result<DisplayObject<'gc>, &'static str> {
         match character {
-            Character::Bitmap(bitmap) => Ok(bitmap.instantiate(gc_context)),
+            Character::Bitmap { bitmap } => Ok(bitmap.instantiate(gc_context)),
             Character::EditText(edit_text) => Ok(edit_text.instantiate(gc_context)),
             Character::Graphic(graphic) => Ok(graphic.instantiate(gc_context)),
             Character::MorphShape(morph_shape) => Ok(morph_shape.instantiate(gc_context)),
@@ -209,12 +213,12 @@ impl<'gc> MovieLibrary<'gc> {
             Character::Avm2Button(button) => Ok(button.instantiate(gc_context)),
             Character::Text(text) => Ok(text.instantiate(gc_context)),
             Character::Video(video) => Ok(video.instantiate(gc_context)),
-            _ => Err("Not a DisplayObject".into()),
+            _ => Err("Not a DisplayObject"),
         }
     }
 
     pub fn get_bitmap(&self, id: CharacterId) -> Option<Bitmap<'gc>> {
-        if let Some(&Character::Bitmap(bitmap)) = self.characters.get(&id) {
+        if let Some(&Character::Bitmap { bitmap, .. }) = self.characters.get(&id) {
             Some(bitmap)
         } else {
             None
@@ -283,7 +287,7 @@ impl<'gc> MovieLibrary<'gc> {
         if self.jpeg_tables.is_some() {
             // SWF spec says there should only be one JPEGTables tag.
             // TODO: What is the behavior when there are multiples?
-            log::warn!("SWF contains multiple JPEGTables tags");
+            tracing::warn!("SWF contains multiple JPEGTables tags");
             return;
         }
         // Some SWFs have a JPEGTables tag with 0 length; ignore these.
@@ -314,14 +318,27 @@ impl<'gc> MovieLibrary<'gc> {
     }
 }
 
-impl<'gc> ruffle_render::bitmap::BitmapSource for MovieLibrary<'gc> {
-    fn bitmap(&self, id: u16) -> Option<ruffle_render::bitmap::BitmapInfo> {
-        self.get_bitmap(id).and_then(|bitmap| {
-            Some(ruffle_render::bitmap::BitmapInfo {
-                handle: bitmap.bitmap_handle()?,
+pub struct MovieLibrarySource<'a, 'gc> {
+    pub library: &'a MovieLibrary<'gc>,
+    pub gc_context: MutationContext<'gc, 'a>,
+}
+
+impl<'a, 'gc> ruffle_render::bitmap::BitmapSource for MovieLibrarySource<'a, 'gc> {
+    fn bitmap_size(&self, id: u16) -> Option<ruffle_render::bitmap::BitmapSize> {
+        self.library
+            .get_bitmap(id)
+            .map(|bitmap| ruffle_render::bitmap::BitmapSize {
                 width: bitmap.width(),
                 height: bitmap.height(),
             })
+    }
+
+    fn bitmap_handle(&self, id: u16, backend: &mut dyn RenderBackend) -> Option<BitmapHandle> {
+        self.library.get_bitmap(id).and_then(|bitmap| {
+            bitmap
+                .bitmap_data()
+                .write(self.gc_context)
+                .bitmap_handle(backend)
         })
     }
 }

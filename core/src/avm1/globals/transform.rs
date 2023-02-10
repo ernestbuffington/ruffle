@@ -1,11 +1,10 @@
 //! flash.geom.Transform
 
-use crate::avm1::activation::Activation;
-use crate::avm1::error::Error;
-use crate::avm1::globals::{color_transform, matrix};
+use crate::avm1::globals::color_transform::ColorTransformObject;
+use crate::avm1::globals::matrix::{matrix_to_object, object_to_matrix};
 use crate::avm1::object::transform_object::TransformObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{Object, TObject, Value};
+use crate::avm1::{Activation, Error, Object, TObject, Value};
 use crate::display_object::{MovieClip, TDisplayObject};
 use gc_arena::MutationContext;
 
@@ -45,7 +44,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -68,14 +67,14 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let transform_object = TransformObject::empty(gc_context, Some(proto));
-    let object = transform_object.as_script_object().unwrap();
+    let transform_object = TransformObject::empty(gc_context, proto);
+    let object = transform_object.raw_script_object();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     transform_object.into()
 }
 
 fn concatenated_color_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     clip: MovieClip<'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     // Walk through parents to get combined color transform.
@@ -85,17 +84,16 @@ fn concatenated_color_transform<'gc>(
         color_transform = *display_object.base().color_transform() * color_transform;
         node = display_object.parent();
     }
-    let color_transform = color_transform::color_transform_to_object(color_transform, activation)?;
-    Ok(color_transform)
+    ColorTransformObject::construct(activation, color_transform)
 }
 
 fn concatenated_matrix<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     clip: MovieClip<'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     // Testing shows that 'concatenatedMatrix' does *not* include the 'scrollRect' translation
     // for the object itself, but *does* include the 'scrollRect' translation for ancestors.
-    let matrix = matrix::matrix_to_object(
+    let matrix = matrix_to_object(
         clip.local_to_global_matrix_without_own_scroll_rect(),
         activation,
     )?;
@@ -103,25 +101,23 @@ fn concatenated_matrix<'gc>(
 }
 
 fn color_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     clip: MovieClip<'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let color_transform =
-        color_transform::color_transform_to_object(*clip.base().color_transform(), activation)?;
-    Ok(color_transform)
+    ColorTransformObject::construct(activation, *clip.base().color_transform())
 }
 
 fn set_color_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     clip: MovieClip<'gc>,
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    let as_color_transform = value.coerce_to_object(activation);
     // Set only occurs for an object with actual ColorTransform data.
-    if as_color_transform.as_color_transform_object().is_some() {
-        let swf_color_transform =
-            color_transform::object_to_color_transform(as_color_transform, activation)?;
-        clip.set_color_transform(activation.context.gc_context, &swf_color_transform);
+    if let Some(color_transform) = ColorTransformObject::cast(value) {
+        clip.set_color_transform(
+            activation.context.gc_context,
+            color_transform.read().clone().into(),
+        );
         clip.set_transformed_by_script(activation.context.gc_context, true);
     }
 
@@ -129,15 +125,15 @@ fn set_color_transform<'gc>(
 }
 
 fn matrix<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     clip: MovieClip<'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let matrix = matrix::matrix_to_object(*clip.base().matrix(), activation)?;
+    let matrix = matrix_to_object(*clip.base().matrix(), activation)?;
     Ok(matrix)
 }
 
 fn set_matrix<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     clip: MovieClip<'gc>,
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
@@ -147,8 +143,8 @@ fn set_matrix<'gc>(
         .iter()
         .all(|p| as_matrix.has_own_property(activation, (*p).into()));
     if is_matrix {
-        let swf_matrix = matrix::object_to_matrix(as_matrix, activation)?;
-        clip.set_matrix(activation.context.gc_context, &swf_matrix);
+        let swf_matrix = object_to_matrix(as_matrix, activation)?;
+        clip.set_matrix(activation.context.gc_context, swf_matrix);
         clip.set_transformed_by_script(activation.context.gc_context, true);
     }
 
@@ -156,14 +152,14 @@ fn set_matrix<'gc>(
 }
 
 fn pixel_bounds<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     clip: MovieClip<'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     // This is equivalent to `clip.getBounds()`.
     let bounds = clip.world_bounds();
 
     // Return Rectangle object.
-    let constructor = activation.context.avm1.prototypes.rectangle_constructor;
+    let constructor = activation.context.avm1.prototypes().rectangle_constructor;
     let result = constructor.construct(
         activation,
         &[

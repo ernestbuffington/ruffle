@@ -61,14 +61,9 @@ const PUBLIC_INSTANCE_AND_PROTO_METHODS: &[(&str, NativeMethodImpl)] = &[
     ("toLocaleDateString", to_date_string),
 ];
 
-struct DateAdjustment<
-    'builder,
-    'activation_a: 'builder,
-    'gc: 'activation_a,
-    'gc_context: 'activation_a,
-    T: TimeZone + 'builder,
-> {
-    activation: &'builder mut Activation<'activation_a, 'gc, 'gc_context>,
+struct DateAdjustment<'builder, 'activation_a: 'builder, 'gc: 'activation_a, T: TimeZone + 'builder>
+{
+    activation: &'builder mut Activation<'activation_a, 'gc>,
     timezone: &'builder T,
     year: Option<Option<f64>>,
     month: Option<Option<f64>>,
@@ -79,11 +74,9 @@ struct DateAdjustment<
     millisecond: Option<Option<f64>>,
 }
 
-impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
-    DateAdjustment<'builder, 'activation_a, 'gc, 'gc_context, T>
-{
+impl<'builder, 'activation_a, 'gc, T: TimeZone> DateAdjustment<'builder, 'activation_a, 'gc, T> {
     fn new(
-        activation: &'builder mut Activation<'activation_a, 'gc, 'gc_context>,
+        activation: &'builder mut Activation<'activation_a, 'gc>,
         timezone: &'builder T,
     ) -> Self {
         Self {
@@ -106,7 +99,7 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
         self
     }
 
-    fn year(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error> {
+    fn year(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error<'gc>> {
         self.year = match value {
             Some(value) => Some(Some(value.coerce_to_number(self.activation)?)),
             None => None,
@@ -114,7 +107,7 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
         Ok(self)
     }
 
-    fn month(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error> {
+    fn month(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error<'gc>> {
         self.month = match value {
             Some(value) => Some(Some(value.coerce_to_number(self.activation)?)),
             None => None,
@@ -122,7 +115,7 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
         Ok(self)
     }
 
-    fn day(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error> {
+    fn day(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error<'gc>> {
         self.day = match value {
             Some(value) => Some(Some(value.coerce_to_number(self.activation)?)),
             None => None,
@@ -130,7 +123,7 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
         Ok(self)
     }
 
-    fn hour(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error> {
+    fn hour(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error<'gc>> {
         self.hour = match value {
             Some(value) => Some(Some(value.coerce_to_number(self.activation)?)),
             None => None,
@@ -138,7 +131,7 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
         Ok(self)
     }
 
-    fn minute(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error> {
+    fn minute(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error<'gc>> {
         self.minute = match value {
             Some(value) => Some(Some(value.coerce_to_number(self.activation)?)),
             None => None,
@@ -146,7 +139,7 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
         Ok(self)
     }
 
-    fn second(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error> {
+    fn second(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error<'gc>> {
         self.second = match value {
             Some(value) => Some(Some(value.coerce_to_number(self.activation)?)),
             None => None,
@@ -154,7 +147,7 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
         Ok(self)
     }
 
-    fn millisecond(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error> {
+    fn millisecond(&mut self, value: Option<&Value<'gc>>) -> Result<&mut Self, Error<'gc>> {
         self.millisecond = match value {
             Some(value) => Some(Some(value.coerce_to_number(self.activation)?)),
             None => None,
@@ -212,8 +205,7 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
 
         if let LocalResult::Single(Some(result)) = current
             .timezone()
-            .ymd_opt(year, (month + 1) as u32, 1)
-            .and_hms_opt(0, 0, 0)
+            .with_ymd_and_hms(year, (month + 1) as u32, 1, 0, 0, 0)
             .map(|date| date.checked_add_signed(duration))
         {
             Some(result.with_timezone(&Utc))
@@ -240,10 +232,10 @@ impl<'builder, 'activation_a, 'gc, 'gc_context, T: TimeZone>
 
 /// Implements `Date`'s instance constructor.
 pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         activation.super_init(this, &[])?;
         if let Some(date) = this.as_date_object() {
@@ -255,7 +247,13 @@ pub fn instance_init<'gc>(
                     // We need a starting value to adjust from.
                     date.set_date_time(
                         activation.context.gc_context,
-                        Some(timezone.ymd(0, 1, 1).and_hms(0, 0, 0).into()),
+                        Some(
+                            timezone
+                                .with_ymd_and_hms(0, 1, 1, 0, 0, 0)
+                                .single()
+                                .expect("Found ambiguous epoch time when constructing Date")
+                                .into(),
+                        ),
                     );
 
                     DateAdjustment::new(activation, &timezone)
@@ -269,17 +267,17 @@ pub fn instance_init<'gc>(
                         .map_year(|year| if year < 100.0 { year + 1900.0 } else { year })
                         .apply(date);
                 } else {
-                    let timestamp = timestamp.coerce_to_number(activation)?;
+                    let timestamp = if let Value::String(date_str) = timestamp {
+                        parse_full_date(activation, *date_str).unwrap_or(f64::NAN)
+                    } else {
+                        timestamp.coerce_to_number(activation)?
+                    };
                     if timestamp.is_finite() {
                         if let LocalResult::Single(time) =
                             Utc.timestamp_millis_opt(timestamp as i64)
                         {
                             date.set_date_time(activation.context.gc_context, Some(time))
-                        } else {
-                            date.set_date_time(activation.context.gc_context, None);
                         }
-                    } else {
-                        date.set_date_time(activation.context.gc_context, None);
                     }
                 }
             } else {
@@ -293,10 +291,10 @@ pub fn instance_init<'gc>(
 
 /// Implements `Date`'s class constructor.
 pub fn class_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         let scope = activation.create_scopechain();
         let gc_context = activation.context.gc_context;
@@ -308,7 +306,7 @@ pub fn class_init<'gc>(
                 &Multiname::public(*name),
                 FunctionObject::from_method(
                     activation,
-                    Method::from_builtin(*method, *name, gc_context),
+                    Method::from_builtin(*method, name, gc_context),
                     scope,
                     None,
                     Some(this_class),
@@ -324,10 +322,10 @@ pub fn class_init<'gc>(
 
 /// Implements `time` property's getter, and the `getTime` method. This will also be used for `valueOf`.
 pub fn time<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         return this.value_of(activation.context.gc_context);
     }
@@ -337,17 +335,20 @@ pub fn time<'gc>(
 
 /// Implements `time` property's setter, and the `setTime` method.
 pub fn set_time<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let new_time = args
             .get(0)
             .unwrap_or(&Value::Undefined)
             .coerce_to_number(activation)?;
         if new_time.is_finite() {
-            let time = Utc.timestamp_millis(new_time as i64);
+            let time = Utc
+                .timestamp_millis_opt(new_time as i64)
+                .single()
+                .expect("Found ambiguous timestamp for current time zone");
             this.set_date_time(activation.context.gc_context, Some(time));
             return Ok((time.timestamp_millis() as f64).into());
         } else {
@@ -361,10 +362,10 @@ pub fn set_time<'gc>(
 
 /// Implements `milliseconds` property's getter, and the `getMilliseconds` method.
 pub fn milliseconds<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -381,10 +382,10 @@ pub fn milliseconds<'gc>(
 
 /// Implements `milliseconds` property's setter, and the `setMilliseconds` method.
 pub fn set_milliseconds<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &get_timezone())
             .millisecond(args.get(0))?
@@ -396,10 +397,10 @@ pub fn set_milliseconds<'gc>(
 
 /// Implements `seconds` property's getter, and the `getSeconds` method.
 pub fn seconds<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -416,10 +417,10 @@ pub fn seconds<'gc>(
 
 /// Implements `seconds` property's setter, and the `setSeconds` method.
 pub fn set_seconds<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &get_timezone())
             .second(args.get(0))?
@@ -432,10 +433,10 @@ pub fn set_seconds<'gc>(
 
 /// Implements `minutes` property's getter, and the `getMinutes` method.
 pub fn minutes<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -452,10 +453,10 @@ pub fn minutes<'gc>(
 
 /// Implements `minutes` property's setter, and the `setMinutes` method.
 pub fn set_minutes<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &get_timezone())
             .minute(args.get(0))?
@@ -469,10 +470,10 @@ pub fn set_minutes<'gc>(
 
 /// Implements `hour` property's getter, and the `getHours` method.
 pub fn hours<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -489,10 +490,10 @@ pub fn hours<'gc>(
 
 /// Implements `hours` property's setter, and the `setHours` method.
 pub fn set_hours<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &get_timezone())
             .hour(args.get(0))?
@@ -507,10 +508,10 @@ pub fn set_hours<'gc>(
 
 /// Implements `date` property's getter, and the `getDate` method.
 pub fn date<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -527,10 +528,10 @@ pub fn date<'gc>(
 
 /// Implements `date` property's setter, and the `setDate` method.
 pub fn set_date<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &get_timezone())
             .day(args.get(0))?
@@ -542,10 +543,10 @@ pub fn set_date<'gc>(
 
 /// Implements `month` property's getter, and the `getMonth` method.
 pub fn month<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -562,10 +563,10 @@ pub fn month<'gc>(
 
 /// Implements `month` property's setter, and the `setMonth` method.
 pub fn set_month<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &get_timezone())
             .month(args.get(0))?
@@ -578,10 +579,10 @@ pub fn set_month<'gc>(
 
 /// Implements `fullYear` property's getter, and the `getFullYear` method.
 pub fn full_year<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -598,12 +599,25 @@ pub fn full_year<'gc>(
 
 /// Implements `fullYear` property's setter, and the `setFullYear` method.
 pub fn set_full_year<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
-        let timestamp = DateAdjustment::new(activation, &get_timezone())
+        let timezone = get_timezone();
+        if this.date_time().is_none() {
+            this.set_date_time(
+                activation.context.gc_context,
+                Some(
+                    timezone
+                        .with_ymd_and_hms(0, 1, 1, 0, 0, 0)
+                        .single()
+                        .expect("Found ambiguous epoch time when constructing Date")
+                        .into(),
+                ),
+            );
+        }
+        let timestamp = DateAdjustment::new(activation, &timezone)
             .year(args.get(0))?
             .month(args.get(1))?
             .day(args.get(2))?
@@ -615,10 +629,10 @@ pub fn set_full_year<'gc>(
 
 /// Implements `day` property's getter, and the `getDay` method.
 pub fn day<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -635,10 +649,10 @@ pub fn day<'gc>(
 
 /// Implements `millisecondsUTC` property's getter, and the `getUTCMilliseconds` method.
 pub fn milliseconds_utc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok((date.timestamp_subsec_millis() as f64).into());
@@ -652,10 +666,10 @@ pub fn milliseconds_utc<'gc>(
 
 /// Implements `millisecondsUTC` property's setter, and the `setUTCMilliseconds` method.
 pub fn set_milliseconds_utc<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &Utc)
             .millisecond(args.get(0))?
@@ -667,10 +681,10 @@ pub fn set_milliseconds_utc<'gc>(
 
 /// Implements `secondsUTC` property's getter, and the `getUTCSeconds` method.
 pub fn seconds_utc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok((date.second() as f64).into());
@@ -684,10 +698,10 @@ pub fn seconds_utc<'gc>(
 
 /// Implements `secondsUTC` property's setter, and the `setUTCSeconds` method.
 pub fn set_seconds_utc<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &Utc)
             .second(args.get(0))?
@@ -700,10 +714,10 @@ pub fn set_seconds_utc<'gc>(
 
 /// Implements `minutesUTC` property's getter, and the `getUTCMinutes` method.
 pub fn minutes_utc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok((date.minute() as f64).into());
@@ -717,10 +731,10 @@ pub fn minutes_utc<'gc>(
 
 /// Implements `minutesUTC` property's setter, and the `setUTCMinutes` method.
 pub fn set_minutes_utc<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &Utc)
             .minute(args.get(0))?
@@ -734,10 +748,10 @@ pub fn set_minutes_utc<'gc>(
 
 /// Implements `hourUTC` property's getter, and the `getUTCHours` method.
 pub fn hours_utc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok((date.hour() as f64).into());
@@ -751,10 +765,10 @@ pub fn hours_utc<'gc>(
 
 /// Implements `hoursUTC` property's setter, and the `setUTCHours` method.
 pub fn set_hours_utc<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &Utc)
             .hour(args.get(0))?
@@ -769,10 +783,10 @@ pub fn set_hours_utc<'gc>(
 
 /// Implements `dateUTC` property's getter, and the `getUTCDate` method.
 pub fn date_utc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok((date.day() as f64).into());
@@ -786,10 +800,10 @@ pub fn date_utc<'gc>(
 
 /// Implements `dateUTC` property's setter, and the `setUTCDate` method.
 pub fn set_date_utc<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &Utc)
             .day(args.get(0))?
@@ -801,10 +815,10 @@ pub fn set_date_utc<'gc>(
 
 /// Implements `monthUTC` property's getter, and the `getUTCMonth` method.
 pub fn month_utc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok((date.month0() as f64).into());
@@ -818,10 +832,10 @@ pub fn month_utc<'gc>(
 
 /// Implements `monthUTC` property's setter, and the `setUTCMonth` method.
 pub fn set_month_utc<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         let timestamp = DateAdjustment::new(activation, &Utc)
             .month(args.get(0))?
@@ -834,10 +848,10 @@ pub fn set_month_utc<'gc>(
 
 /// Implements `fullYearUTC` property's getter, and the `getUTCFullYear` method.
 pub fn full_year_utc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok((date.year() as f64).into());
@@ -851,11 +865,21 @@ pub fn full_year_utc<'gc>(
 
 /// Implements `fullYearUTC` property's setter, and the `setUTCFullYear` method.
 pub fn set_full_year_utc<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
+        if this.date_time().is_none() {
+            this.set_date_time(
+                activation.context.gc_context,
+                Some(
+                    Utc.with_ymd_and_hms(0, 1, 1, 0, 0, 0)
+                        .single()
+                        .expect("Found ambiguous epoch time when constructing Date"),
+                ),
+            );
+        }
         let timestamp = DateAdjustment::new(activation, &Utc)
             .year(args.get(0))?
             .month(args.get(1))?
@@ -868,10 +892,10 @@ pub fn set_full_year_utc<'gc>(
 
 /// Implements `dayUTC` property's getter, and the `getUTCDay` method.
 pub fn day_utc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok((date.weekday().num_days_from_sunday() as f64).into());
@@ -885,10 +909,10 @@ pub fn day_utc<'gc>(
 
 /// Implements `timezoneOffset` property's getter, and the `getTimezoneOffset` method.
 pub fn timezone_offset<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -906,10 +930,10 @@ pub fn timezone_offset<'gc>(
 
 /// Implements the `UTC` class method.
 pub fn utc<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let date = DateAdjustment::new(activation, &Utc)
         .year(args.get(0))?
         .month(args.get(1))?
@@ -919,7 +943,11 @@ pub fn utc<'gc>(
         .second(args.get(5))?
         .millisecond(args.get(6))?
         .map_year(|year| if year < 100.0 { year + 1900.0 } else { year })
-        .calculate(Utc.ymd(0, 1, 1).and_hms(0, 0, 0));
+        .calculate(
+            Utc.with_ymd_and_hms(0, 1, 1, 0, 0, 0)
+                .single()
+                .expect("Found ambiguous UTC time conversions"),
+        );
     let millis = if let Some(date) = date {
         date.timestamp_millis() as f64
     } else {
@@ -931,10 +959,10 @@ pub fn utc<'gc>(
 
 /// Implements the `toString` method.
 pub fn to_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -955,10 +983,10 @@ pub fn to_string<'gc>(
 
 /// Implements the `toUTCString` method.
 pub fn to_utc_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this.date_time() {
             return Ok(AvmString::new_utf8(
@@ -976,10 +1004,10 @@ pub fn to_utc_string<'gc>(
 
 /// Implements the `toLocaleString` method.
 pub fn to_locale_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -1000,10 +1028,10 @@ pub fn to_locale_string<'gc>(
 
 /// Implements the `toTimeString` method.
 pub fn to_time_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -1024,10 +1052,10 @@ pub fn to_time_string<'gc>(
 
 /// Implements the `toLocaleTimeString` method.
 pub fn to_locale_time_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -1048,10 +1076,10 @@ pub fn to_locale_time_string<'gc>(
 
 /// Implements the `toDateString` & `toLocaleDateString` method.
 pub fn to_date_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this.and_then(|this| this.as_date_object()) {
         if let Some(date) = this
             .date_time()
@@ -1168,26 +1196,18 @@ fn parse_hms(item: &WStr) -> Option<(u32, u32, u32)> {
     ))
 }
 
-/// Implements the `parse` class method.
-// False
-#[allow(clippy::question_mark)]
-pub fn parse<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+pub fn parse_full_date<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    date: AvmString<'gc>,
+) -> Option<f64> {
     const DAYS: [&[u8]; 7] = [b"Sun", b"Mon", b"Tue", b"Wed", b"Thu", b"Fri", b"Sat"];
 
-    let date_str = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_string(activation)?;
     let timezone = get_timezone();
     let mut final_time = DateAdjustment::new(activation, &timezone);
     let mut new_timezone = None;
     // The Date parser is flash is super flexible, so we need to go through each item individually and parse it to match Flash.
     // NOTE: DateTime::parse_from_str is not flexible enough for this, so we need to parse manually.
-    for item in date_str
+    for item in date
         .split(string_utils::swf_is_whitespace)
         .filter(|s| !s.is_empty())
     {
@@ -1197,7 +1217,7 @@ pub fn parse<'gc>(
             // First we check if the fields we are going to set have already been set, if they are, we return NaN.
             // The same logic applies for all other if/else branches.
             if final_time.year.is_some() || final_time.month.is_some() || final_time.day.is_some() {
-                return Ok(f64::NAN.into());
+                return None;
             }
             final_time.year = Some(Some(year as f64));
             final_time.month = Some(Some(month as f64));
@@ -1209,7 +1229,7 @@ pub fn parse<'gc>(
                 || final_time.minute.is_some()
                 || final_time.second.is_some()
             {
-                return Ok(f64::NAN.into());
+                return None;
             }
             final_time.hour = Some(Some(hours as f64));
             final_time.minute = Some(Some(minutes as f64));
@@ -1226,34 +1246,24 @@ pub fn parse<'gc>(
             // Parse GMT-HHMM/GMT+HHMM or UTC-HHMM/UTC+HHMM
 
             if new_timezone.is_some() || item.len() != 8 {
-                return Ok(f64::NAN.into());
+                return None;
             }
             let (other, tzn) = item.split_at(4);
             if tzn.len() != 4 {
-                return Ok(f64::NAN.into());
+                return None;
             }
             let (hours, minutes) = tzn.split_at(2);
-            let hours = if let Ok(hours) = hours.parse::<u32>() {
-                hours
-            } else {
-                return Ok(f64::NAN.into());
-            };
-            let minutes = if let Ok(minutes) = minutes.parse::<u32>() {
-                minutes
-            } else {
-                return Ok(f64::NAN.into());
-            };
+            let hours = hours.parse::<u32>().ok()?;
+            let minutes = minutes.parse::<u32>().ok()?;
             let sign = other.at(3);
             // NOTE: In real flash, invalid (out of bounds) timezones were allowed, but there isn't a way to construct these using FixedOffset.
             // Since it is insanely rare to ever parse a date with an invalid timezone, for now we just return an error.
             new_timezone = Some(if sign == b'-' as u16 {
-                FixedOffset::west_opt(((hours * 60 * 60) + minutes * 60) as i32)
-                    .ok_or("Error: Invalid timezone")?
+                FixedOffset::west_opt(((hours * 60 * 60) + minutes * 60) as i32)?
             } else if sign == b'+' as u16 {
-                FixedOffset::east_opt(((hours * 60 * 60) + minutes * 60) as i32)
-                    .ok_or("Error: Invalid timezone")?
+                FixedOffset::east_opt(((hours * 60 * 60) + minutes * 60) as i32)?
             } else {
-                return Ok(f64::NAN.into());
+                return None;
             });
         } else if let Ok(mut num) = item.parse::<u32>() {
             // Parse either a day or a year
@@ -1261,7 +1271,7 @@ pub fn parse<'gc>(
             // If the number is greater than 70, lets parse as a year
             if num >= 70 {
                 if final_time.year.is_some() {
-                    return Ok(f64::NAN.into());
+                    return None;
                 }
                 // If the number is less than 100, we add 1900 to it.
                 if num < 100 {
@@ -1271,35 +1281,55 @@ pub fn parse<'gc>(
             // Otherwise, lets parse as a day
             } else {
                 if final_time.day.is_some() {
-                    return Ok(f64::NAN.into());
+                    return None;
                 }
                 final_time.day = Some(Some(num as f64))
             }
         } else {
-            return Ok(f64::NAN.into());
+            return None;
         }
     }
     // It is required that year, month, and day all have data.
     if final_time.year.is_none() || final_time.month.is_none() || final_time.day.is_none() {
-        return Ok(f64::NAN.into());
+        return None;
     }
     if let Some(timestamp) = final_time.calculate(
         new_timezone
             .unwrap_or(timezone)
-            .ymd(0, 1, 1)
-            .and_hms(0, 0, 0),
+            .with_ymd_and_hms(0, 1, 1, 0, 0, 0)
+            .single()
+            .expect(
+                "Found ambiguous starting time when converting parsed dates into local timezone",
+            ),
     ) {
-        Ok((timestamp.timestamp_millis() as f64).into())
+        Some(timestamp.timestamp_millis() as f64)
     } else {
-        Ok(f64::NAN.into())
+        None
     }
+}
+
+/// Implements the `parse` class method.
+#[allow(clippy::question_mark)]
+pub fn parse<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    _this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let date_str = args
+        .get(0)
+        .unwrap_or(&Value::Undefined)
+        .coerce_to_string(activation)?;
+
+    Ok(parse_full_date(activation, date_str)
+        .unwrap_or(f64::NAN)
+        .into())
 }
 
 /// Construct `Date`'s class.
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
         QName::new(Namespace::public(), "Date"),
-        Some(QName::new(Namespace::public(), "Object").into()),
+        Some(Multiname::public("Object")),
         Method::from_builtin(instance_init, "<Date instance initializer>", mc),
         Method::from_builtin(class_init, "<Date class initializer>", mc),
         mc,

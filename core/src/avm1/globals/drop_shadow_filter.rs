@@ -5,6 +5,7 @@ use crate::avm1::error::Error;
 use crate::avm1::object::drop_shadow_filter::DropShadowFilterObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, TObject, Value};
+use crate::types::F64Extension;
 use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
@@ -22,7 +23,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -42,7 +43,7 @@ pub fn constructor<'gc>(
 }
 
 pub fn alpha<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -54,7 +55,7 @@ pub fn alpha<'gc>(
 }
 
 pub fn set_alpha<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -62,7 +63,7 @@ pub fn set_alpha<'gc>(
         .get(0)
         .unwrap_or(&1.into())
         .coerce_to_f64(activation)
-        .map(|x| x.clamp(0.0, 1.0))?;
+        .map(|x| x.clamp_also_nan(0.0, 1.0))?;
 
     if let Some(object) = this.as_drop_shadow_filter_object() {
         object.set_alpha(activation.context.gc_context, alpha);
@@ -72,7 +73,7 @@ pub fn set_alpha<'gc>(
 }
 
 pub fn distance<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -84,7 +85,7 @@ pub fn distance<'gc>(
 }
 
 pub fn set_distance<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -98,7 +99,7 @@ pub fn set_distance<'gc>(
 }
 
 pub fn angle<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -110,7 +111,7 @@ pub fn angle<'gc>(
 }
 
 pub fn set_angle<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -133,7 +134,7 @@ pub fn set_angle<'gc>(
 }
 
 pub fn blur_x<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -145,7 +146,7 @@ pub fn blur_x<'gc>(
 }
 
 pub fn set_blur_x<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -163,7 +164,7 @@ pub fn set_blur_x<'gc>(
 }
 
 pub fn blur_y<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -175,7 +176,7 @@ pub fn blur_y<'gc>(
 }
 
 pub fn set_blur_y<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -193,7 +194,7 @@ pub fn set_blur_y<'gc>(
 }
 
 pub fn color<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -205,7 +206,7 @@ pub fn color<'gc>(
 }
 
 pub fn set_color<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -222,7 +223,7 @@ pub fn set_color<'gc>(
 }
 
 pub fn hide_object<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -234,7 +235,7 @@ pub fn hide_object<'gc>(
 }
 
 pub fn set_hide_object<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -251,7 +252,7 @@ pub fn set_hide_object<'gc>(
 }
 
 pub fn inner<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -263,7 +264,7 @@ pub fn inner<'gc>(
 }
 
 pub fn set_inner<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -280,7 +281,7 @@ pub fn set_inner<'gc>(
 }
 
 pub fn knockout<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -292,7 +293,7 @@ pub fn knockout<'gc>(
 }
 
 pub fn set_knockout<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -309,7 +310,7 @@ pub fn set_knockout<'gc>(
 }
 
 pub fn quality<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -321,7 +322,7 @@ pub fn quality<'gc>(
 }
 
 pub fn set_quality<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -339,7 +340,7 @@ pub fn set_quality<'gc>(
 }
 
 pub fn strength<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -351,7 +352,7 @@ pub fn strength<'gc>(
 }
 
 pub fn set_strength<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -359,7 +360,7 @@ pub fn set_strength<'gc>(
         .get(0)
         .unwrap_or(&1.into())
         .coerce_to_f64(activation)
-        .map(|x| x.clamp(0.0, 255.0))?;
+        .map(|x| x.clamp_also_nan(0.0, 255.0))?;
 
     if let Some(object) = this.as_drop_shadow_filter_object() {
         object.set_strength(activation.context.gc_context, strength);
@@ -373,8 +374,8 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let drop_shadow_filter = DropShadowFilterObject::empty_object(gc_context, Some(proto));
-    let object = drop_shadow_filter.as_script_object().unwrap();
+    let drop_shadow_filter = DropShadowFilterObject::empty_object(gc_context, proto);
+    let object = drop_shadow_filter.raw_script_object();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     drop_shadow_filter.into()
 }

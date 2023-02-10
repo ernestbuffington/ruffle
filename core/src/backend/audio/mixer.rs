@@ -7,6 +7,43 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex, RwLock};
 use swf::AudioCompression;
 
+/// Holds the last 2048 output audio frames. Frames can be written to it one by
+/// one, and the last completely filled 1024-wide window can be read from it.
+struct CircBuf {
+    pub samples: [[f32; 2]; 2048],
+    pub pos: usize,
+}
+
+impl CircBuf {
+    /// Creates an empty circular buffer.
+    pub fn new() -> Self {
+        Self {
+            samples: [[0.0; 2]; 2048],
+            pos: 0,
+        }
+    }
+
+    /// Writes a value into the buffer, pushing the write position forward.
+    pub fn push(&mut self, sample: [f32; 2]) {
+        self.samples[self.pos] = sample;
+        self.pos = (self.pos + 1) % 2048;
+    }
+
+    /// Returns one half of the inner buffer, the one that is not currently
+    /// being written to.
+    pub fn get(&self) -> &[[f32; 2]; 1024] {
+        if self.pos < 1024 {
+            self.samples[1024..2048]
+                .try_into()
+                .expect("Length is 1024, cast is infallible")
+        } else {
+            self.samples[0..1024]
+                .try_into()
+                .expect("Length is 1024, cast is infallible")
+        }
+    }
+}
+
 /// An audio mixer for a Flash movie.
 ///
 /// `AudioMixer` manages the audio state for a Flash movie. This can be used by any backend that
@@ -29,6 +66,9 @@ pub struct AudioMixer {
 
     /// The sample rate of the output stream in Hz.
     output_sample_rate: u32,
+
+    /// The last two windows of output samples.
+    output_memory: Arc<RwLock<CircBuf>>,
 }
 
 /// An audio stream.
@@ -144,6 +184,52 @@ struct SoundInstance {
 
     /// The transform for the right channel of this sound instance.
     right_transform: [f32; 2],
+
+    /// Stores the per-channel "peak amplitude" (volume) of this sound
+    /// over the last completely mixed 1024-frame long window.
+    /// Updated whenever a new buffer is filled completely.
+    peak: [f32; 2],
+
+    /// Accumulates the per-channel minimum and maximum sample values
+    /// (respectively) of this sound over the buffer currently being
+    /// mixed. Used to compute `peak`, and is reset after every time.
+    range: ([f32; 2], [f32; 2]),
+}
+
+impl SoundInstance {
+    /// Creates a new `SoundInstance` from a `Stream`, with a SoundHandle.
+    fn new_sound(handle: SoundHandle, stream: Box<dyn Stream>) -> Self {
+        SoundInstance {
+            handle: Some(handle),
+            stream,
+            active: true,
+            left_transform: [1.0, 0.0],
+            right_transform: [0.0, 1.0],
+            peak: [0.0, 0.0],
+            range: ([std::f32::INFINITY; 2], [std::f32::NEG_INFINITY; 2]),
+        }
+    }
+
+    /// Creates a new `SoundInstance` from a `Stream`, for stream sounds.
+    fn new_stream(stream: Box<dyn Stream>) -> Self {
+        SoundInstance {
+            handle: None,
+            stream,
+            active: true,
+            left_transform: [1.0, 0.0],
+            right_transform: [0.0, 1.0],
+            peak: [0.0, 0.0],
+            range: ([std::f32::INFINITY; 2], [std::f32::NEG_INFINITY; 2]),
+        }
+    }
+
+    /// Updates `peak` from `range`, and resets the latter to default.
+    fn update_peak(&mut self) {
+        self.peak[0] = (self.range.1[0] - self.range.0[0]) / 2.0;
+        self.peak[1] = (self.range.1[1] - self.range.0[1]) / 2.0;
+
+        self.range = ([std::f32::INFINITY; 2], [std::f32::NEG_INFINITY; 2]);
+    }
 }
 
 impl AudioMixer {
@@ -155,6 +241,7 @@ impl AudioMixer {
             volume: Arc::new(RwLock::new(1.0)),
             num_output_channels,
             output_sample_rate,
+            output_memory: Arc::new(RwLock::new(CircBuf::new())),
         }
     }
 
@@ -164,6 +251,7 @@ impl AudioMixer {
             sound_instances: Arc::clone(&self.sound_instances),
             volume: Arc::clone(&self.volume),
             num_output_channels: self.num_output_channels,
+            output_memory: Arc::clone(&self.output_memory),
         }
     }
 
@@ -173,18 +261,28 @@ impl AudioMixer {
     /// `output_buffer` is expected to be in 2-channel interleaved format.
     pub fn mix<'a, T>(&mut self, output_buffer: &mut [T])
     where
-        T: 'a + dasp::Sample + Default,
-        T::Signed: dasp::sample::conv::FromSample<i16>,
-        T::Float: dasp::sample::conv::FromSample<f32>,
+        T: 'a
+            + Default
+            + dasp::Sample<Signed = T>
+            + dasp::sample::ToSample<f32>
+            + dasp::sample::FromSample<i16>,
     {
-        let mut sound_instances = self.sound_instances.lock().unwrap();
-        let volume = *self.volume.read().unwrap();
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
+        let volume = *self.volume.read().expect("Cannot be called reentrant");
+        let mut output_memory = self
+            .output_memory
+            .write()
+            .expect("Cannot be called reentrant");
         Self::mix_audio::<T>(
             &mut sound_instances,
             volume,
             self.num_output_channels,
             output_buffer,
-        )
+            &mut output_memory,
+        );
     }
 
     /// Instantiate a seekable decoder for audio data with the given format.
@@ -199,7 +297,7 @@ impl AudioMixer {
         let decoder: Box<dyn SeekableDecoder> = match format.compression {
             AudioCompression::UncompressedUnknownEndian => {
                 // Cross fingers that it's little endian.
-                log::warn!("make_decoder: PCM sound is unknown endian; assuming little endian");
+                tracing::warn!("make_decoder: PCM sound is unknown endian; assuming little endian");
                 Box::new(PcmDecoder::new(
                     data,
                     format.is_stereo,
@@ -218,9 +316,7 @@ impl AudioMixer {
                 format.is_stereo,
                 format.sample_rate,
             )?),
-            #[cfg(feature = "minimp3")]
-            AudioCompression::Mp3 => Box::new(decoders::Mp3Decoder::new(data)?),
-            #[cfg(all(feature = "symphonia", not(feature = "minimp3")))]
+            #[cfg(feature = "mp3")]
             AudioCompression::Mp3 => Box::new(decoders::Mp3Decoder::new_seekable(data)?),
             #[cfg(feature = "nellymoser")]
             AudioCompression::Nellymoser => Box::new(decoders::NellymoserDecoder::new(
@@ -319,10 +415,13 @@ impl AudioMixer {
         volume: f32,
         num_channels: u8,
         mut output_buffer: &mut [T],
+        output_memory: &mut CircBuf,
     ) where
-        T: 'a + Default + dasp::Sample,
-        T::Signed: dasp::sample::conv::FromSample<i16>,
-        T::Float: dasp::sample::conv::FromSample<f32>,
+        T: 'a
+            + Default
+            + dasp::Sample<Signed = T>
+            + dasp::sample::ToSample<f32>
+            + dasp::sample::FromSample<i16>,
     {
         use dasp::{
             frame::{Frame, Stereo},
@@ -343,19 +442,34 @@ impl AudioMixer {
                     let sound_frame = sound.stream.next();
                     let [left_0, left_1] = sound_frame.mul_amp(sound.left_transform);
                     let [right_0, right_1] = sound_frame.mul_amp(sound.right_transform);
-                    let mut sound_frame: Stereo<T::Signed> = [
+                    let mut sound_frame: Stereo<T> = [
                         Sample::add_amp(left_0, left_1).to_sample(),
                         Sample::add_amp(right_0, right_1).to_sample(),
                     ];
                     sound_frame = sound_frame.scale_amp(volume);
+
+                    sound.range.0[0] = sound.range.0[0].min(sound_frame[0].to_sample());
+                    sound.range.0[1] = sound.range.0[1].min(sound_frame[1].to_sample());
+
+                    sound.range.1[0] = sound.range.1[0].max(sound_frame[0].to_sample());
+                    sound.range.1[1] = sound.range.1[1].max(sound_frame[1].to_sample());
+
                     output_frame = output_frame.add_amp(sound_frame);
                 } else {
                     sound.active = false;
                 }
             }
 
+            output_memory.push([output_frame[0].to_sample(), output_frame[1].to_sample()]);
+
+            if output_memory.pos == 0 || output_memory.pos == 1024 {
+                for (_, sound) in sound_instances.iter_mut() {
+                    sound.update_peak();
+                }
+            }
+
             for (buf_sample, output_sample) in buf_frame.iter_mut().zip(output_frame.iter()) {
-                *buf_sample = output_sample.to_sample();
+                *buf_sample = *output_sample;
             }
         }
 
@@ -363,7 +477,16 @@ impl AudioMixer {
         sound_instances.retain(|_, sound| sound.active);
     }
 
-    /// Registers a sound with the audio mixer.
+    pub fn get_sample_history(&self) -> [[f32; 2]; 1024] {
+        let output_memory = self
+            .output_memory
+            .read()
+            .expect("Cannot be called reentrant");
+
+        *output_memory.get()
+    }
+
+    /// Registers an embedded SWF sound with the audio mixer.
     pub fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError> {
         // Slice off latency seek for MP3 data.
         let (skip_sample_frames, data) = if swf_sound.format.compression == AudioCompression::Mp3 {
@@ -385,6 +508,31 @@ impl AudioMixer {
         Ok(self.sounds.insert(sound))
     }
 
+    /// Registers an external MP3 with the audio mixer.
+    #[cfg(feature = "mp3")]
+    pub fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+        let data = Arc::from(data);
+        // Validate that this is actually MP3 data, and calculate duration and sample rate.
+        let metadata = decoders::mp3_metadata(&data)?;
+        let sound = Sound {
+            format: swf::SoundFormat {
+                compression: AudioCompression::Mp3,
+                sample_rate: metadata.sample_rate,
+                is_stereo: true,
+                is_16_bit: true,
+            },
+            data,
+            num_sample_frames: metadata.num_sample_frames,
+            skip_sample_frames: 0,
+        };
+        Ok(self.sounds.insert(sound))
+    }
+
+    #[cfg(not(feature = "mp3"))]
+    pub fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+        Err(decoders::Error::UnhandledCompression(AudioCompression::Mp3))
+    }
+
     /// Starts a timeline audio stream.
     pub fn start_stream(
         &mut self,
@@ -398,14 +546,11 @@ impl AudioMixer {
         // feed the decoder audio data on the fly.
         let stream = self.make_stream_from_swf_slice(stream_info, clip_data)?;
 
-        let mut sound_instances = self.sound_instances.lock().unwrap();
-        let handle = sound_instances.insert(SoundInstance {
-            handle: None,
-            stream,
-            active: true,
-            left_transform: [1.0, 0.0],
-            right_transform: [0.0, 1.0],
-        });
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
+        let handle = sound_instances.insert(SoundInstance::new_stream(stream));
         Ok(handle)
     }
 
@@ -434,25 +579,28 @@ impl AudioMixer {
         };
 
         // Add sound instance to active list.
-        let mut sound_instances = self.sound_instances.lock().unwrap();
-        let handle = sound_instances.insert(SoundInstance {
-            handle: Some(sound_handle),
-            stream,
-            active: true,
-            left_transform: [1.0, 0.0],
-            right_transform: [0.0, 1.0],
-        });
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
+        let handle = sound_instances.insert(SoundInstance::new_sound(sound_handle, stream));
         Ok(handle)
     }
 
     /// Stops a playing sound instance.
     pub fn stop_sound(&mut self, sound: SoundInstanceHandle) {
-        let mut sound_instances = self.sound_instances.lock().unwrap();
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
         sound_instances.remove(sound);
     }
 
     pub fn stop_all_sounds(&mut self) {
-        let mut sound_instances = self.sound_instances.lock().unwrap();
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
         // This is a workaround for a bug in generational-arena:
         // Arena::clear does not properly bump the generational index, allowing for stale references
         // to continue to work (this caused #1315). Arena::remove will force a generation bump.
@@ -467,13 +615,24 @@ impl AudioMixer {
     ///
     ////// Returns `None` if the sound is no longer playing.
     pub fn get_sound_position(&self, instance: SoundInstanceHandle) -> Option<f64> {
-        let sound_instances = self.sound_instances.lock().unwrap();
+        let sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
         sound_instances.get(instance).map(|instance| {
             // Get the current sample position from the underlying audio source.
             let num_sample_frames: f64 = instance.stream.source_position().into();
             let sample_rate: f64 = instance.stream.source_sample_rate().into();
             num_sample_frames * 1000.0 / sample_rate
         })
+    }
+
+    pub fn get_sound_peak(&self, instance: SoundInstanceHandle) -> Option<[f32; 2]> {
+        let sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
+        sound_instances.get(instance).map(|instance| instance.peak)
     }
 
     /// Returns the duration of a registered sound in milliseconds.
@@ -505,7 +664,10 @@ impl AudioMixer {
         instance: SoundInstanceHandle,
         transform: SoundTransform,
     ) {
-        let mut sound_instances = self.sound_instances.lock().unwrap();
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
         if let Some(instance) = sound_instances.get_mut(instance) {
             instance.left_transform = [transform.left_to_left, transform.right_to_left];
             instance.right_transform = [transform.left_to_right, transform.right_to_right];
@@ -513,11 +675,11 @@ impl AudioMixer {
     }
 
     pub fn volume(&self) -> f32 {
-        *self.volume.read().unwrap()
+        *self.volume.read().expect("Cannot be called reentrant")
     }
 
     pub fn set_volume(&mut self, volume: f32) {
-        *self.volume.write().unwrap() = volume
+        *self.volume.write().expect("Cannot be called reentrant") = volume
     }
 }
 
@@ -534,6 +696,8 @@ pub struct AudioMixerProxy {
 
     /// The number of channels in the output stream. Must be 1 or 2.
     num_output_channels: u8,
+
+    output_memory: Arc<RwLock<CircBuf>>,
 }
 
 impl AudioMixerProxy {
@@ -543,17 +707,27 @@ impl AudioMixerProxy {
     /// `output_buffer` is expected to be in 2-channel interleaved format.
     pub fn mix<'a, T>(&self, output_buffer: &mut [T])
     where
-        T: 'a + dasp::Sample + Default,
-        T::Signed: dasp::sample::conv::FromSample<i16>,
-        T::Float: dasp::sample::conv::FromSample<f32>,
+        T: 'a
+            + Default
+            + dasp::Sample<Signed = T>
+            + dasp::sample::ToSample<f32>
+            + dasp::sample::FromSample<i16>,
     {
-        let mut sound_instances = self.sound_instances.lock().unwrap();
-        let volume = *self.volume.read().unwrap();
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
+        let volume = *self.volume.read().expect("Cannot be called reentrant");
+        let mut output_memory = self
+            .output_memory
+            .write()
+            .expect("Cannot be called reentrant");
         AudioMixer::mix_audio::<T>(
             &mut sound_instances,
             volume,
             self.num_output_channels,
             output_buffer,
+            &mut output_memory,
         )
     }
 }
@@ -851,7 +1025,7 @@ impl dasp::signal::Signal for EnvelopeSignal {
 
             if self.prev_point.sample > self.next_point.sample {
                 self.next_point.sample = self.prev_point.sample;
-                log::error!("Invalid sound envelope; sample indices are out of order");
+                tracing::error!("Invalid sound envelope; sample indices are out of order");
             }
         }
 
@@ -869,6 +1043,11 @@ macro_rules! impl_audio_mixer_backend {
         #[inline]
         fn register_sound(&mut self, swf_sound: &swf::Sound) -> Result<SoundHandle, RegisterError> {
             self.$mixer.register_sound(swf_sound)
+        }
+
+        #[inline]
+        fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+            self.$mixer.register_mp3(data)
         }
 
         #[inline]
@@ -932,6 +1111,11 @@ macro_rules! impl_audio_mixer_backend {
         }
 
         #[inline]
+        fn get_sound_peak(&mut self, instance: SoundInstanceHandle) -> Option<[f32; 2]> {
+            self.$mixer.get_sound_peak(instance)
+        }
+
+        #[inline]
         fn volume(&self) -> f32 {
             self.$mixer.volume()
         }
@@ -939,6 +1123,10 @@ macro_rules! impl_audio_mixer_backend {
         #[inline]
         fn set_volume(&mut self, volume: f32) {
             self.$mixer.set_volume(volume)
+        }
+
+        fn get_sample_history(&self) -> [[f32; 2]; 1024] {
+            self.$mixer.get_sample_history()
         }
     };
 }

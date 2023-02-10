@@ -5,7 +5,6 @@ use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::Object;
 use crate::avm1::{ScriptObject, Value};
 use crate::context_menu;
-use crate::display_object::TDisplayObject;
 use gc_arena::MutationContext;
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
@@ -14,7 +13,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -27,7 +26,7 @@ pub fn constructor<'gc>(
 
     let built_in_items = ScriptObject::new(
         activation.context.gc_context,
-        Some(activation.context.avm1.prototypes.object),
+        Some(activation.context.avm1.prototypes().object),
     );
 
     built_in_items.set("print", true.into(), activation)?;
@@ -41,7 +40,7 @@ pub fn constructor<'gc>(
 
     this.set("builtInItems", built_in_items.into(), activation)?;
 
-    let constructor = activation.context.avm1.prototypes.array_constructor;
+    let constructor = activation.context.avm1.prototypes().array_constructor;
     let custom_items = constructor.construct(activation, &[])?;
 
     this.set("customItems", custom_items, activation)?;
@@ -50,7 +49,7 @@ pub fn constructor<'gc>(
 }
 
 pub fn copy<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -58,7 +57,11 @@ pub fn copy<'gc>(
         .get("onSelect", activation)?
         .coerce_to_object(activation);
 
-    let constructor = activation.context.avm1.prototypes.context_menu_constructor;
+    let constructor = activation
+        .context
+        .avm1
+        .prototypes()
+        .context_menu_constructor;
     let copy = constructor
         .construct(activation, &[callback.into()])?
         .coerce_to_object(activation);
@@ -120,7 +123,7 @@ pub fn copy<'gc>(
 }
 
 pub fn hide_builtin_items<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -149,81 +152,41 @@ pub fn create_proto<'gc>(
 
 pub fn make_context_menu_state<'gc>(
     menu: Option<Object<'gc>>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> context_menu::ContextMenuState<'gc> {
     let mut result = context_menu::ContextMenuState::new();
 
-    let root_mc = activation.context.stage.root_clip().as_movie_clip();
-    let builtin_items = {
-        let is_multiframe_movie = root_mc.map(|mc| mc.total_frames() > 1).unwrap_or(false);
-        let mut names = if is_multiframe_movie {
-            vec![
-                "zoom",
-                "quality",
-                "play",
-                "loop",
-                "rewind",
-                "forward_back",
-                "print",
-            ]
-        } else {
-            vec!["zoom", "quality", "print"]
-        };
-        if let Some(menu) = menu {
-            if let Ok(Value::Object(builtins)) = menu.get("builtInItems", activation) {
-                names.retain(|name| {
-                    !matches!(builtins.get(*name, activation), Ok(Value::Bool(false)))
-                });
+    let mut builtin_items = context_menu::BuiltInItemFlags::for_stage(activation.context.stage);
+    if let Some(menu) = menu {
+        if let Ok(Value::Object(builtins)) = menu.get("builtInItems", activation) {
+            if matches!(builtins.get("zoom", activation), Ok(Value::Bool(false))) {
+                builtin_items.zoom = false;
+            }
+            if matches!(builtins.get("quality", activation), Ok(Value::Bool(false))) {
+                builtin_items.quality = false;
+            }
+            if matches!(builtins.get("play", activation), Ok(Value::Bool(false))) {
+                builtin_items.play = false;
+            }
+            if matches!(builtins.get("loop", activation), Ok(Value::Bool(false))) {
+                builtin_items.loop_ = false;
+            }
+            if matches!(builtins.get("rewind", activation), Ok(Value::Bool(false))) {
+                builtin_items.rewind = false;
+            }
+            if matches!(
+                builtins.get("forward_back", activation),
+                Ok(Value::Bool(false))
+            ) {
+                builtin_items.forward_and_back = false;
+            }
+            if matches!(builtins.get("print", activation), Ok(Value::Bool(false))) {
+                builtin_items.print = false;
             }
         }
-        names
-    };
+    }
 
-    if builtin_items.contains(&"play") {
-        let is_playing_root_movie = root_mc.unwrap().playing();
-        result.push(
-            context_menu::ContextMenuItem {
-                enabled: true,
-                separator_before: true,
-                caption: "Play".to_string(),
-                checked: is_playing_root_movie,
-            },
-            context_menu::ContextMenuCallback::Play,
-        );
-    }
-    if builtin_items.contains(&"rewind") {
-        let is_first_frame = root_mc.unwrap().current_frame() <= 1;
-        result.push(
-            context_menu::ContextMenuItem {
-                enabled: !is_first_frame,
-                separator_before: true,
-                caption: "Rewind".to_string(),
-                checked: false,
-            },
-            context_menu::ContextMenuCallback::Rewind,
-        );
-    }
-    if builtin_items.contains(&"forward_back") {
-        let is_first_frame = root_mc.unwrap().current_frame() <= 1;
-        result.push(
-            context_menu::ContextMenuItem {
-                enabled: true,
-                separator_before: false,
-                caption: "Forward".to_string(),
-                checked: false,
-            },
-            context_menu::ContextMenuCallback::Forward,
-        );
-        result.push(
-            context_menu::ContextMenuItem {
-                enabled: !is_first_frame,
-                separator_before: false,
-                caption: "Back".to_string(),
-                checked: false,
-            },
-            context_menu::ContextMenuCallback::Back,
-        );
-    }
+    result.build_builtin_items(builtin_items, activation.context.stage);
 
     if let Some(menu) = menu {
         if let Ok(Value::Object(custom_items)) = menu.get("customItems", activation) {

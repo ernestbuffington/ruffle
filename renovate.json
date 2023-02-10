@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:base"
+  ],
+  "packageRules": [
+    {
+      "matchLanguages": ["rust"],
+      "matchUpdateTypes": "patch",
+      "excludePackageNames": ["wasm-bindgen"],
+      "groupName": "Rust dependency patches",
+      "extends": ["schedule:weekly"]
+    },
+    {
+      "matchLanguages": ["rust"],
+      "extends": ["schedule:weekly"]
+    },
+    {
+      "matchLanguages": ["js"],
+      "groupName": "Node.js dependencies",
+      "extends": ["schedule:monthly"]
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "Github Actions dependencies",
+      "extends": ["schedule:monthly"]
+    },
+    {
+      "matchPackageNames": ["tracing-tracy"],
+      "enabled": false
+    }
+  ]
+}

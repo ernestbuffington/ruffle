@@ -32,7 +32,7 @@ pub fn decode_define_bits_jpeg(data: &[u8], alpha_data: Option<&[u8]>) -> Result
     let format = determine_jpeg_tag_format(data);
     if format != JpegTagFormat::Jpeg && alpha_data.is_some() {
         // Only DefineBitsJPEG3 with true JPEG data should have separate alpha data.
-        log::warn!("DefineBitsJPEG contains non-JPEG data with alpha; probably incorrect")
+        tracing::warn!("DefineBitsJPEG contains non-JPEG data with alpha; probably incorrect")
     }
     match format {
         JpegTagFormat::Jpeg => decode_jpeg(data, alpha_data),
@@ -65,23 +65,79 @@ pub fn glue_tables_to_jpeg<'a>(
 }
 
 /// Removes potential invalid JPEG data from SWF DefineBitsJPEG tags.
-///
-/// SWF19 p.138:
-/// "Before version 8 of the SWF file format, SWF files could contain an erroneous header of 0xFF, 0xD9, 0xFF, 0xD8 before the JPEG SOI marker."
 /// These bytes need to be removed for the JPEG to decode properly.
-pub fn remove_invalid_jpeg_data(mut data: &[u8]) -> Cow<[u8]> {
-    // TODO: Might be better to return an Box<Iterator<Item=u8>> instead of a Cow here,
-    // where the spliced iter is a data[..n].chain(data[n+4..])?
-    if data.starts_with(&[0xFF, 0xD9, 0xFF, 0xD8]) {
-        data = &data[4..];
-    }
-    if let Some(pos) = data.windows(4).position(|w| w == [0xFF, 0xD9, 0xFF, 0xD8]) {
-        let mut out_data = Vec::with_capacity(data.len() - 4);
-        out_data.extend_from_slice(&data[..pos]);
-        out_data.extend_from_slice(&data[pos + 4..]);
-        out_data.into()
+pub fn remove_invalid_jpeg_data(data: &[u8]) -> Cow<[u8]> {
+    // SWF19 errata p.138:
+    // "Before version 8 of the SWF file format, SWF files could contain an erroneous header of 0xFF, 0xD9, 0xFF, 0xD8
+    // before the JPEG SOI marker."
+    // 0xFFD9FFD8 is a JPEG EOI+SOI marker pair. Contrary to the spec, this invalid marker sequence can actually appear
+    // at any time before the 0xFFC0 SOF marker, not only at the beginning of the data. I believe this is a relic from
+    // the SWF JPEGTables tag, which stores encoding tables separately from the DefineBits image data, encased in its
+    // own SOI+EOI pair. When these data are glued together, an interior EOI+SOI sequence is produced. The Flash JPEG
+    // decoder expects this pair and ignores it, despite standard JPEG decoders stopping at the EOI.
+    // When DefineBitsJPEG2 etc. were introduced, the Flash encoders/decoders weren't properly adjusted, resulting in
+    // this sequence persisting. Also, despite what the spec says, this doesn't appear to be version checked (e.g., a
+    // v9 SWF can contain one of these malformed JPEGs and display correctly).
+    // See https://github.com/ruffle-rs/ruffle/issues/8775 for various examples.
+
+    // JPEG markers
+    const SOF0: u8 = 0xC0; // Start of frame
+    const RST0: u8 = 0xD0; // Restart (we shouldn't see this before SOS, but just in case)
+    const RST7: u8 = 0xD7;
+    const SOI: u8 = 0xD8; // Start of image
+    const EOI: u8 = 0xD9; // End of image
+
+    let mut data: Cow<[u8]> = if let Some(stripped) = data.strip_prefix(&[0xFF, EOI, 0xFF, SOI]) {
+        // Common case: usually the sequence is at the beginning as the spec says, so adjust the slice to avoid a copy.
+        stripped.into()
     } else {
-        data.into()
+        // Parse the JPEG markers searching for the 0xFFD9FFD8 marker sequence to splice out.
+        // We only have to search up to the SOF0 marker.
+        // This might be another case where eventually we want to write our own full JPEG decoder to match Flash's decoder.
+        let mut jpeg_data = data;
+        let mut pos = 0;
+        loop {
+            if jpeg_data.len() < 4 {
+                // No invalid sequence found before SOF marker, return data as-is.
+                break data.into();
+            }
+            let payload_len: usize = match &jpeg_data[..4] {
+                [0xFF, EOI, 0xFF, SOI] => {
+                    // Invalid EOI+SOI sequence found, splice it out.
+                    let mut out_data = Vec::with_capacity(data.len() - 4);
+                    out_data.extend_from_slice(&data[..pos]);
+                    out_data.extend_from_slice(&data[pos + 4..]);
+                    break out_data.into();
+                }
+                // EOI, SOI, RST markers do not include a size.
+                [0xFF, EOI | SOI | RST0..=RST7, _, _] => 0,
+                [0xFF, SOF0, _, _] => {
+                    // No invalid sequence found before SOF marker, return data as-is.
+                    break data.into();
+                }
+                // Other tags include a length.
+                [0xFF, _, a, b] => u16::from_be_bytes([*a, *b]).into(),
+                _ => {
+                    // All JPEG markers should start with 0xFF.
+                    // So this is either not a JPEG, or we screwed up parsing the markers. Bail out.
+                    break data.into();
+                }
+            };
+            // Advance to next JPEG marker.
+            jpeg_data = jpeg_data.get(payload_len + 2..).unwrap_or_default();
+            pos += payload_len + 2;
+        }
+    };
+
+    // Some JPEGs are missing the final EOI marker (JPEG optimizers truncate it?)
+    // Flash and most image decoders will still display these images, but jpeg-decoder errors.
+    // Glue on an EOI marker if its not already there and hope for the best.
+    if data.ends_with(&[0xFF, EOI]) {
+        data
+    } else {
+        tracing::warn!("JPEG is missing EOI marker and may not decode properly");
+        data.to_mut().extend_from_slice(&[0xFF, EOI]);
+        data
     }
 }
 
@@ -113,17 +169,9 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap, Er
                 [r as u8, g as u8, b as u8]
             })
             .collect(),
-        jpeg_decoder::PixelFormat::L8 => {
-            let mut rgb = Vec::with_capacity(decoded_data.len() * 3);
-            for elem in decoded_data {
-                rgb.push(elem);
-                rgb.push(elem);
-                rgb.push(elem);
-            }
-            rgb
-        }
+        jpeg_decoder::PixelFormat::L8 => decoded_data.iter().flat_map(|&c| [c, c, c]).collect(),
         jpeg_decoder::PixelFormat::L16 => {
-            log::warn!("Unimplemented L16 JPEG pixel format");
+            tracing::warn!("Unimplemented L16 JPEG pixel format");
             decoded_data
         }
     };
@@ -133,22 +181,21 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap, Er
         let alpha_data = decompress_zlib(alpha_data)?;
 
         if alpha_data.len() == decoded_data.len() / 3 {
-            let mut rgba = Vec::with_capacity((decoded_data.len() / 3) * 4);
-            let mut i = 0;
-            let mut a = 0;
-            while i < decoded_data.len() {
-                // The JPEG data should be premultiplied alpha, but it isn't in some incorrect SWFs (see #6893).
-                // This means 0% alpha pixels may have color and incorrectly show as visible.
-                // Flash Player clamps color to the alpha value to fix this case.
-                // Only applies to DefineBitsJPEG3; DefineBitsLossless does not seem to clamp.
-                let alpha = alpha_data[a];
-                rgba.push(decoded_data[i].min(alpha));
-                rgba.push(decoded_data[i + 1].min(alpha));
-                rgba.push(decoded_data[i + 2].min(alpha));
-                rgba.push(alpha);
-                i += 3;
-                a += 1;
-            }
+            let rgba = decoded_data
+                .chunks_exact(3)
+                .zip(alpha_data)
+                .flat_map(|(rgb, a)| {
+                    // The JPEG data should be premultiplied alpha, but it isn't in some incorrect
+                    // SWFs (see #6893).
+                    // This means 0% alpha pixels may have color and incorrectly show as visible.
+                    // Flash Player clamps color to the alpha value to fix this case.
+                    // Only applies to DefineBitsJPEG3; DefineBitsLossless does not seem to clamp.
+                    let r = rgb[0].min(a);
+                    let g = rgb[1].min(a);
+                    let b = rgb[2].min(a);
+                    [r, g, b, a]
+                })
+                .collect();
             return Ok(Bitmap::new(
                 metadata.width.into(),
                 metadata.height.into(),
@@ -157,7 +204,7 @@ fn decode_jpeg(jpeg_data: &[u8], alpha_data: Option<&[u8]>) -> Result<Bitmap, Er
             ));
         } else {
             // Size isn't correct; fallback to RGB?
-            log::error!("Size mismatch in DefineBitsJPEG3 alpha data");
+            tracing::error!("Size mismatch in DefineBitsJPEG3 alpha data");
         }
     }
 
@@ -188,39 +235,28 @@ pub fn decode_define_bits_lossless(swf_tag: &swf::DefineBitsLossless) -> Result<
                 for _ in 0..swf_tag.width {
                     let compressed = u16::from_be_bytes([decoded_data[i], decoded_data[i + 1]]);
                     let rgb5_component = |shift: u16| {
-                        let component = compressed >> shift & 0x1F;
+                        let component = (compressed >> shift) & 0x1F;
                         ((component * 255 + 15) / 31) as u8
                     };
-                    out_data.push(rgb5_component(10));
-                    out_data.push(rgb5_component(5));
-                    out_data.push(rgb5_component(0));
-                    out_data.push(0xff);
+                    out_data.extend([
+                        rgb5_component(10),
+                        rgb5_component(5),
+                        rgb5_component(0),
+                        0xff,
+                    ]);
                     i += 2;
                 }
                 i += (padded_width - swf_tag.width) as usize * 2;
             }
             out_data
         }
-        (1, swf::BitmapFormat::Rgb32) => {
-            let mut i = 0;
-            while i < decoded_data.len() {
-                decoded_data[i] = decoded_data[i + 1];
-                decoded_data[i + 1] = decoded_data[i + 2];
-                decoded_data[i + 2] = decoded_data[i + 3];
-                decoded_data[i + 3] = 0xff;
-                i += 4;
-            }
-            decoded_data
-        }
-        (2, swf::BitmapFormat::Rgb32) => {
-            let mut i = 0;
-            while i < decoded_data.len() {
-                let alpha = decoded_data[i];
-                decoded_data[i] = decoded_data[i + 1];
-                decoded_data[i + 1] = decoded_data[i + 2];
-                decoded_data[i + 2] = decoded_data[i + 3];
-                decoded_data[i + 3] = alpha;
-                i += 4;
+        (1 | 2, swf::BitmapFormat::Rgb32) => {
+            let has_alpha = swf_tag.version == 2;
+            for rgba in decoded_data.chunks_exact_mut(4) {
+                rgba.rotate_left(1);
+                if !has_alpha {
+                    rgba[3] = 0xff;
+                }
             }
             decoded_data
         }
@@ -243,18 +279,8 @@ pub fn decode_define_bits_lossless(swf_tag: &swf::DefineBitsLossless) -> Result<
             for _ in 0..swf_tag.height {
                 for _ in 0..swf_tag.width {
                     let entry = decoded_data[i] as usize;
-                    if entry < palette.len() {
-                        let color = &palette[entry];
-                        out_data.push(color.r);
-                        out_data.push(color.g);
-                        out_data.push(color.b);
-                        out_data.push(color.a);
-                    } else {
-                        out_data.push(0);
-                        out_data.push(0);
-                        out_data.push(0);
-                        out_data.push(255);
-                    }
+                    let color = palette.get(entry).unwrap_or(&Color::BLACK);
+                    out_data.extend([color.r, color.g, color.b, color.a]);
                     i += 1;
                 }
                 i += (padded_width - swf_tag.width) as usize;
@@ -280,18 +306,9 @@ pub fn decode_define_bits_lossless(swf_tag: &swf::DefineBitsLossless) -> Result<
             for _ in 0..swf_tag.height {
                 for _ in 0..swf_tag.width {
                     let entry = decoded_data[i] as usize;
-                    if entry < palette.len() {
-                        let color = &palette[entry];
-                        out_data.push(color.r);
-                        out_data.push(color.g);
-                        out_data.push(color.b);
-                        out_data.push(color.a);
-                    } else {
-                        out_data.push(0);
-                        out_data.push(0);
-                        out_data.push(0);
-                        out_data.push(0);
-                    }
+                    const TRANSPARENT: Color = Color::from_rgb(0, 0);
+                    let color = palette.get(entry).unwrap_or(&TRANSPARENT);
+                    out_data.extend([color.r, color.g, color.b, color.a]);
                     i += 1;
                 }
                 i += (padded_width - swf_tag.width) as usize;

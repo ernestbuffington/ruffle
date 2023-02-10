@@ -1,3 +1,5 @@
+use ruffle_render::quality::StageQuality;
+use ruffle_render::utils::unmultiply_alpha_rgba;
 use std::borrow::Cow;
 use std::mem::size_of;
 use std::num::NonZeroU32;
@@ -11,6 +13,28 @@ macro_rules! create_debug_label {
             None
         }
     )
+}
+
+pub fn remove_srgb(format: wgpu::TextureFormat) -> wgpu::TextureFormat {
+    match format {
+        wgpu::TextureFormat::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8Unorm,
+        wgpu::TextureFormat::Bc1RgbaUnormSrgb => wgpu::TextureFormat::Bc1RgbaUnorm,
+        wgpu::TextureFormat::Bc2RgbaUnormSrgb => wgpu::TextureFormat::Bc2RgbaUnorm,
+        wgpu::TextureFormat::Bc3RgbaUnormSrgb => wgpu::TextureFormat::Bc3RgbaUnorm,
+        wgpu::TextureFormat::Bc7RgbaUnormSrgb => wgpu::TextureFormat::Bc7RgbaUnorm,
+        wgpu::TextureFormat::Etc2Rgb8UnormSrgb => wgpu::TextureFormat::Etc2Rgb8Unorm,
+        wgpu::TextureFormat::Etc2Rgb8A1UnormSrgb => wgpu::TextureFormat::Etc2Rgb8A1Unorm,
+        wgpu::TextureFormat::Etc2Rgba8UnormSrgb => wgpu::TextureFormat::Etc2Rgba8Unorm,
+        wgpu::TextureFormat::Astc {
+            block,
+            channel: wgpu::AstcChannel::UnormSrgb,
+        } => wgpu::TextureFormat::Astc {
+            block,
+            channel: wgpu::AstcChannel::Unorm,
+        },
+        _ => format,
+    }
 }
 
 pub fn format_list<'a>(values: &[&'a str], connector: &'a str) -> Cow<'a, str> {
@@ -66,7 +90,7 @@ pub fn create_buffer_with_data(
 }
 
 // Based off wgpu example 'capture'
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BufferDimensions {
     pub width: usize,
     pub height: usize,
@@ -92,4 +116,60 @@ impl BufferDimensions {
             padded_bytes_per_row,
         }
     }
+}
+
+pub fn buffer_to_image(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+    dimensions: &BufferDimensions,
+    index: Option<wgpu::SubmissionIndex>,
+    size: wgpu::Extent3d,
+    premultiplied_alpha: bool,
+) -> image::RgbaImage {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let buffer_slice = buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        sender.send(result).unwrap();
+    });
+    device.poll(
+        index
+            .map(wgpu::Maintain::WaitForSubmissionIndex)
+            .unwrap_or(wgpu::Maintain::Wait),
+    );
+    let _ = receiver.recv().expect("MPSC channel must not fail");
+    let map = buffer_slice.get_mapped_range();
+    let mut bytes = Vec::with_capacity(dimensions.height * dimensions.unpadded_bytes_per_row);
+
+    for chunk in map.chunks(dimensions.padded_bytes_per_row.get() as usize) {
+        bytes.extend_from_slice(&chunk[..dimensions.unpadded_bytes_per_row]);
+    }
+
+    // The image copied from the GPU uses premultiplied alpha, so
+    // convert to straight alpha if requested by the user.
+    if !premultiplied_alpha {
+        unmultiply_alpha_rgba(&mut bytes);
+    }
+
+    let image = image::RgbaImage::from_raw(size.width, size.height, bytes)
+        .expect("Retrieved texture buffer must be a valid RgbaImage");
+    drop(map);
+    buffer.unmap();
+    image
+}
+
+pub fn supported_sample_count(
+    adapter: &wgpu::Adapter,
+    quality: StageQuality,
+    format: wgpu::TextureFormat,
+) -> u32 {
+    let mut sample_count = quality.sample_count();
+    let features = adapter.get_texture_format_features(format).flags;
+
+    // Keep halving the sample count until we get one that's supported - or 1 (no multisampling)
+    // It's not guaranteed that supporting 4x means supporting 2x, so there's no "max" option
+    // And it's probably safer to round down than up, given it's a performance setting.
+    while sample_count > 1 && !features.sample_count_supported(sample_count) {
+        sample_count /= 2;
+    }
+    sample_count
 }

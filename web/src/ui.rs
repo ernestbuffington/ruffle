@@ -56,7 +56,9 @@ impl UiBackend for WebUiBackend {
     }
 
     fn set_clipboard_content(&mut self, _content: String) {
-        log::warn!("set clipboard not implemented");
+        //TODO: in AVM2 FP9+ this only works when called from a button handler due to sandbox
+        // restrictions
+        tracing::warn!("set clipboard not implemented");
     }
 
     fn set_fullscreen(&mut self, is_full: bool) -> Result<(), FullscreenError> {

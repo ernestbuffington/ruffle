@@ -12,7 +12,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -22,7 +22,7 @@ pub fn constructor<'gc>(
 }
 
 pub fn matrix<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -39,7 +39,7 @@ pub fn matrix<'gc>(
 }
 
 pub fn set_matrix<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -68,8 +68,8 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let color_matrix_filter = ColorMatrixFilterObject::empty_object(gc_context, Some(proto));
-    let object = color_matrix_filter.as_script_object().unwrap();
+    let color_matrix_filter = ColorMatrixFilterObject::empty_object(gc_context, proto);
+    let object = color_matrix_filter.raw_script_object();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     color_matrix_filter.into()
 }

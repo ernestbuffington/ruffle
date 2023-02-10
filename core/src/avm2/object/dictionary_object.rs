@@ -4,8 +4,9 @@ use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
-use crate::avm2::Error;
+use crate::avm2::{Error, Multiname};
 use crate::string::AvmString;
+use core::fmt;
 use fnv::FnvHashMap;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
@@ -13,8 +14,8 @@ use std::cell::{Ref, RefMut};
 /// A class instance allocator that allocates Dictionary objects.
 pub fn dictionary_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<Object<'gc>, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
     Ok(DictionaryObject(GcCell::allocate(
@@ -32,11 +33,19 @@ pub fn dictionary_allocator<'gc>(
 /// This is implemented by way of "object space", parallel to the property
 /// space that ordinary properties live in. This space has no namespaces, and
 /// keys are objects instead of strings.
-#[derive(Clone, Collect, Debug, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct DictionaryObject<'gc>(GcCell<'gc, DictionaryObjectData<'gc>>);
 
-#[derive(Clone, Collect, Debug)]
+impl fmt::Debug for DictionaryObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DictionaryObject")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct DictionaryObjectData<'gc> {
     /// Base script object
@@ -90,7 +99,7 @@ impl<'gc> TObject<'gc> for DictionaryObject<'gc> {
         self.0.as_ptr() as *const ObjectPtr
     }
 
-    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error<'gc>> {
         Ok(Object::from(*self).into())
     }
 
@@ -101,8 +110,8 @@ impl<'gc> TObject<'gc> for DictionaryObject<'gc> {
     fn get_next_enumerant(
         self,
         last_index: u32,
-        _activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Option<u32>, Error> {
+        _activation: &mut Activation<'_, 'gc>,
+    ) -> Result<Option<u32>, Error<'gc>> {
         let read = self.0.read();
         let num_enumerants = read.base.num_enumerants();
         let object_space_length = read.object_space.keys().len() as u32;
@@ -117,8 +126,8 @@ impl<'gc> TObject<'gc> for DictionaryObject<'gc> {
     fn get_enumerant_name(
         self,
         index: u32,
-        _activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error> {
+        _activation: &mut Activation<'_, 'gc>,
+    ) -> Result<Value<'gc>, Error<'gc>> {
         let read = self.0.read();
         let object_space_len = read.object_space.keys().len() as u32;
         if object_space_len >= index {
@@ -132,6 +141,22 @@ impl<'gc> TObject<'gc> for DictionaryObject<'gc> {
                 .base
                 .get_enumerant_name(index - object_space_len)
                 .unwrap_or(Value::Undefined))
+        }
+    }
+
+    fn get_enumerant_value(
+        self,
+        index: u32,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<Value<'gc>, Error<'gc>> {
+        let name_value = self.get_enumerant_name(index, activation)?;
+        if !name_value.is_primitive() {
+            Ok(self.get_property_by_object(name_value.as_object().unwrap()))
+        } else {
+            self.get_property(
+                &Multiname::public(name_value.coerce_to_string(activation)?),
+                activation,
+            )
         }
     }
 

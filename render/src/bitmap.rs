@@ -1,10 +1,26 @@
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct BitmapHandle(pub usize);
+use std::fmt::Debug;
+use std::sync::Arc;
+
+use downcast_rs::{impl_downcast, Downcast};
+
+use crate::backend::RenderBackend;
+
+#[derive(Clone, Debug)]
+pub struct BitmapHandle(pub Arc<dyn BitmapHandleImpl>);
+
+pub trait BitmapHandleImpl: Downcast + Debug {}
+impl_downcast!(BitmapHandleImpl);
 
 /// Info returned by the `register_bitmap` methods.
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct BitmapInfo {
     pub handle: BitmapHandle,
+    pub width: u16,
+    pub height: u16,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct BitmapSize {
     pub width: u16,
     pub height: u16,
 }
@@ -14,7 +30,20 @@ pub struct BitmapInfo {
 /// This is used by render backends to get the bitmap used in a bitmap fill.
 /// For movie libraries, this will return the bitmap with the given character ID.
 pub trait BitmapSource {
-    fn bitmap(&self, id: u16) -> Option<BitmapInfo>;
+    fn bitmap_size(&self, id: u16) -> Option<BitmapSize>;
+    fn bitmap_handle(&self, id: u16, renderer: &mut dyn RenderBackend) -> Option<BitmapHandle>;
+}
+
+pub trait SyncHandle: Downcast + Debug {
+    /// Retrieves the rendered pixels from a previous `render_offscreen` call
+    fn retrieve_offscreen_texture(self: Box<Self>) -> Result<Bitmap, crate::error::Error>;
+}
+impl_downcast!(SyncHandle);
+
+impl Clone for Box<dyn SyncHandle> {
+    fn clone(&self) -> Box<dyn SyncHandle> {
+        panic!("SyncHandle should have been consumed before clone() is called!")
+    }
 }
 
 /// Decoded bitmap data from an SWF tag.
@@ -31,9 +60,8 @@ impl Bitmap {
     pub fn new(width: u32, height: u32, format: BitmapFormat, mut data: Vec<u8>) -> Self {
         // If the size is incorrect, either we screwed up or the decoder screwed up.
         let expected_len = width as usize * height as usize * format.bytes_per_pixel();
-        debug_assert_eq!(data.len(), expected_len);
         if data.len() != expected_len {
-            log::warn!(
+            tracing::warn!(
                 "Incorrect bitmap data size, expected {} bytes, got {}",
                 data.len(),
                 expected_len
@@ -86,33 +114,19 @@ impl Bitmap {
     pub fn data_mut(&mut self) -> &mut [u8] {
         &mut self.data
     }
-}
 
-impl From<Bitmap> for Vec<i32> {
-    fn from(bitmap: Bitmap) -> Self {
-        match bitmap.format {
-            BitmapFormat::Rgb => bitmap
-                .data
-                .chunks_exact(3)
-                .map(|chunk| {
-                    let red = chunk[0];
-                    let green = chunk[1];
-                    let blue = chunk[2];
-                    i32::from_le_bytes([blue, green, red, 0xFF])
-                })
-                .collect(),
-            BitmapFormat::Rgba => bitmap
-                .data
-                .chunks_exact(4)
-                .map(|chunk| {
-                    let red = chunk[0];
-                    let green = chunk[1];
-                    let blue = chunk[2];
-                    let alpha = chunk[3];
-                    i32::from_le_bytes([blue, green, red, alpha])
-                })
-                .collect(),
-        }
+    pub fn as_colors(&self) -> impl Iterator<Item = i32> + '_ {
+        let chunks = match self.format {
+            BitmapFormat::Rgb => self.data.chunks_exact(3),
+            BitmapFormat::Rgba => self.data.chunks_exact(4),
+        };
+        chunks.map(|chunk| {
+            let red = chunk[0];
+            let green = chunk[1];
+            let blue = chunk[2];
+            let alpha = chunk.get(3).copied().unwrap_or(0xFF);
+            i32::from_le_bytes([blue, green, red, alpha])
+        })
     }
 }
 

@@ -6,19 +6,22 @@ use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::{sound_allocator, Object, SoundChannelObject, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::Multiname;
 use crate::avm2::Namespace;
 use crate::avm2::QName;
+use crate::backend::navigator::Request;
 use crate::character::Character;
 use crate::display_object::SoundTransform;
+use crate::{avm2_stub_getter, avm2_stub_method};
 use gc_arena::{GcCell, MutationContext};
 use swf::{SoundEvent, SoundInfo};
 
 /// Implements `flash.media.Sound`'s instance constructor.
 pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(this) = this {
         activation.super_init(this, &[])?;
 
@@ -41,7 +44,7 @@ pub fn instance_init<'gc>(
                 {
                     this.set_sound(activation.context.gc_context, *sound);
                 } else {
-                    log::warn!("Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}", class_object.inner_class_definition().read().name().local_name(), symbol);
+                    tracing::warn!("Attempted to construct subclass of Sound, {}, which is associated with non-Sound character {}", class_object.inner_class_definition().read().name().local_name(), symbol);
                 }
             }
         }
@@ -52,19 +55,19 @@ pub fn instance_init<'gc>(
 
 /// Implements `flash.media.Sound`'s class constructor.
 pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
 }
 
 /// Implements `Sound.bytesTotal`
 pub fn bytes_total<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(sound) = this.and_then(|this| this.as_sound()) {
         if let Some(length) = activation.context.audio.get_sound_size(sound) {
             return Ok((length).into());
@@ -76,30 +79,32 @@ pub fn bytes_total<'gc>(
 
 /// Implements `Sound.isBuffering`
 pub fn is_buffering<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_getter!(activation, "flash.media.Sound", "isBuffering");
     //STUB: We do not yet support network-loaded sounds.
     Ok(false.into())
 }
 
 /// Implements `Sound.url`
 pub fn url<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_getter!(activation, "flash.media.Sound", "url");
     //STUB: We do not yet support network-loaded sounds.
     Ok(Value::Null)
 }
 
 /// Implements `Sound.length`
 pub fn length<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(sound) = this.and_then(|this| this.as_sound()) {
         if let Some(duration) = activation.context.audio.get_sound_duration(sound) {
             return Ok((duration).into());
@@ -111,10 +116,10 @@ pub fn length<'gc>(
 
 /// Implements `Sound.play`
 pub fn play<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     if let Some(sound) = this.and_then(|this| this.as_sound()) {
         let position = args
             .get(0)
@@ -170,56 +175,92 @@ pub fn play<'gc>(
     Ok(Value::Null)
 }
 
-/// Stubs `Sound.extract`
+/// `Sound.extract`
 pub fn extract<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Err("Sound.extract is a stub.".into())
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_method!(activation, "flash.media.Sound", "extract");
+    Ok(Value::Undefined)
 }
 
-/// Stubs `Sound.close`
+/// `Sound.close`
 pub fn close<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Err("Sound.close is a stub.".into())
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_method!(activation, "flash.media.Sound", "close");
+    Ok(Value::Undefined)
 }
 
-/// Stubs `Sound.load`
+/// `Sound.load`
 pub fn load<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Err("Sound.load is a stub.".into())
+    activation: &mut Activation<'_, 'gc>,
+    this: Option<Object<'gc>>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(this) = this {
+        let url_request = match args.get(0) {
+            Some(Value::Object(request)) => request,
+            // This should never actually happen
+            _ => return Ok(Value::Undefined),
+        };
+
+        let url = url_request
+            .get_property(&Multiname::public("url"), activation)?
+            .coerce_to_string(activation)?;
+
+        // TODO: context parameter currently unused.
+        let _sound_context = args.get(1);
+        if _sound_context.is_some() {
+            avm2_stub_method!(activation, "flash.media.Sound", "load", "with context");
+        }
+
+        let future = activation.context.load_manager.load_sound_avm2(
+            activation.context.player.clone(),
+            this,
+            // FIXME: Set options from the `URLRequest`.
+            Request::get(url.to_string()),
+        );
+        activation.context.navigator.spawn_future(future);
+    }
+    Ok(Value::Undefined)
 }
 
-/// Stubs `Sound.loadCompressedDataFromByteArray`
+/// `Sound.loadCompressedDataFromByteArray`
 pub fn load_compressed_data_from_byte_array<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Err("Sound.loadCompressedDataFromByteArray is a stub.".into())
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_method!(
+        activation,
+        "flash.media.Sound",
+        "loadCompressedDataFromByteArray"
+    );
+    Ok(Value::Undefined)
 }
 
-/// Stubs `Sound.loadPCMFromByteArray`
+/// `Sound.loadPCMFromByteArray`
 pub fn load_pcm_from_byte_array<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Err("Sound.loadPCMFromByteArray is a stub.".into())
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_method!(activation, "flash.media.Sound", "loadPCMFromByteArray");
+    Ok(Value::Undefined)
 }
 
 /// Construct `Sound`'s class.
 pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
     let class = Class::new(
         QName::new(Namespace::package("flash.media"), "Sound"),
-        Some(QName::new(Namespace::package("flash.events"), "EventDispatcher").into()),
+        Some(Multiname::new(
+            Namespace::package("flash.events"),
+            "EventDispatcher",
+        )),
         Method::from_builtin(instance_init, "<Sound instance initializer>", mc),
         Method::from_builtin(class_init, "<Sound class initializer>", mc),
         mc,

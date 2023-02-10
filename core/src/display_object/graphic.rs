@@ -5,19 +5,30 @@ use crate::avm2::{
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::drawing::Drawing;
+use crate::library::MovieLibrarySource;
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use ruffle_render::backend::ShapeHandle;
+use ruffle_render::commands::CommandHandler;
 use std::cell::{Ref, RefMut};
 use std::sync::Arc;
 
-#[derive(Clone, Debug, Collect, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct Graphic<'gc>(GcCell<'gc, GraphicData<'gc>>);
 
-#[derive(Clone, Debug, Collect)]
+impl fmt::Debug for Graphic<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Graphic")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct GraphicData<'gc> {
     base: DisplayObjectBase<'gc>,
@@ -29,7 +40,7 @@ pub struct GraphicData<'gc> {
 impl<'gc> Graphic<'gc> {
     /// Construct a `Graphic` from it's associated `Shape` tag.
     pub fn from_swf_tag(
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         swf_shape: swf::Shape,
         movie: Arc<SwfMovie>,
     ) -> Self {
@@ -37,13 +48,15 @@ impl<'gc> Graphic<'gc> {
         let static_data = GraphicStatic {
             id: swf_shape.id,
             bounds: (&swf_shape.shape_bounds).into(),
-            render_handle: Some(
-                context
-                    .renderer
-                    .register_shape((&swf_shape).into(), library),
-            ),
+            render_handle: Some(context.renderer.register_shape(
+                (&swf_shape).into(),
+                &MovieLibrarySource {
+                    library,
+                    gc_context: context.gc_context,
+                },
+            )),
             shape: swf_shape,
-            movie: Some(movie),
+            movie,
         };
 
         Graphic(GcCell::allocate(
@@ -59,7 +72,7 @@ impl<'gc> Graphic<'gc> {
 
     /// Construct an empty `Graphic`.
     pub fn new_with_avm2(
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         avm2_object: Avm2Object<'gc>,
     ) -> Self {
         let static_data = GraphicStatic {
@@ -78,7 +91,7 @@ impl<'gc> Graphic<'gc> {
                 },
                 shape: Vec::new(),
             },
-            movie: None,
+            movie: context.swf.clone(),
         };
         let drawing = Drawing::new();
 
@@ -91,6 +104,12 @@ impl<'gc> Graphic<'gc> {
                 drawing: Some(drawing),
             },
         ))
+    }
+
+    pub fn drawing(&self, gc_context: MutationContext<'gc, '_>) -> RefMut<'_, Drawing> {
+        RefMut::map(self.0.write(gc_context), |w| {
+            w.drawing.get_or_insert_with(Drawing::new)
+        })
     }
 }
 
@@ -123,8 +142,8 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
         }
     }
 
-    fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        if context.is_action_script_3() && matches!(self.object2(), Avm2Value::Undefined) {
+    fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc>) {
+        if context.is_action_script_3() && matches!(self.object2(), Avm2Value::Null) {
             let shape_constr = context.avm2.classes().shape;
             let mut activation = Avm2Activation::from_nothing(context.reborrow());
 
@@ -136,22 +155,26 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
                 Ok(object) => {
                     self.0.write(activation.context.gc_context).avm2_object = Some(object.into())
                 }
-                Err(e) => log::error!("Got {} when constructing AVM2 side of display object", e),
+                Err(e) => {
+                    tracing::error!("Got {} when constructing AVM2 side of display object", e)
+                }
             }
+
+            self.on_construction_complete(context);
         }
     }
 
-    fn replace_with(&self, context: &mut UpdateContext<'_, 'gc, '_>, id: CharacterId) {
+    fn replace_with(&self, context: &mut UpdateContext<'_, 'gc>, id: CharacterId) {
         // Static assets like Graphics can replace themselves via a PlaceObject tag with PlaceObjectAction::Replace.
         // This does not create a new instance, but instead swaps out the underlying static data to point to the new art.
         if let Some(new_graphic) = context
             .library
-            .library_for_movie_mut(self.movie().unwrap())
+            .library_for_movie_mut(self.movie())
             .get_graphic(id)
         {
             self.0.write(context.gc_context).static_data = new_graphic.0.read().static_data;
         } else {
-            log::warn!("PlaceObject: expected Graphic at character ID {}", id);
+            tracing::warn!("PlaceObject: expected Graphic at character ID {}", id);
         }
     }
 
@@ -160,7 +183,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
     }
 
     fn render_self(&self, context: &mut RenderContext) {
-        if !self.world_bounds().intersects(&context.stage.view_bounds()) {
+        if !context.is_offscreen && !self.world_bounds().intersects(&context.stage.view_bounds()) {
             // Off-screen; culled
             return;
         }
@@ -169,14 +192,14 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
             drawing.render(context);
         } else if let Some(render_handle) = self.0.read().static_data.render_handle {
             context
-                .renderer
+                .commands
                 .render_shape(render_handle, context.transform_stack.transform())
         }
     }
 
     fn hit_test_shape(
         &self,
-        _context: &mut UpdateContext<'_, 'gc, '_>,
+        _context: &mut UpdateContext<'_, 'gc>,
         point: (Twips, Twips),
         _options: HitTestOptions,
     ) -> bool {
@@ -199,7 +222,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 
     fn post_instantiation(
         &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         _init_object: Option<Avm1Object<'gc>>,
         _instantiated_by: Instantiator,
         run_frame: bool,
@@ -217,7 +240,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
         }
     }
 
-    fn movie(&self) -> Option<Arc<SwfMovie>> {
+    fn movie(&self) -> Arc<SwfMovie> {
         self.0.read().static_data.movie.clone()
     }
 
@@ -226,7 +249,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
             .read()
             .avm2_object
             .map(Avm2Value::from)
-            .unwrap_or(Avm2Value::Undefined)
+            .unwrap_or(Avm2Value::Null)
     }
 
     fn set_object2(&mut self, mc: MutationContext<'gc, '_>, to: Avm2Object<'gc>) {
@@ -234,12 +257,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
     }
 
     fn as_drawing(&self, gc_context: MutationContext<'gc, '_>) -> Option<RefMut<'_, Drawing>> {
-        let mut write = self.0.write(gc_context);
-        if write.drawing.is_none() {
-            write.drawing = Some(Drawing::new());
-        }
-
-        Some(RefMut::map(write, |m| m.drawing.as_mut().unwrap()))
+        Some(self.drawing(gc_context))
     }
 }
 
@@ -252,5 +270,5 @@ struct GraphicStatic {
     shape: swf::Shape,
     render_handle: Option<ShapeHandle>,
     bounds: BoundingBox,
-    movie: Option<Arc<SwfMovie>>,
+    movie: Arc<SwfMovie>,
 }

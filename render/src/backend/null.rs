@@ -1,15 +1,24 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use crate::backend::{RenderBackend, ShapeHandle, ViewportDimensions};
-use crate::bitmap::{Bitmap, BitmapHandle, BitmapInfo, BitmapSource};
+use crate::bitmap::{Bitmap, BitmapHandle, BitmapHandleImpl, BitmapSize, BitmapSource, SyncHandle};
+use crate::commands::CommandList;
 use crate::error::Error;
-use crate::matrix::Matrix;
+use crate::quality::StageQuality;
 use crate::shape_utils::DistilledShape;
-use crate::transform::Transform;
+use gc_arena::MutationContext;
 use swf::Color;
+
+use super::{Context3D, Context3DCommand};
 
 pub struct NullBitmapSource;
 
 impl BitmapSource for NullBitmapSource {
-    fn bitmap(&self, _id: u16) -> Option<BitmapInfo> {
+    fn bitmap_size(&self, _id: u16) -> Option<BitmapSize> {
+        None
+    }
+    fn bitmap_handle(&self, _id: u16, _renderer: &mut dyn RenderBackend) -> Option<BitmapHandle> {
         None
     }
 }
@@ -23,6 +32,9 @@ impl NullRenderer {
         Self { dimensions }
     }
 }
+#[derive(Clone, Debug)]
+struct NullBitmapHandle;
+impl BitmapHandleImpl for NullBitmapHandle {}
 
 impl RenderBackend for NullRenderer {
     fn viewport_dimensions(&self) -> ViewportDimensions {
@@ -48,34 +60,48 @@ impl RenderBackend for NullRenderer {
     fn register_glyph_shape(&mut self, _shape: &swf::Glyph) -> ShapeHandle {
         ShapeHandle(0)
     }
-    fn begin_frame(&mut self, _clear: Color) {}
-    fn render_bitmap(&mut self, _bitmap: BitmapHandle, _transform: &Transform, _smoothing: bool) {}
-    fn render_shape(&mut self, _shape: ShapeHandle, _transform: &Transform) {}
-    fn draw_rect(&mut self, _color: Color, _matrix: &Matrix) {}
-    fn end_frame(&mut self) {}
-    fn push_mask(&mut self) {}
-    fn activate_mask(&mut self) {}
-    fn deactivate_mask(&mut self) {}
-    fn pop_mask(&mut self) {}
 
-    fn push_blend_mode(&mut self, _blend_mode: swf::BlendMode) {}
-    fn pop_blend_mode(&mut self) {}
-
-    fn get_bitmap_pixels(&mut self, _bitmap: BitmapHandle) -> Option<Bitmap> {
+    fn render_offscreen(
+        &mut self,
+        _handle: BitmapHandle,
+        _width: u32,
+        _height: u32,
+        _commands: CommandList,
+    ) -> Option<Box<dyn SyncHandle>> {
         None
     }
+
+    fn submit_frame(&mut self, _clear: Color, _commands: CommandList) {}
     fn register_bitmap(&mut self, _bitmap: Bitmap) -> Result<BitmapHandle, Error> {
-        Ok(BitmapHandle(0))
+        Ok(BitmapHandle(Arc::new(NullBitmapHandle)))
     }
-    fn unregister_bitmap(&mut self, _bitmap: BitmapHandle) {}
 
     fn update_texture(
         &mut self,
-        _bitmap: BitmapHandle,
+        _bitmap: &BitmapHandle,
         _width: u32,
         _height: u32,
         _rgba: Vec<u8>,
-    ) -> Result<BitmapHandle, Error> {
-        Ok(BitmapHandle(0))
+    ) -> Result<(), Error> {
+        Ok(())
     }
+
+    fn create_context3d(&mut self) -> Result<Box<dyn super::Context3D>, Error> {
+        Err(Error::Unimplemented)
+    }
+
+    fn context3d_present<'gc>(
+        &mut self,
+        _context: &mut dyn Context3D,
+        _commands: Vec<Context3DCommand<'gc>>,
+        _mc: MutationContext<'gc, '_>,
+    ) -> Result<(), Error> {
+        Err(Error::Unimplemented)
+    }
+
+    fn debug_info(&self) -> Cow<'static, str> {
+        Cow::Borrowed("Renderer: Null")
+    }
+
+    fn set_quality(&mut self, _quality: StageQuality) {}
 }

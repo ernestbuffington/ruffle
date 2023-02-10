@@ -193,7 +193,7 @@ impl NullSpawner {
         use futures::task::LocalSpawnExt;
         let _ = self.0.spawn_local(async move {
             if let Err(e) = future.await {
-                log::error!("Asynchronous error occurred: {}", e);
+                tracing::error!("Asynchronous error occurred: {}", e);
             }
         });
     }
@@ -223,7 +223,7 @@ impl NullSpawner {
     pub fn spawn_local(&self, future: OwnedFuture<(), Error>) {
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(e) = future.await {
-                log::error!("Asynchronous error occurred: {}", e);
+                tracing::error!("Asynchronous error occurred: {}", e);
             }
         });
     }
@@ -249,11 +249,11 @@ impl NullNavigatorBackend {
         }
     }
 
-    pub fn with_base_path(path: &Path, executor: &NullExecutor) -> Self {
-        Self {
+    pub fn with_base_path(path: &Path, executor: &NullExecutor) -> Result<Self, std::io::Error> {
+        Ok(Self {
             spawner: executor.spawner(),
-            relative_base_path: path.canonicalize().unwrap(),
-        }
+            relative_base_path: path.canonicalize()?,
+        })
     }
 
     #[cfg(any(unix, windows, target_os = "redox"))]

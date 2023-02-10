@@ -1,17 +1,20 @@
 #![allow(non_snake_case)]
 
-use crate::avm2::{Activation, Error, Namespace, Object, QName, TObject, Value};
-use crate::display_object::{StageQuality, TDisplayObject};
+use crate::avm2::Multiname;
+use crate::avm2::{Activation, Error, Namespace, Object, TObject, Value};
+use crate::avm2_stub_getter;
+use crate::display_object::TDisplayObject;
 use crate::prelude::{ColorTransform, DisplayObject, Matrix, Twips};
+use ruffle_render::quality::StageQuality;
 use swf::Fixed8;
 
 fn get_display_object<'gc>(
     this: Object<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<DisplayObject<'gc>, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<DisplayObject<'gc>, Error<'gc>> {
     Ok(this
         .get_property(
-            &QName::new(Namespace::Private("".into()), "_displayObject").into(),
+            &Multiname::new(Namespace::Private("".into()), "_displayObject"),
             activation,
         )?
         .as_object()
@@ -21,12 +24,12 @@ fn get_display_object<'gc>(
 }
 
 pub fn init<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     this.unwrap().set_property(
-        &QName::new(Namespace::Private("".into()), "_displayObject").into(),
+        &Multiname::new(Namespace::Private("".into()), "_displayObject"),
         args[0],
         activation,
     )?;
@@ -34,10 +37,10 @@ pub fn init<'gc>(
 }
 
 pub fn get_color_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.unwrap();
     let ct_obj = *get_display_object(this, activation)?
         .base()
@@ -46,46 +49,46 @@ pub fn get_color_transform<'gc>(
 }
 
 pub fn set_color_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.unwrap();
     let ct = object_to_color_transform(args[0].coerce_to_object(activation)?, activation)?;
     get_display_object(this, activation)?
         .base_mut(activation.context.gc_context)
-        .set_color_transform(&ct);
+        .set_color_transform(ct);
     Ok(Value::Undefined)
 }
 
 pub fn get_matrix<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.unwrap();
     let matrix = *get_display_object(this, activation)?.base().matrix();
     matrix_to_object(matrix, activation)
 }
 
 pub fn set_matrix<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.unwrap();
     let matrix = object_to_matrix(args[0].coerce_to_object(activation)?, activation)?;
     get_display_object(this, activation)?
         .base_mut(activation.context.gc_context)
-        .set_matrix(&matrix);
+        .set_matrix(matrix);
     Ok(Value::Undefined)
 }
 
 pub fn get_concatenated_matrix<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let this = this.unwrap();
 
     let dobj = get_display_object(this, activation)?;
@@ -123,11 +126,15 @@ pub fn get_concatenated_matrix<'gc>(
 }
 
 pub fn get_concatenated_color_transform<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    log::warn!("Transform.concatenatedColorTransform: not yet implemented");
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm2_stub_getter!(
+        activation,
+        "flash.geom.Transform",
+        "concatenatedColorTransform"
+    );
     Ok(Value::Undefined)
 }
 
@@ -135,31 +142,31 @@ pub fn get_concatenated_color_transform<'gc>(
 // is that what we should be doing?
 pub fn object_to_color_transform<'gc>(
     object: Object<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<ColorTransform, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<ColorTransform, Error<'gc>> {
     let red_multiplier = object
-        .get_property(&QName::dynamic_name("redMultiplier").into(), activation)?
+        .get_property(&Multiname::public("redMultiplier"), activation)?
         .coerce_to_number(activation)?;
     let green_multiplier = object
-        .get_property(&QName::dynamic_name("greenMultiplier").into(), activation)?
+        .get_property(&Multiname::public("greenMultiplier"), activation)?
         .coerce_to_number(activation)?;
     let blue_multiplier = object
-        .get_property(&QName::dynamic_name("blueMultiplier").into(), activation)?
+        .get_property(&Multiname::public("blueMultiplier"), activation)?
         .coerce_to_number(activation)?;
     let alpha_multiplier = object
-        .get_property(&QName::dynamic_name("alphaMultiplier").into(), activation)?
+        .get_property(&Multiname::public("alphaMultiplier"), activation)?
         .coerce_to_number(activation)?;
     let red_offset = object
-        .get_property(&QName::dynamic_name("redOffset").into(), activation)?
+        .get_property(&Multiname::public("redOffset"), activation)?
         .coerce_to_number(activation)?;
     let green_offset = object
-        .get_property(&QName::dynamic_name("greenOffset").into(), activation)?
+        .get_property(&Multiname::public("greenOffset"), activation)?
         .coerce_to_number(activation)?;
     let blue_offset = object
-        .get_property(&QName::dynamic_name("blueOffset").into(), activation)?
+        .get_property(&Multiname::public("blueOffset"), activation)?
         .coerce_to_number(activation)?;
     let alpha_offset = object
-        .get_property(&QName::dynamic_name("alphaOffset").into(), activation)?
+        .get_property(&Multiname::public("alphaOffset"), activation)?
         .coerce_to_number(activation)?;
     Ok(ColorTransform {
         r_mult: Fixed8::from_f64(red_multiplier),
@@ -175,8 +182,8 @@ pub fn object_to_color_transform<'gc>(
 
 pub fn color_transform_to_object<'gc>(
     color_transform: &ColorTransform,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<Value<'gc>, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
     let args = [
         color_transform.r_mult.to_f64().into(),
         color_transform.g_mult.to_f64().into(),
@@ -194,8 +201,8 @@ pub fn color_transform_to_object<'gc>(
 
 pub fn matrix_to_object<'gc>(
     matrix: Matrix,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<Value<'gc>, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
     let args = [
         matrix.a.into(),
         matrix.b.into(),
@@ -214,28 +221,28 @@ pub fn matrix_to_object<'gc>(
 
 pub fn object_to_matrix<'gc>(
     object: Object<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<Matrix, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Matrix, Error<'gc>> {
     let a = object
-        .get_property(&QName::dynamic_name("a").into(), activation)?
+        .get_property(&Multiname::public("a"), activation)?
         .coerce_to_number(activation)? as f32;
     let b = object
-        .get_property(&QName::dynamic_name("b").into(), activation)?
+        .get_property(&Multiname::public("b"), activation)?
         .coerce_to_number(activation)? as f32;
     let c = object
-        .get_property(&QName::dynamic_name("c").into(), activation)?
+        .get_property(&Multiname::public("c"), activation)?
         .coerce_to_number(activation)? as f32;
     let d = object
-        .get_property(&QName::dynamic_name("d").into(), activation)?
+        .get_property(&Multiname::public("d"), activation)?
         .coerce_to_number(activation)? as f32;
     let tx = Twips::from_pixels(
         object
-            .get_property(&QName::dynamic_name("tx").into(), activation)?
+            .get_property(&Multiname::public("tx"), activation)?
             .coerce_to_number(activation)?,
     );
     let ty = Twips::from_pixels(
         object
-            .get_property(&QName::dynamic_name("ty").into(), activation)?
+            .get_property(&Multiname::public("ty"), activation)?
             .coerce_to_number(activation)?,
     );
 

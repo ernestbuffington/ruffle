@@ -26,12 +26,12 @@ impl<'gc> XmlNodeObject<'gc> {
     pub fn from_xml_node(
         gc_context: MutationContext<'gc, '_>,
         mut node: XmlNode<'gc>,
-        proto: Option<Object<'gc>>,
+        proto: Object<'gc>,
     ) -> Self {
         let object = Self(GcCell::allocate(
             gc_context,
             XmlNodeObjectData {
-                base: ScriptObject::new(gc_context, proto),
+                base: ScriptObject::new(gc_context, Some(proto)),
                 node,
             },
         ));
@@ -44,8 +44,8 @@ impl fmt::Debug for XmlNodeObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let this = self.0.read();
         f.debug_struct("XmlNodeObject")
-            .field("base", &this.base)
             .field("node", &this.node)
+            .field("ptr", &self.0.as_ptr())
             .finish()
     }
 }
@@ -55,13 +55,13 @@ impl<'gc> TObject<'gc> for XmlNodeObject<'gc> {
 
     fn create_bare_object(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         this: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
         Ok(Self::from_xml_node(
             activation.context.gc_context,
             XmlNode::new(activation.context.gc_context, TEXT_NODE, Some("".into())),
-            Some(this),
+            this,
         )
         .into())
     }

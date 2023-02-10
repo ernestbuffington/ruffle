@@ -20,7 +20,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -48,7 +48,7 @@ pub fn create_proto<'gc>(
 
 /// Gets the target display object of this color transform.
 fn target<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
 ) -> Result<Option<DisplayObject<'gc>>, Error<'gc>> {
     // The target path resolves based on the active tellTarget clip of the stack frame.
@@ -65,7 +65,7 @@ fn target<'gc>(
 }
 
 fn get_rgb<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -82,7 +82,7 @@ fn get_rgb<'gc>(
 }
 
 fn get_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -91,7 +91,7 @@ fn get_transform<'gc>(
         let color_transform = base.color_transform();
         let out = ScriptObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.object),
+            Some(activation.context.avm1.prototypes().object),
         );
         out.set(
             "ra",
@@ -124,7 +124,7 @@ fn get_transform<'gc>(
 }
 
 fn set_rgb<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -134,7 +134,7 @@ fn set_rgb<'gc>(
         let rgb = args
             .get(0)
             .unwrap_or(&Value::Undefined)
-            .coerce_to_i32(activation)? as i32;
+            .coerce_to_i32(activation)?;
         let [b, g, r, _] = rgb.to_le_bytes();
 
         let mut base = target.base_mut(activation.context.gc_context);
@@ -150,12 +150,12 @@ fn set_rgb<'gc>(
 }
 
 fn set_transform<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     fn set_color_mult<'gc>(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         transform: Object<'gc>,
         property: &'static str,
         out: &mut Fixed8,
@@ -173,7 +173,7 @@ fn set_transform<'gc>(
     }
 
     fn set_color_add<'gc>(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         transform: Object<'gc>,
         property: &'static str,
         out: &mut i16,

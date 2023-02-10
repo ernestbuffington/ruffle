@@ -3,7 +3,7 @@ use crate::avm1::error::Error;
 use crate::avm1::object::Object;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{ScriptObject, Value};
-use crate::avm_warn;
+use crate::avm1_stub;
 use crate::string::AvmString;
 use gc_arena::MutationContext;
 
@@ -18,49 +18,43 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 };
 
 fn allow_domain<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "System.security.allowDomain() not implemented");
+    avm1_stub!(activation, "System.security", "allowDomain");
     Ok(Value::Undefined)
 }
 
 fn allow_insecure_domain<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(
-        activation,
-        "System.security.allowInsecureDomain() not implemented"
-    );
+    avm1_stub!(activation, "System.security", "allowInsecureDomain");
     Ok(Value::Undefined)
 }
 
 fn load_policy_file<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(
-        activation,
-        "System.security.loadPolicyFile() not implemented"
-    );
+    avm1_stub!(activation, "System.security", "loadPolicyFile");
     Ok(Value::Undefined)
 }
 
 fn escape_domain<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "System.security.escapeDomain() not implemented");
+    avm1_stub!(activation, "System.security", "escapeDomain");
     Ok(Value::Undefined)
 }
 
 fn get_sandbox_type<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -72,35 +66,29 @@ fn get_sandbox_type<'gc>(
 }
 
 fn get_choose_local_swf_path<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(
-        activation,
-        "System.security.chooseLocalSwfPath() not implemented"
-    );
+    avm1_stub!(activation, "System.security", "chooseLocalSwfPath");
     Ok(Value::Undefined)
 }
 
 fn policy_file_resolver<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(
-        activation,
-        "System.security.chooseLocalSwfPath() not implemented"
-    );
+    avm1_stub!(activation, "System.security", "chooseLocalSwfPath");
     Ok(Value::Undefined)
 }
 
 pub fn create<'gc>(
     gc_context: MutationContext<'gc, '_>,
-    proto: Option<Object<'gc>>,
+    proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let security = ScriptObject::new(gc_context, proto);
+    let security = ScriptObject::new(gc_context, Some(proto));
     define_properties_on(OBJECT_DECLS, gc_context, security, fn_proto);
     security.into()
 }

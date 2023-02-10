@@ -1,9 +1,10 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
-use crate::avm1::{AvmString, Object, TObject, Value};
+use crate::avm1::{Object, TObject, Value};
+use crate::string::AvmString;
 use gc_arena::Collect;
 
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub enum CallableValue<'gc> {
     UnCallable(Value<'gc>),
@@ -24,7 +25,7 @@ impl<'gc> CallableValue<'gc> {
         self,
         default_this: Object<'gc>,
         name: AvmString<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
         match self {

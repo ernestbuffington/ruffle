@@ -1,4 +1,3 @@
-#![no_std]
 //! Provides UCS2 string types for usage in AVM1 and AVM2.
 //!
 //! Internally, these types are represeted by a sequence of 1-byte or 2-bytes (wide) code units,
@@ -6,6 +5,8 @@
 //!
 //! To match Flash behavior, the string length is limited to 2³¹-1 code units;
 //! any attempt to create a longer string will panic.
+
+#![no_std]
 
 #[cfg_attr(test, macro_use)]
 extern crate alloc;

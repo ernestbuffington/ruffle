@@ -1,56 +1,25 @@
-//! `flash.system.System` class
+//! `flash.system.System` native methods
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
-use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::Object;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
-use gc_arena::{GcCell, MutationContext};
 
-/// Implements `flash.system.System`'s instance constructor.
-pub fn instance_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+/// Implements `flash.system.System.setClipboard` method
+pub fn set_clipboard<'gc>(
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Err("The System class cannot be constructed.".into())
-}
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    //TODO: in FP9+ this function only works when called from a button handler in the Plugin due to
+    // sandbox restrictions
+    let new_content = args
+        .get(0)
+        .unwrap_or(&Value::Undefined)
+        .coerce_to_string(activation)?
+        .to_string();
 
-/// Implements `flash.system.System`'s class constructor.
-pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+    activation.context.ui.set_clipboard_content(new_content);
+
     Ok(Value::Undefined)
-}
-
-/// Implements `System.gc`
-pub fn gc<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Ok(Value::Undefined)
-}
-
-/// Construct `System`'s class.
-pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
-    let class = Class::new(
-        QName::new(Namespace::package("flash.system"), "System"),
-        Some(QName::new(Namespace::public(), "Object").into()),
-        Method::from_builtin(instance_init, "<System instance initializer>", mc),
-        Method::from_builtin(class_init, "<System class initializer>", mc),
-        mc,
-    );
-
-    let mut write = class.write(mc);
-
-    const PUBLIC_CLASS_METHODS: &[(&str, NativeMethodImpl)] = &[("gc", gc)];
-    write.define_public_builtin_class_methods(mc, PUBLIC_CLASS_METHODS);
-
-    class
 }

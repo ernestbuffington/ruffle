@@ -6,10 +6,11 @@ use crate::avm1::object::super_object::SuperObject;
 use crate::avm1::property::Attribute;
 use crate::avm1::scope::Scope;
 use crate::avm1::value::Value;
-use crate::avm1::{ArrayObject, AvmString, Object, ObjectPtr, ScriptObject, TObject};
+use crate::avm1::{ArrayObject, Object, ObjectPtr, ScriptObject, TObject};
 use crate::display_object::{DisplayObject, TDisplayObject};
+use crate::string::AvmString;
 use crate::tag_utils::SwfSlice;
-use gc_arena::{Collect, CollectionContext, Gc, GcCell, MutationContext};
+use gc_arena::{Collect, Gc, GcCell, MutationContext};
 use std::{borrow::Cow, fmt, num::NonZeroU8};
 use swf::{avm1::types::FunctionFlags, SwfStr};
 
@@ -28,7 +29,7 @@ use swf::{avm1::types::FunctionFlags, SwfStr};
 /// your function yields `None`, you must ensure that the top-most activation
 /// in the AVM1 runtime will return with the value of this function.
 pub type NativeFunction = for<'gc> fn(
-    &mut Activation<'_, 'gc, '_>,
+    &mut Activation<'_, 'gc>,
     Object<'gc>,
     &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>>;
@@ -46,7 +47,7 @@ pub enum ExecutionReason {
 
 /// Represents a function defined in the AVM1 runtime, either through
 /// `DefineFunction` or `DefineFunction2`.
-#[derive(Debug, Clone, Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct Avm1Function<'gc> {
     /// The file format version of the SWF that generated this function.
@@ -66,10 +67,10 @@ pub struct Avm1Function<'gc> {
     params: Vec<Param<'gc>>,
 
     /// The scope the function was born into.
-    scope: GcCell<'gc, Scope<'gc>>,
+    scope: Gc<'gc, Scope<'gc>>,
 
     /// The constant pool the function executes with.
-    constant_pool: GcCell<'gc, Vec<Value<'gc>>>,
+    constant_pool: Gc<'gc, Vec<Value<'gc>>>,
 
     /// The base movie clip that the function was defined on.
     /// This is the movie clip that contains the bytecode.
@@ -87,8 +88,8 @@ impl<'gc> Avm1Function<'gc> {
         swf_version: u8,
         actions: SwfSlice,
         swf_function: swf::avm1::types::DefineFunction2,
-        scope: GcCell<'gc, Scope<'gc>>,
-        constant_pool: GcCell<'gc, Vec<Value<'gc>>>,
+        scope: Gc<'gc, Scope<'gc>>,
+        constant_pool: Gc<'gc, Vec<Value<'gc>>>,
         base_clip: DisplayObject<'gc>,
     ) -> Self {
         let encoding = SwfStr::encoding_for_version(swf_version);
@@ -136,7 +137,7 @@ impl<'gc> Avm1Function<'gc> {
         self.name
     }
 
-    pub fn scope(&self) -> GcCell<'gc, Scope<'gc>> {
+    pub fn scope(&self) -> Gc<'gc, Scope<'gc>> {
         self.scope
     }
 
@@ -160,7 +161,7 @@ impl<'gc> Avm1Function<'gc> {
         result
     }
 
-    fn load_this(&self, frame: &mut Activation<'_, 'gc, '_>, this: Value<'gc>, preload_r: &mut u8) {
+    fn load_this(&self, frame: &mut Activation<'_, 'gc>, this: Value<'gc>, preload_r: &mut u8) {
         let preload = self.flags.contains(FunctionFlags::PRELOAD_THIS);
         let suppress = self.flags.contains(FunctionFlags::SUPPRESS_THIS);
 
@@ -174,7 +175,7 @@ impl<'gc> Avm1Function<'gc> {
 
     fn load_arguments(
         &self,
-        frame: &mut Activation<'_, 'gc, '_>,
+        frame: &mut Activation<'_, 'gc>,
         args: &[Value<'gc>],
         caller: Option<Object<'gc>>,
         preload_r: &mut u8,
@@ -219,7 +220,7 @@ impl<'gc> Avm1Function<'gc> {
 
     fn load_super(
         &self,
-        frame: &mut Activation<'_, 'gc, '_>,
+        frame: &mut Activation<'_, 'gc>,
         this: Option<Object<'gc>>,
         depth: u8,
         preload_r: &mut u8,
@@ -242,7 +243,7 @@ impl<'gc> Avm1Function<'gc> {
         }
     }
 
-    fn load_root(&self, frame: &mut Activation<'_, 'gc, '_>, preload_r: &mut u8) {
+    fn load_root(&self, frame: &mut Activation<'_, 'gc>, preload_r: &mut u8) {
         if self.flags.contains(FunctionFlags::PRELOAD_ROOT) {
             let root = frame.base_clip().avm1_root().object();
             frame.set_local_register(*preload_r, root);
@@ -250,7 +251,7 @@ impl<'gc> Avm1Function<'gc> {
         }
     }
 
-    fn load_parent(&self, frame: &mut Activation<'_, 'gc, '_>, preload_r: &mut u8) {
+    fn load_parent(&self, frame: &mut Activation<'_, 'gc>, preload_r: &mut u8) {
         if self.flags.contains(FunctionFlags::PRELOAD_PARENT) {
             // If _parent is undefined (because this is a root timeline), it actually does not get pushed,
             // and _global ends up incorrectly taking _parent's register.
@@ -262,10 +263,10 @@ impl<'gc> Avm1Function<'gc> {
         }
     }
 
-    fn load_global(&self, frame: &mut Activation<'_, 'gc, '_>, preload_r: &mut u8) {
+    fn load_global(&self, frame: &mut Activation<'_, 'gc>, preload_r: &mut u8) {
         if self.flags.contains(FunctionFlags::PRELOAD_GLOBAL) {
             let global = frame.context.avm1.global_object();
-            frame.set_local_register(*preload_r, global);
+            frame.set_local_register(*preload_r, global.into());
             *preload_r += 1;
         }
     }
@@ -289,23 +290,15 @@ struct Param<'gc> {
 
 /// Represents a function that can be defined in the Ruffle runtime or by the
 /// AVM1 bytecode itself.
-#[derive(Clone)]
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
 pub enum Executable<'gc> {
     /// A function provided by the Ruffle runtime and implemented in Rust.
-    Native(NativeFunction),
+    Native(#[collect(require_static)] NativeFunction),
 
     /// ActionScript data defined by a previous `DefineFunction` or
     /// `DefineFunction2` action.
     Action(Gc<'gc, Avm1Function<'gc>>),
-}
-
-unsafe impl<'gc> Collect for Executable<'gc> {
-    fn trace(&self, cc: CollectionContext) {
-        match self {
-            Self::Native(_) => {}
-            Self::Action(af) => af.trace(cc),
-        }
-    }
 }
 
 impl fmt::Debug for Executable<'_> {
@@ -313,9 +306,12 @@ impl fmt::Debug for Executable<'_> {
         match self {
             Executable::Native(nf) => f
                 .debug_tuple("Executable::Native")
-                .field(&format!("{:p}", nf))
+                .field(&format!("{nf:p}"))
                 .finish(),
-            Executable::Action(af) => f.debug_tuple("Executable::Action").field(&af).finish(),
+            Executable::Action(af) => f
+                .debug_tuple("Executable::Action")
+                .field(&Gc::as_ptr(*af))
+                .finish(),
         }
     }
 }
@@ -337,7 +333,7 @@ impl<'gc> Executable<'gc> {
     pub fn exec(
         &self,
         name: ExecutionName<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         this: Value<'gc>,
         depth: u8,
         args: &[Value<'gc>],
@@ -386,13 +382,10 @@ impl<'gc> Executable<'gc> {
                 _ => unreachable!(),
             };
             // TODO: It would be nice to avoid these extra Scope allocs.
-            let scope = GcCell::allocate(
+            let scope = Gc::allocate(
                 activation.context.gc_context,
                 Scope::new(
-                    GcCell::allocate(
-                        activation.context.gc_context,
-                        Scope::from_global_object(activation.context.avm1.globals),
-                    ),
+                    activation.context.avm1.global_scope(),
                     super::scope::ScopeClass::Target,
                     base_clip_obj,
                 ),
@@ -400,7 +393,7 @@ impl<'gc> Executable<'gc> {
             (swf_version, scope)
         };
 
-        let child_scope = GcCell::allocate(
+        let child_scope = Gc::allocate(
             activation.context.gc_context,
             Scope::new_local_scope(parent_scope, activation.context.gc_context),
         );
@@ -478,7 +471,7 @@ impl<'gc> From<Gc<'gc, Avm1Function<'gc>>> for Executable<'gc> {
 }
 
 /// Represents an `Object` that holds executable code.
-#[derive(Debug, Clone, Collect, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct FunctionObject<'gc> {
     /// The script object base.
@@ -489,7 +482,15 @@ pub struct FunctionObject<'gc> {
     data: GcCell<'gc, FunctionObjectData<'gc>>,
 }
 
-#[derive(Debug, Clone, Collect)]
+impl fmt::Debug for FunctionObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("FunctionObject")
+            .field("ptr", &self.data.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 struct FunctionObjectData<'gc> {
     /// The code that will be invoked when this object is called.
@@ -504,12 +505,10 @@ impl<'gc> FunctionObject<'gc> {
         gc_context: MutationContext<'gc, '_>,
         function: Option<Executable<'gc>>,
         constructor: Option<Executable<'gc>>,
-        fn_proto: Option<Object<'gc>>,
+        fn_proto: Object<'gc>,
     ) -> Self {
-        let base = ScriptObject::new(gc_context, fn_proto);
-
-        FunctionObject {
-            base,
+        Self {
+            base: ScriptObject::new(gc_context, Some(fn_proto)),
             data: GcCell::allocate(
                 gc_context,
                 FunctionObjectData {
@@ -532,7 +531,7 @@ impl<'gc> FunctionObject<'gc> {
         gc_context: MutationContext<'gc, '_>,
         function: Option<Executable<'gc>>,
         constructor: Option<Executable<'gc>>,
-        fn_proto: Option<Object<'gc>>,
+        fn_proto: Object<'gc>,
         prototype: Object<'gc>,
     ) -> Object<'gc> {
         let function = Self::bare_function(gc_context, function, constructor, fn_proto).into();
@@ -557,7 +556,7 @@ impl<'gc> FunctionObject<'gc> {
     pub fn function(
         gc_context: MutationContext<'gc, '_>,
         function: impl Into<Executable<'gc>>,
-        fn_proto: Option<Object<'gc>>,
+        fn_proto: Object<'gc>,
         prototype: Object<'gc>,
     ) -> Object<'gc> {
         Self::allocate_function(gc_context, Some(function.into()), None, fn_proto, prototype)
@@ -568,7 +567,7 @@ impl<'gc> FunctionObject<'gc> {
         gc_context: MutationContext<'gc, '_>,
         constructor: impl Into<Executable<'gc>>,
         function: impl Into<Executable<'gc>>,
-        fn_proto: Option<Object<'gc>>,
+        fn_proto: Object<'gc>,
         prototype: Object<'gc>,
     ) -> Object<'gc> {
         Self::allocate_function(
@@ -582,28 +581,14 @@ impl<'gc> FunctionObject<'gc> {
 }
 
 impl<'gc> TObject<'gc> for FunctionObject<'gc> {
-    fn get_local_stored(
-        &self,
-        name: impl Into<AvmString<'gc>>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Option<Value<'gc>> {
-        self.base.get_local_stored(name, activation)
-    }
-
-    fn set_local(
-        &self,
-        name: AvmString<'gc>,
-        value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-        this: Object<'gc>,
-    ) -> Result<(), Error<'gc>> {
-        self.base.set_local(name, value, activation, this)
+    fn raw_script_object(&self) -> ScriptObject<'gc> {
+        self.base
     }
 
     fn call(
         &self,
         name: AvmString<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         this: Value<'gc>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
@@ -623,7 +608,7 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
 
     fn construct_on_existing(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         this: Object<'gc>,
         args: &[Value<'gc>],
     ) -> Result<(), Error<'gc>> {
@@ -668,7 +653,7 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
 
     fn construct(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
         let prototype = self
@@ -720,30 +705,13 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
         }
     }
 
-    fn getter(
-        &self,
-        name: AvmString<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Option<Object<'gc>> {
-        self.base.getter(name, activation)
-    }
-
-    fn setter(
-        &self,
-        name: AvmString<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Option<Object<'gc>> {
-        self.base.setter(name, activation)
-    }
-
     fn create_bare_object(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         prototype: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
-        let base = ScriptObject::new(activation.context.gc_context, Some(prototype));
-        let fn_object = FunctionObject {
-            base,
+        Ok(FunctionObject {
+            base: ScriptObject::new(activation.context.gc_context, Some(prototype)),
             data: GcCell::allocate(
                 activation.context.gc_context,
                 FunctionObjectData {
@@ -751,131 +719,8 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
                     constructor: None,
                 },
             ),
-        };
-
-        Ok(fn_object.into())
-    }
-
-    fn delete(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
-        self.base.delete(activation, name)
-    }
-
-    fn proto(&self, activation: &mut Activation<'_, 'gc, '_>) -> Value<'gc> {
-        self.base.proto(activation)
-    }
-
-    fn define_value(
-        &self,
-        gc_context: MutationContext<'gc, '_>,
-        name: impl Into<AvmString<'gc>>,
-        value: Value<'gc>,
-        attributes: Attribute,
-    ) {
-        self.base.define_value(gc_context, name, value, attributes)
-    }
-
-    fn set_attributes(
-        &self,
-        gc_context: MutationContext<'gc, '_>,
-        name: Option<AvmString<'gc>>,
-        set_attributes: Attribute,
-        clear_attributes: Attribute,
-    ) {
-        self.base
-            .set_attributes(gc_context, name, set_attributes, clear_attributes)
-    }
-
-    fn add_property(
-        &self,
-        gc_context: MutationContext<'gc, '_>,
-        name: AvmString<'gc>,
-        get: Object<'gc>,
-        set: Option<Object<'gc>>,
-        attributes: Attribute,
-    ) {
-        self.base
-            .add_property(gc_context, name, get, set, attributes)
-    }
-
-    fn add_property_with_case(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        name: AvmString<'gc>,
-        get: Object<'gc>,
-        set: Option<Object<'gc>>,
-        attributes: Attribute,
-    ) {
-        self.base
-            .add_property_with_case(activation, name, get, set, attributes)
-    }
-
-    fn call_watcher(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        name: AvmString<'gc>,
-        value: &mut Value<'gc>,
-        this: Object<'gc>,
-    ) -> Result<(), Error<'gc>> {
-        self.base.call_watcher(activation, name, value, this)
-    }
-
-    fn watch(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        name: AvmString<'gc>,
-        callback: Object<'gc>,
-        user_data: Value<'gc>,
-    ) {
-        self.base.watch(activation, name, callback, user_data);
-    }
-
-    fn unwatch(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
-        self.base.unwatch(activation, name)
-    }
-
-    fn has_property(&self, activation: &mut Activation<'_, 'gc, '_>, name: AvmString<'gc>) -> bool {
-        self.base.has_property(activation, name)
-    }
-
-    fn has_own_property(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        name: AvmString<'gc>,
-    ) -> bool {
-        self.base.has_own_property(activation, name)
-    }
-
-    fn has_own_virtual(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        name: AvmString<'gc>,
-    ) -> bool {
-        self.base.has_own_virtual(activation, name)
-    }
-
-    fn is_property_enumerable(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        name: AvmString<'gc>,
-    ) -> bool {
-        self.base.is_property_enumerable(activation, name)
-    }
-
-    fn get_keys(&self, activation: &mut Activation<'_, 'gc, '_>) -> Vec<AvmString<'gc>> {
-        self.base.get_keys(activation)
-    }
-
-    fn interfaces(&self) -> Vec<Object<'gc>> {
-        self.base.interfaces()
-    }
-
-    /// Set the interface list for this object. (Only useful for prototypes.)
-    fn set_interfaces(&self, gc_context: MutationContext<'gc, '_>, iface_list: Vec<Object<'gc>>) {
-        self.base.set_interfaces(gc_context, iface_list)
-    }
-
-    fn as_script_object(&self) -> Option<ScriptObject<'gc>> {
-        Some(self.base)
+        }
+        .into())
     }
 
     fn as_executable(&self) -> Option<Executable<'gc>> {
@@ -884,39 +729,6 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
 
     fn as_ptr(&self) -> *const ObjectPtr {
         self.base.as_ptr()
-    }
-
-    fn length(&self, activation: &mut Activation<'_, 'gc, '_>) -> Result<i32, Error<'gc>> {
-        self.base.length(activation)
-    }
-
-    fn set_length(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        length: i32,
-    ) -> Result<(), Error<'gc>> {
-        self.base.set_length(activation, length)
-    }
-
-    fn has_element(&self, activation: &mut Activation<'_, 'gc, '_>, index: i32) -> bool {
-        self.base.has_element(activation, index)
-    }
-
-    fn get_element(&self, activation: &mut Activation<'_, 'gc, '_>, index: i32) -> Value<'gc> {
-        self.base.get_element(activation, index)
-    }
-
-    fn set_element(
-        &self,
-        activation: &mut Activation<'_, 'gc, '_>,
-        index: i32,
-        value: Value<'gc>,
-    ) -> Result<(), Error<'gc>> {
-        self.base.set_element(activation, index, value)
-    }
-
-    fn delete_element(&self, activation: &mut Activation<'_, 'gc, '_>, index: i32) -> bool {
-        self.base.delete_element(activation, index)
     }
 }
 
@@ -928,7 +740,7 @@ impl<'gc> TObject<'gc> for FunctionObject<'gc> {
 macro_rules! constructor_to_fn {
     ($f:expr) => {{
         fn _constructor_fn<'gc>(
-            activation: &mut $crate::avm1::activation::Activation<'_, 'gc, '_>,
+            activation: &mut $crate::avm1::activation::Activation<'_, 'gc>,
             this: $crate::avm1::Object<'gc>,
             args: &[$crate::avm1::Value<'gc>],
         ) -> Result<$crate::avm1::Value<'gc>, $crate::avm1::error::Error<'gc>> {

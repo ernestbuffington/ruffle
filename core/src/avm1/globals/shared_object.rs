@@ -2,10 +2,11 @@ use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::object::shared_object::SharedObject;
+use crate::avm1::object::NativeObject;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
-use crate::avm_warn;
+use crate::avm1_stub;
 use crate::display_object::TDisplayObject;
 use crate::string::AvmString;
 use flash_lso::types::Value as AmfValue;
@@ -36,26 +37,26 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn delete_all<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.deleteAll() not implemented");
+    avm1_stub!(activation, "SharedObject", "deleteAll");
     Ok(Value::Undefined)
 }
 
 pub fn get_disk_usage<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.getDiskUsage() not implemented");
+    avm1_stub!(activation, "SharedObject", "getDiskUsage");
     Ok(Value::Undefined)
 }
 
 /// Serialize a Value to an AmfValue
 fn serialize_value<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     elem: Value<'gc>,
 ) -> Option<AmfValue> {
     match elem {
@@ -82,9 +83,8 @@ fn serialize_value<'gc>(
                 // TODO: What happens if an exception is thrown here?
                 let string = xml_node.into_string(activation).unwrap();
                 Some(AmfValue::XML(string.to_utf8_lossy().into_owned(), true))
-            } else if let Some(date) = o.as_date_object() {
-                date.date_time()
-                    .map(|date_time| AmfValue::Date(date_time.timestamp_millis() as f64, None))
+            } else if let NativeObject::Date(date) = o.native() {
+                Some(AmfValue::Date(date.read().time(), None))
             } else {
                 let mut object_body = Vec::new();
                 recursive_serialize(activation, o, &mut object_body);
@@ -96,7 +96,7 @@ fn serialize_value<'gc>(
 
 /// Serialize an Object and any children to a JSON object
 fn recursive_serialize<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     obj: Object<'gc>,
     elements: &mut Vec<Element>,
 ) {
@@ -111,7 +111,7 @@ fn recursive_serialize<'gc>(
 }
 
 /// Deserialize a AmfValue to a Value
-fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfValue) -> Value<'gc> {
+fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc>, val: &AmfValue) -> Value<'gc> {
     match val {
         AmfValue::Null => Value::Null,
         AmfValue::Undefined => Value::Undefined,
@@ -119,7 +119,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
         AmfValue::String(s) => Value::String(AvmString::new_utf8(activation.context.gc_context, s)),
         AmfValue::Bool(b) => (*b).into(),
         AmfValue::ECMAArray(_, associative, len) => {
-            let array_constructor = activation.context.avm1.prototypes.array_constructor;
+            let array_constructor = activation.context.avm1.prototypes().array_constructor;
             if let Ok(Value::Object(obj)) =
                 array_constructor.construct(activation, &[(*len).into()])
             {
@@ -147,7 +147,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
             // Deserialize Object
             let obj = ScriptObject::new(
                 activation.context.gc_context,
-                Some(activation.context.avm1.prototypes.object),
+                Some(activation.context.avm1.prototypes().object),
             );
             for entry in elements {
                 let value = deserialize_value(activation, entry.value());
@@ -162,7 +162,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
             obj.into()
         }
         AmfValue::Date(time, _) => {
-            let date_proto = activation.context.avm1.prototypes.date_constructor;
+            let date_proto = activation.context.avm1.prototypes().date_constructor;
 
             if let Ok(Value::Object(obj)) = date_proto.construct(activation, &[(*time).into()]) {
                 Value::Object(obj)
@@ -171,7 +171,7 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
             }
         }
         AmfValue::XML(content, _) => {
-            let xml_proto = activation.context.avm1.prototypes.xml_constructor;
+            let xml_proto = activation.context.avm1.prototypes().xml_constructor;
 
             if let Ok(Value::Object(obj)) = xml_proto.construct(
                 activation,
@@ -192,12 +192,12 @@ fn deserialize_value<'gc>(activation: &mut Activation<'_, 'gc, '_>, val: &AmfVal
 
 /// Deserializes a Lso into an object containing the properties stored
 fn deserialize_lso<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     lso: &Lso,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let obj = ScriptObject::new(
         activation.context.gc_context,
-        Some(activation.context.avm1.prototypes.object),
+        Some(activation.context.avm1.prototypes().object),
     );
 
     for child in &lso.body {
@@ -213,7 +213,7 @@ fn deserialize_lso<'gc>(
 }
 
 pub fn get_local<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -228,22 +228,17 @@ pub fn get_local<'gc>(
 
     const INVALID_CHARS: &str = "~%&\\;:\"',<>?# ";
     if name.contains(|c| INVALID_CHARS.contains(c)) {
-        log::error!("SharedObject::get_local: Invalid character in name");
+        tracing::error!("SharedObject::get_local: Invalid character in name");
         return Ok(Value::Null);
     }
 
-    let movie = if let Some(movie) = activation.base_clip().movie() {
-        movie
-    } else {
-        log::error!("SharedObject::get_local: Movie was None");
-        return Ok(Value::Null);
-    };
+    let movie = activation.base_clip().movie();
 
     let mut movie_url = if let Some(url) = movie.url() {
         if let Ok(url) = url::Url::parse(url) {
             url
         } else {
-            log::error!("SharedObject::get_local: Unable to parse movie URL");
+            tracing::error!("SharedObject::get_local: Unable to parse movie URL");
             return Ok(Value::Null);
         }
     } else {
@@ -260,7 +255,7 @@ pub fn get_local<'gc>(
 
     // Secure parameter disallows using the shared object from non-HTTPS.
     if secure && movie_url.scheme() != "https" {
-        log::warn!(
+        tracing::warn!(
             "SharedObject.get_local: Tried to load a secure shared object from non-HTTPS origin"
         );
         return Ok(Value::Null);
@@ -316,7 +311,7 @@ pub fn get_local<'gc>(
         {
             local_path
         } else {
-            log::warn!("SharedObject.get_local: localPath parameter does not match SWF path");
+            tracing::warn!("SharedObject.get_local: localPath parameter does not match SWF path");
             return Ok(Value::Null);
         }
     } else {
@@ -326,23 +321,27 @@ pub fn get_local<'gc>(
     // Final SO path: foo.com/folder/game.swf/SOName
     // SOName may be a path containing slashes. In this case, prefix with # to mimic Flash Player behavior.
     let prefix = if name.contains('/') { "#" } else { "" };
-    let full_name = format!("{}/{}/{}{}", movie_host, local_path, prefix, name);
+    let full_name = format!("{movie_host}/{local_path}/{prefix}{name}");
 
     // Avoid any paths with `..` to prevent SWFs from crawling the file system on desktop.
     // Flash will generally fail to save shared objects with a path component starting with `.`,
     // so let's disallow them altogether.
     if full_name.split('/').any(|s| s.starts_with('.')) {
-        log::error!("SharedObject.get_local: Invalid path with .. segments");
+        tracing::error!("SharedObject.get_local: Invalid path with .. segments");
         return Ok(Value::Null);
     }
 
     // Check if this is referencing an existing shared object
-    if let Some(so) = activation.context.shared_objects.get(&full_name) {
+    if let Some(so) = activation.context.avm1_shared_objects.get(&full_name) {
         return Ok((*so).into());
     }
 
     // Data property only should exist when created with getLocal/Remote
-    let constructor = activation.context.avm1.prototypes.shared_object_constructor;
+    let constructor = activation
+        .context
+        .avm1
+        .prototypes()
+        .shared_object_constructor;
     let this = constructor
         .construct(activation, &[])?
         .coerce_to_object(activation);
@@ -364,7 +363,7 @@ pub fn get_local<'gc>(
         // No data; create a fresh data object.
         data = ScriptObject::new(
             activation.context.gc_context,
-            Some(activation.context.avm1.prototypes.object),
+            Some(activation.context.avm1.prototypes().object),
         )
         .into();
     }
@@ -376,44 +375,47 @@ pub fn get_local<'gc>(
         Attribute::DONT_DELETE,
     );
 
-    activation.context.shared_objects.insert(full_name, this);
+    activation
+        .context
+        .avm1_shared_objects
+        .insert(full_name, this);
 
     Ok(this.into())
 }
 
 pub fn get_remote<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.getRemote() not implemented");
+    avm1_stub!(activation, "SharedObject", "getRemote");
     Ok(Value::Undefined)
 }
 
 pub fn get_max_size<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.getMaxSize() not implemented");
+    avm1_stub!(activation, "SharedObject", "getMaxSize");
     Ok(Value::Undefined)
 }
 
 pub fn add_listener<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.addListener() not implemented");
+    avm1_stub!(activation, "SharedObject", "addListener");
     Ok(Value::Undefined)
 }
 
 pub fn remove_listener<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.removeListener() not implemented");
+    avm1_stub!(activation, "SharedObject", "removeListener");
     Ok(Value::Undefined)
 }
 
@@ -426,16 +428,16 @@ pub fn create_shared_object_object<'gc>(
         gc_context,
         Executable::Native(constructor),
         constructor_to_fn!(constructor),
-        Some(fn_proto),
+        fn_proto,
         shared_object_proto,
     );
-    let object = shared_obj.as_script_object().unwrap();
+    let object = shared_obj.raw_script_object();
     define_properties_on(OBJECT_DECLS, gc_context, object, fn_proto);
     shared_obj
 }
 
 pub fn clear<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -454,25 +456,25 @@ pub fn clear<'gc>(
 }
 
 pub fn close<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.close() not implemented");
+    avm1_stub!(activation, "SharedObject", "close");
     Ok(Value::Undefined)
 }
 
 pub fn connect<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.connect() not implemented");
+    avm1_stub!(activation, "SharedObject", "connect");
     Ok(Value::Undefined)
 }
 
 pub fn flush<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -499,47 +501,47 @@ pub fn flush<'gc>(
 }
 
 pub fn get_size<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.getSize() not implemented");
+    avm1_stub!(activation, "SharedObject", "getSize");
     Ok(Value::Undefined)
 }
 
 pub fn send<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.send() not implemented");
+    avm1_stub!(activation, "SharedObject", "send");
     Ok(Value::Undefined)
 }
 
 pub fn set_fps<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.setFps() not implemented");
+    avm1_stub!(activation, "SharedObject", "setFps");
     Ok(Value::Undefined)
 }
 
 pub fn on_status<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.onStatus() not implemented");
+    avm1_stub!(activation, "SharedObject", "onStatus");
     Ok(Value::Undefined)
 }
 
 pub fn on_sync<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "SharedObject.onSync() not implemented");
+    avm1_stub!(activation, "SharedObject", "onSync");
     Ok(Value::Undefined)
 }
 
@@ -548,14 +550,14 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let shared_obj = SharedObject::empty_shared_obj(gc_context, Some(proto));
-    let object = shared_obj.as_script_object().unwrap();
+    let shared_obj = SharedObject::empty_shared_obj(gc_context, proto);
+    let object = shared_obj.raw_script_object();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     shared_obj.into()
 }
 
 pub fn constructor<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {

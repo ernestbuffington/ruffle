@@ -2,27 +2,23 @@
 
 use crate::avm2::activation::Activation;
 use crate::avm2::array::ArrayStorage;
-use crate::avm2::class::Class;
 use crate::avm2::globals::array::ArrayIter;
-use crate::avm2::method::{Method, NativeMethodImpl};
 use crate::avm2::object::{ArrayObject, FunctionObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
+use crate::avm2::Multiname;
 use crate::ecma_conversions::f64_to_wrapping_i32;
 use crate::string::{AvmString, Units};
-use gc_arena::{GcCell, MutationContext};
 use serde::Serialize;
 use serde_json::{Map as JsonObject, Value as JsonValue};
 use std::borrow::Cow;
 use std::ops::Deref;
 
 fn deserialize_json_inner<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     json: JsonValue,
     reviver: Option<Object<'gc>>,
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     Ok(match json {
         JsonValue::Null => Value::Null,
         JsonValue::String(s) => AvmString::new_utf8(activation.context.gc_context, s).into(),
@@ -46,9 +42,9 @@ fn deserialize_json_inner<'gc>(
                     Some(reviver) => reviver.call(None, &[key.into(), val], activation)?,
                 };
                 if matches!(mapped_val, Value::Undefined) {
-                    obj.delete_property(activation, &QName::dynamic_name(key).into())?;
+                    obj.delete_property(activation, &Multiname::public(key))?;
                 } else {
-                    obj.set_property(&QName::dynamic_name(key).into(), mapped_val, activation)?;
+                    obj.set_property(&Multiname::public(key), mapped_val, activation)?;
                 }
             }
             obj.into()
@@ -71,10 +67,10 @@ fn deserialize_json_inner<'gc>(
 }
 
 fn deserialize_json<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     json: JsonValue,
     reviver: Option<Object<'gc>>,
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let val = deserialize_json_inner(activation, json, reviver)?;
     match reviver {
         None => Ok(val),
@@ -114,19 +110,16 @@ impl<'gc> AvmSerializer<'gc> {
     /// only used if either the `toJSON` step or replacer function step happens, so we only need to evaluate the key there.
     fn map_value(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         key: impl Fn() -> AvmString<'gc>,
         value: Value<'gc>,
-    ) -> Result<Value<'gc>, Error> {
+    ) -> Result<Value<'gc>, Error<'gc>> {
         let (eval_key, value) = if value.is_primitive() {
             (None, value)
         } else {
             let obj = value.as_object().unwrap();
             let to_json = obj
-                .get_property(
-                    &QName::new(Namespace::public(), "toJSON").into(),
-                    activation,
-                )?
+                .get_property(&Multiname::public("toJSON"), activation)?
                 .as_object()
                 .and_then(|obj| obj.as_function_object());
             if let Some(to_json) = to_json {
@@ -149,9 +142,9 @@ impl<'gc> AvmSerializer<'gc> {
 
     fn serialize_object(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         obj: Object<'gc>,
-    ) -> Result<JsonValue, Error> {
+    ) -> Result<JsonValue, Error<'gc>> {
         let mut js_obj = JsonObject::new();
         // If the user supplied a PropList, we use that to find properties on the object.
         if let Some(Replacer::PropList(props)) = self.replacer {
@@ -159,8 +152,7 @@ impl<'gc> AvmSerializer<'gc> {
             while let Some(r) = iter.next(activation) {
                 let item = r?.1;
                 let key = item.coerce_to_string(activation)?;
-                let value =
-                    obj.get_property(&QName::new(Namespace::public(), key).into(), activation)?;
+                let value = obj.get_property(&Multiname::public(key), activation)?;
                 let mapped = self.map_value(activation, || key, value)?;
                 if !matches!(mapped, Value::Undefined) {
                     js_obj.insert(
@@ -176,8 +168,7 @@ impl<'gc> AvmSerializer<'gc> {
                     Value::Undefined => break,
                     name_val => {
                         let name = name_val.coerce_to_string(activation)?;
-                        let value =
-                            obj.get_property(&QName::dynamic_name(name).into(), activation)?;
+                        let value = obj.get_property(&Multiname::public(name), activation)?;
                         let mapped = self.map_value(activation, || name, value)?;
                         if !matches!(mapped, Value::Undefined) {
                             js_obj.insert(
@@ -196,9 +187,9 @@ impl<'gc> AvmSerializer<'gc> {
     /// Note that this doesn't actually check if the object passed can be iterated using ArrayIter, it just assumes it can.
     fn serialize_iterable(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         iterable: Object<'gc>,
-    ) -> Result<JsonValue, Error> {
+    ) -> Result<JsonValue, Error<'gc>> {
         let mut js_arr = Vec::new();
         let mut iter = ArrayIter::new(activation, iterable)?;
         while let Some(r) = iter.next(activation) {
@@ -213,14 +204,13 @@ impl<'gc> AvmSerializer<'gc> {
 
     fn serialize_value(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         value: Value<'gc>,
-    ) -> Result<JsonValue, Error> {
+    ) -> Result<JsonValue, Error<'gc>> {
         Ok(match value {
             Value::Null => JsonValue::Null,
             Value::Undefined => JsonValue::Null,
             Value::Integer(i) => JsonValue::from(i),
-            Value::Unsigned(u) => JsonValue::from(u),
             Value::Number(n) => JsonValue::from(n),
             Value::Bool(b) => JsonValue::from(b),
             Value::String(s) => JsonValue::from(s.to_utf8_lossy().deref()),
@@ -250,38 +240,20 @@ impl<'gc> AvmSerializer<'gc> {
     /// Same thing as serialize_value, but maps the value before calling it.
     fn serialize(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         value: Value<'gc>,
-    ) -> Result<JsonValue, Error> {
+    ) -> Result<JsonValue, Error<'gc>> {
         let mapped = self.map_value(activation, || "".into(), value)?;
         self.serialize_value(activation, mapped)
     }
 }
 
-/// Implements `JSON`'s instance initializer.
-pub fn instance_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Err("ArgumentError: Error #2012: JSON class cannot be instantiated.".into())
-}
-
-/// Implements `JSON`'s class initializer.
-pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
-    Ok(Value::Undefined)
-}
-
 /// Implements `JSON.parse`.
 pub fn parse<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let input = args
         .get(0)
         .unwrap_or(&Value::Undefined)
@@ -294,10 +266,10 @@ pub fn parse<'gc>(
 
 /// Implements `JSON.stringify`.
 pub fn stringify<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Option<Object<'gc>>,
     args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error> {
+) -> Result<Value<'gc>, Error<'gc>> {
     let val = args.get(0).unwrap_or(&Value::Undefined);
     let replacer = args.get(1).unwrap_or(&Value::Undefined).as_object();
     let spaces = args.get(2).unwrap_or(&Value::Undefined);
@@ -340,34 +312,14 @@ pub fn stringify<'gc>(
     let json = serializer.serialize(activation, *val)?;
     let result = match indent {
         Some(indent) => {
-            let mut vec = Vec::with_capacity(128);
+            let mut result = Vec::with_capacity(128);
             let formatter = serde_json::ser::PrettyFormatter::with_indent(&indent);
-            let mut serializer = serde_json::Serializer::with_formatter(&mut vec, formatter);
-            json.serialize(&mut serializer)?;
-            unsafe {
-                // `serde_json` never emits invalid UTF-8.
-                String::from_utf8_unchecked(vec)
-            }
+            let mut serializer = serde_json::Serializer::with_formatter(&mut result, formatter);
+            json.serialize(&mut serializer)
+                .expect("JSON serialization cannot fail");
+            result
         }
-        None => serde_json::to_string(&json)?,
+        None => serde_json::to_vec(&json).expect("JSON serialization cannot fail"),
     };
-    Ok(AvmString::new_utf8(activation.context.gc_context, result).into())
-}
-
-/// Construct `JSON`'s class.
-pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
-    let class = Class::new(
-        QName::new(Namespace::public(), "JSON"),
-        Some(QName::new(Namespace::public(), "Object").into()),
-        Method::from_builtin(instance_init, "<JSON instance initializer>", mc),
-        Method::from_builtin(class_init, "<JSON class initializer>", mc),
-        mc,
-    );
-
-    let mut write = class.write(mc);
-
-    const PUBLIC_CLASS_METHODS: &[(&str, NativeMethodImpl)] =
-        &[("parse", parse), ("stringify", stringify)];
-    write.define_public_builtin_class_methods(mc, PUBLIC_CLASS_METHODS);
-    class
+    Ok(AvmString::new_utf8_bytes(activation.context.gc_context, &result).into())
 }

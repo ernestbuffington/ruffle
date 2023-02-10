@@ -3,8 +3,9 @@ use crate::avm1::error::Error;
 use crate::avm1::object::Object;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
-use crate::avm1::{Avm1, ScriptObject, TObject, Value};
-use crate::avm_warn;
+use crate::avm1::runtime::Avm1;
+use crate::avm1::{ScriptObject, TObject, Value};
+use crate::avm1_stub;
 use bitflags::bitflags;
 use core::fmt;
 use gc_arena::MutationContext;
@@ -107,9 +108,9 @@ impl Manufacturer {
         };
 
         if version <= 8 {
-            format!("Macromedia {}", os_part)
+            format!("Macromedia {os_part}")
         } else {
-            format!("Adobe {}", os_part)
+            format!("Adobe {os_part}")
         }
     }
 
@@ -298,7 +299,7 @@ impl SystemProperties {
         format!(
             "{} {},0,0,0",
             self.manufacturer.get_platform_name(),
-            avm.player_version
+            avm.player_version()
         )
     }
 
@@ -368,7 +369,7 @@ impl SystemProperties {
                 "M",
                 &self.encode_string(
                     self.manufacturer
-                        .get_manufacturer_string(avm.player_version)
+                        .get_manufacturer_string(avm.player_version())
                         .as_str(),
                 ),
             )
@@ -379,7 +380,7 @@ impl SystemProperties {
             .append_pair("COL", &self.screen_color.to_string())
             .append_pair("AR", &self.aspect_ratio.to_string())
             .append_pair("OS", &self.encode_string(&self.os.to_string()))
-            .append_pair("L", self.language.get_language_code(avm.player_version))
+            .append_pair("L", self.language.get_language_code(avm.player_version()))
             .append_pair("IME", self.encode_capability(SystemCapabilities::IME))
             .append_pair("PT", &self.player_type.to_string())
             .append_pair(
@@ -420,7 +421,7 @@ impl Default for SystemProperties {
 }
 
 pub fn set_clipboard<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -436,7 +437,7 @@ pub fn set_clipboard<'gc>(
 }
 
 pub fn show_settings<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -448,18 +449,14 @@ pub fn show_settings<'gc>(
         .unwrap_or(&last_panel_pos.into())
         .coerce_to_i32(activation)?;
 
-    let panel = SettingsPanel::from_u8(panel_pos as u8).unwrap_or(SettingsPanel::Privacy);
+    let _panel = SettingsPanel::from_u8(panel_pos as u8).unwrap_or(SettingsPanel::Privacy);
 
-    avm_warn!(
-        activation,
-        "System.showSettings({:?}) not not implemented",
-        panel
-    );
+    avm1_stub!(activation, "System", "showSettings");
     Ok(Value::Undefined)
 }
 
 pub fn set_use_code_page<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -475,7 +472,7 @@ pub fn set_use_code_page<'gc>(
 }
 
 pub fn get_use_code_page<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -483,7 +480,7 @@ pub fn get_use_code_page<'gc>(
 }
 
 pub fn set_exact_settings<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -499,7 +496,7 @@ pub fn set_exact_settings<'gc>(
 }
 
 pub fn get_exact_settings<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -507,23 +504,23 @@ pub fn get_exact_settings<'gc>(
 }
 
 pub fn on_status<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm_warn!(activation, "System.onStatus() not implemented");
+    avm1_stub!(activation, "System", "onStatus");
     Ok(Value::Undefined)
 }
 
 pub fn create<'gc>(
     gc_context: MutationContext<'gc, '_>,
-    proto: Option<Object<'gc>>,
+    proto: Object<'gc>,
     fn_proto: Object<'gc>,
     security: Object<'gc>,
     capabilities: Object<'gc>,
     ime: Object<'gc>,
 ) -> Object<'gc> {
-    let system = ScriptObject::new(gc_context, proto);
+    let system = ScriptObject::new(gc_context, Some(proto));
     define_properties_on(OBJECT_DECLS, gc_context, system, fn_proto);
     system.define_value(gc_context, "IME", ime.into(), Attribute::empty());
     system.define_value(gc_context, "security", security.into(), Attribute::empty());

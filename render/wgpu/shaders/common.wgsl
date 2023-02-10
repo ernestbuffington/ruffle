@@ -1,3 +1,5 @@
+#define_import_path common
+
 /// Common WGSL shared among all Ruffle shaders.
 /// Ruffle prepends this file onto every shader at runtime.
 
@@ -11,7 +13,10 @@ struct Globals {
 struct Transforms {
     /// The world matrix that transforms this object into stage space.
     world_matrix: mat4x4<f32>,
+};
 
+/// Transform uniforms that are changed per object.
+struct ColorTransforms {
     /// The multiplicative color transform of this object.
     mult_color: vec4<f32>,
 
@@ -23,21 +28,22 @@ struct Transforms {
 struct TextureTransforms {
     /// The transform matrix of the gradient or texture.
     /// Transforms from object space to UV space.
-    matrix_: mat4x4<f32>,
+    texture_matrix: mat4x4<f32>,
 };
 
-/// The vertex format shared among all shaders.
+struct PushConstants {
+    transforms: Transforms,
+    colorTransforms: ColorTransforms,
+}
+
+/// The vertex format shared among most shaders.
 struct VertexInput {
     /// The position of the vertex in object space.
     @location(0) position: vec2<f32>,
-
-    /// The color of this vertex (only used by the color shader).
-    @location(1) color: vec4<f32>,
 };
 
 /// Common uniform layout shared by all shaders.
 @group(0) @binding(0) var<uniform> globals: Globals;
-@group(1) @binding(0) var<uniform> transforms: Transforms;
 
 /// Converts a color from linear to sRGB color space.
 fn linear_to_srgb(linear_: vec4<f32>) -> vec4<f32> {

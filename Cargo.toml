@@ -13,20 +13,35 @@ members = [
 
     "render",
     "render/canvas",
+    "render/naga-agal",
     "render/wgpu",
     "render/webgl",
+
+    "video",
+    "video/software",
 
     "tests",
     "tests/input-format",
 ]
 resolver = "2"
 
+[workspace.package]
+authors = ["Ruffle LLC <ruffle@ruffle.rs>"]
+edition = "2021"
+homepage = "https://ruffle.rs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ruffle-rs/ruffle"
+version = "0.1.0"
+
+[workspace.dependencies]
+gc-arena = { git = "https://github.com/kyren/gc-arena", rev = "318b2ea594dcdadd01f7789025e3b3940be96b2c" }
+
 # Don't optimize build scripts and macros.
 [profile.release.build-override]
 opt-level = 0
 
 [profile.dev]
-panic = "abort"
+panic = "unwind"
 
 [profile.release]
 panic = "abort"
@@ -46,7 +61,6 @@ opt-level = 3
 [profile.dev.package.nihav_duck]
 opt-level = 3
 
-
 # TODO: Set rustflags here instead of in web/core/package.json, when that
 # feature becomes stable. See: https://github.com/rust-lang/cargo/issues/10271
 # Until then, these custom profiles let cargo keep the build cache alive
@@ -56,3 +70,6 @@ inherits = "release"
 
 [profile.web-wasm-extensions]
 inherits = "release"
+
+[patch.crates-io]
+naga = { git = "https://github.com/gfx-rs/naga", rev = "1be8024" }

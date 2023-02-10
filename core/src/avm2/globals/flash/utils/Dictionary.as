@@ -1,5 +1,14 @@
-// This is a stub - the actual class is defined in `dictionary.rs`
 package flash.utils {
-    public class Dictionary extends Object {
+
+	import __ruffle__.stub_constructor;
+
+	[Ruffle(InstanceAllocator)]
+    public dynamic class Dictionary {
+		public function Dictionary(weakKeys:Boolean = false)
+		{
+			if (weakKeys) {
+				stub_constructor("flash.utils.Dictionary", "with weak keys");
+			}
+		}
     }
 }

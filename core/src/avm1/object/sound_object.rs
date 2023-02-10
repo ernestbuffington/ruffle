@@ -37,12 +37,18 @@ pub struct SoundObjectData<'gc> {
 
     /// Duration of the currently attached sound in milliseconds.
     duration: Option<u32>,
+
+    /// Whether this sound is an external streaming MP3.
+    /// This will be true if `Sound.loadSound` was called with `isStreaming` of `true`.
+    /// A streaming sound can only have a single active instance.
+    is_streaming: bool,
 }
 
 impl fmt::Debug for SoundObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let this = self.0.read();
         f.debug_struct("SoundObject")
+            .field("ptr", &self.0.as_ptr())
             .field("sound", &this.sound)
             .field("sound_instance", &this.sound_instance)
             .field("owner", &this.owner)
@@ -53,17 +59,18 @@ impl fmt::Debug for SoundObject<'_> {
 impl<'gc> SoundObject<'gc> {
     pub fn empty_sound(
         gc_context: MutationContext<'gc, '_>,
-        proto: Option<Object<'gc>>,
+        proto: Object<'gc>,
     ) -> SoundObject<'gc> {
         SoundObject(GcCell::allocate(
             gc_context,
             SoundObjectData {
-                base: ScriptObject::new(gc_context, proto),
+                base: ScriptObject::new(gc_context, Some(proto)),
                 sound: None,
                 sound_instance: None,
                 owner: None,
                 position: 0,
                 duration: None,
+                is_streaming: false,
             },
         ))
     }
@@ -114,6 +121,14 @@ impl<'gc> SoundObject<'gc> {
 
     pub fn set_position(self, gc_context: MutationContext<'gc, '_>, position: u32) {
         self.0.write(gc_context).position = position;
+    }
+
+    pub fn is_streaming(self) -> bool {
+        self.0.read().is_streaming
+    }
+
+    pub fn set_is_streaming(self, gc_context: MutationContext<'gc, '_>, is_streaming: bool) {
+        self.0.write(gc_context).is_streaming = is_streaming;
     }
 }
 

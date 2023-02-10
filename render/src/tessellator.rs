@@ -1,5 +1,6 @@
-use crate::bitmap::{BitmapHandle, BitmapSource};
+use crate::bitmap::BitmapSource;
 use crate::shape_utils::{DistilledShape, DrawCommand, DrawPath};
+use enum_map::Enum;
 use lyon::path::Path;
 use lyon::tessellation::{
     self,
@@ -7,6 +8,7 @@ use lyon::tessellation::{
     FillTessellator, FillVertex, StrokeTessellator, StrokeVertex, StrokeVertexConstructor,
 };
 use lyon::tessellation::{FillOptions, StrokeOptions};
+use tracing::instrument;
 
 pub struct ShapeTessellator {
     fill_tess: FillTessellator,
@@ -29,6 +31,7 @@ impl ShapeTessellator {
         }
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn tessellate_shape(
         &mut self,
         shape: DistilledShape,
@@ -90,7 +93,7 @@ impl ShapeTessellator {
                     is_smoothed,
                     is_repeating,
                 } => {
-                    if let Some(bitmap) = bitmap_source.bitmap(*id) {
+                    if let Some(bitmap) = bitmap_source.bitmap_size(*id) {
                         (
                             DrawType::Bitmap(Bitmap {
                                 matrix: swf_bitmap_to_gl_matrix(
@@ -98,7 +101,7 @@ impl ShapeTessellator {
                                     bitmap.width.into(),
                                     bitmap.height.into(),
                                 ),
-                                bitmap: bitmap.handle,
+                                bitmap_id: *id,
                                 is_smoothed: *is_smoothed,
                                 is_repeating: *is_repeating,
                             }),
@@ -181,7 +184,7 @@ impl ShapeTessellator {
                 }
                 Err(e) => {
                     // This may simply be a degenerate path.
-                    log::error!("Tessellation failure: {:?}", e);
+                    tracing::error!("Tessellation failure: {:?}", e);
                 }
             }
         }
@@ -264,7 +267,7 @@ pub struct Vertex {
 #[derive(Clone, Debug)]
 pub struct Bitmap {
     pub matrix: [[f32; 3]; 3],
-    pub bitmap: BitmapHandle,
+    pub bitmap_id: u16,
     pub is_smoothed: bool,
     pub is_repeating: bool,
 }
@@ -440,7 +443,7 @@ impl StrokeVertexConstructor<Vertex> for RuffleVertexCtor {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Enum)]
 pub enum GradientType {
     Linear,
     Radial,

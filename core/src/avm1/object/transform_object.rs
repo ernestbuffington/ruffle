@@ -21,17 +21,18 @@ impl fmt::Debug for TransformObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let this = self.0.read();
         f.debug_struct("Transform")
+            .field("ptr", &self.0.as_ptr())
             .field("clip", &this.clip)
             .finish()
     }
 }
 
 impl<'gc> TransformObject<'gc> {
-    pub fn empty(gc_context: MutationContext<'gc, '_>, proto: Option<Object<'gc>>) -> Self {
+    pub fn empty(gc_context: MutationContext<'gc, '_>, proto: Object<'gc>) -> Self {
         Self(GcCell::allocate(
             gc_context,
             TransformData {
-                base: ScriptObject::new(gc_context, proto),
+                base: ScriptObject::new(gc_context, Some(proto)),
                 clip: None,
             },
         ))

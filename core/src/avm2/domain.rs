@@ -12,11 +12,11 @@ use gc_arena::{Collect, GcCell, MutationContext};
 
 /// Represents a set of scripts and movies that share traits across different
 /// script-global scopes.
-#[derive(Copy, Clone, Debug, Collect)]
+#[derive(Copy, Clone, Collect)]
 #[collect(no_drop)]
 pub struct Domain<'gc>(GcCell<'gc, DomainData<'gc>>);
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 struct DomainData<'gc> {
     /// A list of all exported definitions and the script that exported them.
@@ -54,7 +54,7 @@ impl<'gc> Domain<'gc> {
         ))
     }
 
-    pub fn is_avm2_global_domain(&self, activation: &mut Activation<'_, 'gc, '_>) -> bool {
+    pub fn is_avm2_global_domain(&self, activation: &mut Activation<'_, 'gc>) -> bool {
         activation.avm2().global_domain().0.as_ptr() == self.0.as_ptr()
     }
 
@@ -62,10 +62,7 @@ impl<'gc> Domain<'gc> {
     ///
     /// This function must not be called before the player globals have been
     /// fully allocated.
-    pub fn movie_domain(
-        activation: &mut Activation<'_, 'gc, '_>,
-        parent: Domain<'gc>,
-    ) -> Domain<'gc> {
+    pub fn movie_domain(activation: &mut Activation<'_, 'gc>, parent: Domain<'gc>) -> Domain<'gc> {
         let this = Self(GcCell::allocate(
             activation.context.gc_context,
             DomainData {
@@ -107,7 +104,7 @@ impl<'gc> Domain<'gc> {
     pub fn get_defining_script(
         self,
         multiname: &Multiname<'gc>,
-    ) -> Result<Option<(QName<'gc>, Script<'gc>)>, Error> {
+    ) -> Result<Option<(QName<'gc>, Script<'gc>)>, Error<'gc>> {
         let read = self.0.read();
 
         if let Some(name) = multiname.local_name() {
@@ -127,12 +124,22 @@ impl<'gc> Domain<'gc> {
     /// Retrieve a value from this domain.
     pub fn get_defined_value(
         self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         name: QName<'gc>,
-    ) -> Result<Value<'gc>, Error> {
-        let (name, mut script) = self
-            .get_defining_script(&name.into())?
-            .ok_or_else(|| format!("MovieClip Symbol {} does not exist", name.local_name()))?;
+    ) -> Result<Value<'gc>, Error<'gc>> {
+        let (name, mut script) = match self.get_defining_script(&name.into())? {
+            Some(val) => val,
+            None => {
+                return Err(Error::AvmError(crate::avm2::error::reference_error(
+                    activation,
+                    &format!(
+                        "Error #1065: Variable {} is not defined.",
+                        name.local_name()
+                    ),
+                    1065,
+                )?));
+            }
+        };
         let globals = script.globals(&mut activation.context)?;
 
         globals.get_property(&name.into(), activation)
@@ -147,7 +154,7 @@ impl<'gc> Domain<'gc> {
         name: QName<'gc>,
         script: Script<'gc>,
         mc: MutationContext<'gc, '_>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<'gc>> {
         if self.has_definition(name) {
             return Err(format!(
                 "VerifyError: Attempted to redefine existing name {}",
@@ -184,8 +191,8 @@ impl<'gc> Domain<'gc> {
     /// domains.
     pub fn init_default_domain_memory(
         self,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<(), Error> {
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<(), Error<'gc>> {
         let bytearray_class = activation.avm2().classes().bytearray;
 
         let domain_memory = bytearray_class.construct(activation, &[])?;

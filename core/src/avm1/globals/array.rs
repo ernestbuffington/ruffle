@@ -29,7 +29,7 @@ const DEFAULT_ORDERING: Ordering = Ordering::Equal;
 type CompareFn<'a, 'gc> = Box<
     dyn 'a
         + Fn(
-            &mut Activation<'_, 'gc, '_>,
+            &mut Activation<'_, 'gc>,
             &Value<'gc>,
             &Value<'gc>,
             SortOptions,
@@ -68,10 +68,10 @@ pub fn create_array_object<'gc>(
         gc_context,
         Executable::Native(constructor),
         Executable::Native(constructor),
-        Some(fn_proto),
+        fn_proto,
         array_proto,
     );
-    let object = array.as_script_object().unwrap();
+    let object = array.raw_script_object();
 
     // TODO: These were added in Flash Player 7, but are available even to SWFv6 and lower
     // when run in Flash Player 7. Make these conditional if we add a parameter to control
@@ -82,7 +82,7 @@ pub fn create_array_object<'gc>(
 
 /// Implements `Array` constructor and function
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -107,7 +107,7 @@ pub fn constructor<'gc>(
 }
 
 pub fn push<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -122,7 +122,7 @@ pub fn push<'gc>(
 }
 
 pub fn unshift<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -151,7 +151,7 @@ pub fn unshift<'gc>(
 }
 
 pub fn shift<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -181,7 +181,7 @@ pub fn shift<'gc>(
 }
 
 pub fn pop<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -202,7 +202,7 @@ pub fn pop<'gc>(
 }
 
 pub fn reverse<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -248,7 +248,7 @@ pub fn reverse<'gc>(
 }
 
 pub fn join<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -286,7 +286,7 @@ fn make_index_absolute(index: i32, length: i32) -> i32 {
 }
 
 pub fn slice<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -315,7 +315,7 @@ pub fn slice<'gc>(
 }
 
 pub fn splice<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -340,25 +340,30 @@ pub fn splice<'gc>(
         .collect();
 
     let items = if args.len() > 2 { &args[2..] } else { &[] };
-    // TODO: Avoid code duplication.
     if items.len() as i32 > delete_count {
         for i in (start + delete_count..length).rev() {
-            if this.has_element(activation, i) {
-                let element = this.get_element(activation, i);
-                this.set_element(activation, i - delete_count + items.len() as i32, element)?;
-            } else {
-                this.delete_element(activation, i - delete_count + items.len() as i32);
-            }
+            splice_internal(activation, this, delete_count, items, i)?;
         }
     } else {
         for i in start + delete_count..length {
-            if this.has_element(activation, i) {
-                let element = this.get_element(activation, i);
-                this.set_element(activation, i - delete_count + items.len() as i32, element)?;
-            } else {
-                this.delete_element(activation, i - delete_count + items.len() as i32);
-            }
+            splice_internal(activation, this, delete_count, items, i)?;
         }
+    }
+
+    fn splice_internal<'gc>(
+        activation: &mut Activation<'_, 'gc>,
+        this: Object<'gc>,
+        delete_count: i32,
+        items: &[Value<'gc>],
+        i: i32,
+    ) -> Result<Value<'gc>, Error<'gc>> {
+        if this.has_element(activation, i) {
+            let element = this.get_element(activation, i);
+            this.set_element(activation, i - delete_count + items.len() as i32, element)?;
+        } else {
+            this.delete_element(activation, i - delete_count + items.len() as i32);
+        }
+        Ok(Value::Undefined)
     }
 
     for (i, &item) in items.iter().enumerate() {
@@ -375,7 +380,7 @@ pub fn splice<'gc>(
 }
 
 pub fn concat<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -410,7 +415,7 @@ pub fn concat<'gc>(
 }
 
 pub fn to_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -418,7 +423,7 @@ pub fn to_string<'gc>(
 }
 
 fn sort<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -449,7 +454,7 @@ fn sort<'gc>(
 }
 
 fn sort_on<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -537,7 +542,7 @@ fn sort_on<'gc>(
 
 /// Compare between two values, with specified sort options.
 fn sort_compare<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     a: &Value<'gc>,
     b: &Value<'gc>,
     options: SortOptions,
@@ -604,7 +609,7 @@ fn sort_on_compare<'a, 'gc>(fields: &'a [(AvmString<'gc>, SortOptions)]) -> Comp
 
 /// Common code for both `Array.sort` and `Array.sortOn`.
 fn sort_internal<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     compare_fn: CompareFn<'_, 'gc>,
     mut options: SortOptions,
@@ -664,7 +669,7 @@ fn sort_internal<'gc>(
 
 /// Sort elements using the quicksort algorithm, mimicking Flash's behavior.
 fn qsort<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     elements: &mut [(i32, Value<'gc>)],
     compare_fn: &CompareFn<'_, 'gc>,
     options: SortOptions,
@@ -747,7 +752,7 @@ pub fn create_proto<'gc>(
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     let array = ArrayObject::empty_with_proto(gc_context, proto);
-    let object = array.as_script_object().unwrap();
+    let object = array.raw_script_object();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     object.into()
 }

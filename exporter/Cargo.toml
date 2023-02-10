@@ -1,21 +1,23 @@
 [package]
 name = "exporter"
-version = "0.1.0"
 authors = ["Nathan Adams <dinnerbone@dinnerbone.com>"]
-edition = "2021"
-license = "MIT OR Apache-2.0"
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
 
 [dependencies]
-clap = { version = "3.2.18", features = ["derive"] }
+clap = { version = "4.1.4", features = ["derive"] }
 futures = "0.3"
 ruffle_core = { path = "../core", features = ["deterministic"] }
 ruffle_render_wgpu = { path = "../render/wgpu", features = ["clap"] }
-image = "0.24.2"
+image = "0.24.5"
 log = "0.4"
 walkdir = "2.3.2"
 indicatif = "0.17"
 anyhow = "1.0"
-rayon = "1.5.3"
+rayon = "1.6.1"
 
 [features]
 avm_debug = ["ruffle_core/avm_debug"]

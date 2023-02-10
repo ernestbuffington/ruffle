@@ -2,7 +2,6 @@
 
 use crate::cli_options::AnalyzeOpt;
 use crate::file_results::{FileResults, Step};
-use std::cmp::max;
 use std::fs::File;
 
 /// Generate and print statistics related to a scan's results
@@ -28,56 +27,26 @@ pub fn analyze(results: impl Iterator<Item = FileResults>) {
         }
     }
 
-    println!("Scanned {} swf files.", total);
+    println!("Scanned {total} swf files.");
 
-    let digits = max(
-        (start as f64).log10().ceil() as usize,
-        max(
-            (read as f64).log10().ceil() as usize,
-            max(
-                (decompress as f64).log10().ceil() as usize,
-                max(
-                    (parse as f64).log10().ceil() as usize,
-                    max(
-                        (execute as f64).log10().ceil() as usize,
-                        (complete as f64).log10().ceil() as usize,
-                    ),
-                ),
-            ),
-        ),
-    ) + 4;
+    let digits = [start, read, decompress, parse, execute, complete]
+        .iter()
+        .map(|x| (*x as f64).log10().ceil() as usize)
+        .max()
+        .unwrap()
+        + 4;
 
     println!();
 
     if start > 0 {
-        println!(
-            "{:>digits$} movies panicked or crashed the scanner",
-            start,
-            digits = digits
-        );
+        println!("{start:>digits$} movies panicked or crashed the scanner");
     }
 
-    println!(
-        "{:>digits$} movies failed when reading",
-        read,
-        digits = digits
-    );
-    println!(
-        "{:>digits$} movies failed to decompress",
-        decompress,
-        digits = digits
-    );
-    println!("{:>digits$} movies failed to parse", parse, digits = digits);
-    println!(
-        "{:>digits$} movies failed to execute",
-        execute,
-        digits = digits
-    );
-    println!(
-        "{:>digits$} movies completed without errors",
-        complete,
-        digits = digits
-    );
+    println!("{read:>digits$} movies failed when reading");
+    println!("{decompress:>digits$} movies failed to decompress");
+    println!("{parse:>digits$} movies failed to parse");
+    println!("{execute:>digits$} movies failed to execute");
+    println!("{complete:>digits$} movies completed without errors");
     println!();
 }
 
@@ -91,7 +60,7 @@ pub fn analyze_main(opt: AnalyzeOpt) -> Result<(), std::io::Error> {
             Err(e) => {
                 // Treat unparseable CSV rows as a scanner panic
                 FileResults {
-                    error: Some(format!("{}", e)),
+                    error: Some(format!("{e}")),
                     ..FileResults::default()
                 }
             }

@@ -9,7 +9,7 @@ pub enum CallNode<'gc> {
     Method(Executable<'gc>),
 }
 
-#[derive(Collect, Debug, Clone)]
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct CallStack<'gc> {
     stack: Vec<CallNode<'gc>>,
@@ -41,6 +41,10 @@ impl<'gc> CallStack<'gc> {
             }
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.stack.is_empty()
+    }
 }
 
 impl<'gc> Default for CallStack<'gc> {
@@ -53,6 +57,6 @@ impl<'gc> std::fmt::Display for CallStack<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut output = WString::new();
         self.display(&mut output);
-        write!(f, "{}", output)
+        write!(f, "{output}")
     }
 }

@@ -66,10 +66,13 @@ impl<'gc, V> PropertyMap<'gc, V> {
     }
 
     pub fn get_for_multiname(&self, name: &Multiname<'gc>) -> Option<&V> {
+        if name.has_lazy_component() {
+            unreachable!("Lookup on lazy Multiname should never happen ({:?})", name);
+        }
         if let Some(local_name) = name.local_name() {
             self.0.get(&local_name).iter().find_map(|v| {
                 v.iter()
-                    .filter(|(n, _)| name.namespace_set().any(|ns| *ns == *n))
+                    .filter(|(n, _)| name.namespace_set().iter().any(|ns| *ns == *n))
                     .map(|(_, v)| v)
                     .next()
             })
@@ -79,10 +82,13 @@ impl<'gc, V> PropertyMap<'gc, V> {
     }
 
     pub fn get_with_ns_for_multiname(&self, name: &Multiname<'gc>) -> Option<(Namespace<'gc>, &V)> {
+        if name.has_lazy_component() {
+            unreachable!("Lookup on lazy Multiname should never happen ({:?})", name);
+        }
         if let Some(local_name) = name.local_name() {
             self.0.get(&local_name).iter().find_map(|v| {
                 v.iter()
-                    .filter(|(n, _)| name.namespace_set().any(|ns| *ns == *n))
+                    .filter(|(n, _)| name.namespace_set().iter().any(|ns| *ns == *n))
                     .map(|(ns, v)| (*ns, v))
                     .next()
             })
@@ -123,6 +129,25 @@ impl<'gc, V> PropertyMap<'gc, V> {
             Some(value)
         } else {
             bucket.push((name.namespace(), value));
+
+            None
+        }
+    }
+
+    pub fn insert_with_namespace(
+        &mut self,
+        ns: Namespace<'gc>,
+        name: AvmString<'gc>,
+        mut value: V,
+    ) -> Option<V> {
+        let bucket = self.0.entry(name).or_default();
+
+        if let Some((_, old_value)) = bucket.iter_mut().find(|(n, _)| *n == ns) {
+            swap(old_value, &mut value);
+
+            Some(value)
+        } else {
+            bucket.push((ns, value));
 
             None
         }

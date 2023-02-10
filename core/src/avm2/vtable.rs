@@ -14,11 +14,11 @@ use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::Ref;
 use std::ops::DerefMut;
 
-#[derive(Collect, Debug, Clone, Copy)]
+#[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct VTable<'gc>(GcCell<'gc, VTableData<'gc>>);
 
-#[derive(Collect, Debug, Clone)]
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct VTableData<'gc> {
     /// should always be Some post-initialization
@@ -43,7 +43,7 @@ pub struct VTableData<'gc> {
 // TODO: it might make more sense to just bind the Method to the VTable (and this its class and scope) directly
 // would also be nice to somehow remove the Option-ness from `defining_class` and `scope` fields for this
 // to be more intuitive and cheaper
-#[derive(Collect, Debug, Clone)]
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct ClassBoundMethod<'gc> {
     pub class: ClassObject<'gc>,
@@ -105,13 +105,21 @@ impl<'gc> VTable<'gc> {
             .cloned()
     }
 
+    pub fn get_trait_with_ns(self, name: &Multiname<'gc>) -> Option<(Namespace<'gc>, Property)> {
+        self.0
+            .read()
+            .resolved_traits
+            .get_with_ns_for_multiname(name)
+            .map(|(ns, p)| (ns, *p))
+    }
+
     /// Coerces `value` to the type of the slot with id `slot_id`
     pub fn coerce_trait_value(
         &self,
         slot_id: u32,
         value: Value<'gc>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<Value<'gc>, Error> {
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<Value<'gc>, Error<'gc>> {
         // Drop the `write()` guard, as 'slot_class.coerce' may need to access this vtable.
         let mut slot_class = { self.0.read().slot_classes[slot_id as usize].clone() };
 
@@ -162,8 +170,8 @@ impl<'gc> VTable<'gc> {
         traits: &[Trait<'gc>],
         scope: ScopeChain<'gc>,
         superclass_vtable: Option<Self>,
-        activation: &mut Activation<'_, 'gc, '_>,
-    ) -> Result<(), Error> {
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<(), Error<'gc>> {
         // Let's talk about slot_ids and disp_ids.
         // Specification is one thing, but reality is another.
 
@@ -405,7 +413,7 @@ impl<'gc> VTable<'gc> {
     /// fail.
     pub fn make_bound_method(
         self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         receiver: Object<'gc>,
         disp_id: u32,
     ) -> Option<FunctionObject<'gc>> {
@@ -470,7 +478,7 @@ impl<'gc> VTable<'gc> {
 fn trait_to_default_value<'gc>(
     scope: ScopeChain<'gc>,
     trait_data: &Trait<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
 ) -> Value<'gc> {
     match trait_data.kind() {
         TraitKind::Slot { default_value, .. } => *default_value,

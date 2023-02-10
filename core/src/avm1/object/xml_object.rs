@@ -80,12 +80,12 @@ pub struct XmlObjectData<'gc> {
 
 impl<'gc> XmlObject<'gc> {
     /// Construct a new XML document and object pair.
-    pub fn empty(gc_context: MutationContext<'gc, '_>, proto: Option<Object<'gc>>) -> Self {
+    pub fn empty(gc_context: MutationContext<'gc, '_>, proto: Object<'gc>) -> Self {
         let mut root = XmlNode::new(gc_context, ELEMENT_NODE, None);
         let object = Self(GcCell::allocate(
             gc_context,
             XmlObjectData {
-                base: ScriptObject::new(gc_context, proto),
+                base: ScriptObject::new(gc_context, Some(proto)),
                 root,
                 xml_decl: None,
                 doctype: None,
@@ -117,7 +117,7 @@ impl<'gc> XmlObject<'gc> {
     /// This method does not yet actually remove existing node contents.
     pub fn replace_with_str(
         &mut self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         data: &WStr,
         ignore_white: bool,
     ) -> Result<(), quick_xml::Error> {
@@ -221,8 +221,8 @@ impl fmt::Debug for XmlObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let this = self.0.read();
         f.debug_struct("XmlObject")
-            .field("base", &this.base)
-            .field("root", &self.0.read().root)
+            .field("root", &this.root)
+            .field("ptr", &self.0.as_ptr())
             .finish()
     }
 }
@@ -232,10 +232,10 @@ impl<'gc> TObject<'gc> for XmlObject<'gc> {
 
     fn create_bare_object(
         &self,
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         this: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
-        Ok(Self::empty(activation.context.gc_context, Some(this)).into())
+        Ok(Self::empty(activation.context.gc_context, this).into())
     }
 
     fn as_xml(&self) -> Option<XmlObject<'gc>> {

@@ -9,25 +9,38 @@ use crate::prelude::*;
 
 use crate::display_object::container::ChildContainer;
 use crate::display_object::interactive::InteractiveObjectBase;
+use crate::tag_utils::SwfMovie;
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
+use std::sync::Arc;
 
-#[derive(Clone, Debug, Collect, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct LoaderDisplay<'gc>(GcCell<'gc, LoaderDisplayData<'gc>>);
 
-#[derive(Clone, Debug, Collect)]
+impl fmt::Debug for LoaderDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoaderDisplay")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct LoaderDisplayData<'gc> {
     base: InteractiveObjectBase<'gc>,
     container: ChildContainer<'gc>,
     avm2_object: Avm2Object<'gc>,
+    movie: Arc<SwfMovie>,
 }
 
 impl<'gc> LoaderDisplay<'gc> {
     pub fn new_with_avm2(
         gc_context: MutationContext<'gc, '_>,
         avm2_object: Avm2Object<'gc>,
+        movie: Arc<SwfMovie>,
     ) -> Self {
         LoaderDisplay(GcCell::allocate(
             gc_context,
@@ -35,6 +48,7 @@ impl<'gc> LoaderDisplay<'gc> {
                 base: Default::default(),
                 container: ChildContainer::new(),
                 avm2_object,
+                movie,
             },
         ))
     }
@@ -61,7 +75,7 @@ impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
         u16::MAX
     }
 
-    fn render_self(&self, context: &mut RenderContext<'_, 'gc, '_>) {
+    fn render_self(&self, context: &mut RenderContext<'_, 'gc>) {
         self.render_children(context);
     }
 
@@ -80,14 +94,33 @@ impl<'gc> TDisplayObject<'gc> for LoaderDisplay<'gc> {
     fn as_interactive(self) -> Option<InteractiveObject<'gc>> {
         Some(self.into())
     }
+
+    fn enter_frame(&self, context: &mut UpdateContext<'_, 'gc>) {
+        for child in self.iter_render_list() {
+            child.enter_frame(context);
+        }
+    }
+
+    fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc>) {
+        for child in self.iter_render_list() {
+            child.construct_frame(context);
+        }
+    }
+
+    fn movie(&self) -> Arc<SwfMovie> {
+        self.0.read().movie.clone()
+    }
 }
 
 impl<'gc> TInteractiveObject<'gc> for LoaderDisplay<'gc> {
-    fn ibase(&self) -> Ref<InteractiveObjectBase<'gc>> {
+    fn raw_interactive(&self) -> Ref<InteractiveObjectBase<'gc>> {
         Ref::map(self.0.read(), |r| &r.base)
     }
 
-    fn ibase_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<InteractiveObjectBase<'gc>> {
+    fn raw_interactive_mut(
+        &self,
+        mc: MutationContext<'gc, '_>,
+    ) -> RefMut<InteractiveObjectBase<'gc>> {
         RefMut::map(self.0.write(mc), |w| &mut w.base)
     }
 
@@ -100,13 +133,39 @@ impl<'gc> TInteractiveObject<'gc> for LoaderDisplay<'gc> {
     }
     fn event_dispatch(
         self,
-        _context: &mut UpdateContext<'_, 'gc, '_>,
+        _context: &mut UpdateContext<'_, 'gc>,
         _event: ClipEvent<'gc>,
     ) -> ClipEventResult {
         ClipEventResult::NotHandled
     }
+
+    fn mouse_pick(
+        &self,
+        context: &mut UpdateContext<'_, 'gc>,
+        pos: (Twips, Twips),
+        require_button_mode: bool,
+    ) -> Option<InteractiveObject<'gc>> {
+        for child in self.iter_render_list().rev() {
+            if let Some(int) = child.as_interactive() {
+                if let Some(result) = int.mouse_pick(context, pos, require_button_mode) {
+                    return Some(result);
+                }
+            }
+        }
+
+        None
+    }
 }
 
 impl<'gc> TDisplayObjectContainer<'gc> for LoaderDisplay<'gc> {
-    impl_display_object_container!(container);
+    fn raw_container(&self) -> Ref<'_, ChildContainer<'gc>> {
+        Ref::map(self.0.read(), |this| &this.container)
+    }
+
+    fn raw_container_mut(
+        &self,
+        gc_context: MutationContext<'gc, '_>,
+    ) -> RefMut<'_, ChildContainer<'gc>> {
+        RefMut::map(self.0.write(gc_context), |this| &mut this.container)
+    }
 }

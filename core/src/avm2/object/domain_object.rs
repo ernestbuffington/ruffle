@@ -6,14 +6,15 @@ use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates AppDomain objects.
 pub fn appdomain_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<Object<'gc>, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Object<'gc>, Error<'gc>> {
     let domain = activation.domain();
     let base = ScriptObjectData::new(class);
 
@@ -24,11 +25,19 @@ pub fn appdomain_allocator<'gc>(
     .into())
 }
 
-#[derive(Clone, Collect, Debug, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct DomainObject<'gc>(GcCell<'gc, DomainObjectData<'gc>>);
 
-#[derive(Clone, Collect, Debug)]
+impl fmt::Debug for DomainObject<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DomainObject")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct DomainObjectData<'gc> {
     /// Base script object
@@ -44,9 +53,9 @@ impl<'gc> DomainObject<'gc> {
     /// This function will call instance initializers. You do not need to do so
     /// yourself.
     pub fn from_domain(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         domain: Domain<'gc>,
-    ) -> Result<Object<'gc>, Error> {
+    ) -> Result<Object<'gc>, Error<'gc>> {
         let class = activation.avm2().classes().application_domain;
         let base = ScriptObjectData::new(class);
         let mut this: Object<'gc> = DomainObject(GcCell::allocate(
@@ -79,7 +88,7 @@ impl<'gc> TObject<'gc> for DomainObject<'gc> {
         Some(self.0.read().domain)
     }
 
-    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error<'gc>> {
         let this: Object<'gc> = Object::DomainObject(*self);
 
         Ok(this.into())

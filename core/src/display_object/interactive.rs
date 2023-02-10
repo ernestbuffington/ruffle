@@ -75,7 +75,7 @@ bitflags! {
     }
 }
 
-#[derive(Collect, Clone, Debug)]
+#[derive(Collect, Clone)]
 #[collect(no_drop)]
 pub struct InteractiveObjectBase<'gc> {
     pub base: DisplayObjectBase<'gc>,
@@ -102,7 +102,7 @@ impl<'gc> Default for InteractiveObjectBase<'gc> {
 }
 
 #[enum_trait_object(
-    #[derive(Clone, Collect, Debug, Copy)]
+    #[derive(Clone, Collect, Copy, Debug)]
     #[collect(no_drop)]
     pub enum InteractiveObject<'gc> {
         Stage(Stage<'gc>),
@@ -116,46 +116,49 @@ impl<'gc> Default for InteractiveObjectBase<'gc> {
 pub trait TInteractiveObject<'gc>:
     'gc + Clone + Copy + Collect + Debug + Into<InteractiveObject<'gc>>
 {
-    fn ibase(&self) -> Ref<InteractiveObjectBase<'gc>>;
+    fn raw_interactive(&self) -> Ref<InteractiveObjectBase<'gc>>;
 
-    fn ibase_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<InteractiveObjectBase<'gc>>;
+    fn raw_interactive_mut(
+        &self,
+        mc: MutationContext<'gc, '_>,
+    ) -> RefMut<InteractiveObjectBase<'gc>>;
 
     fn as_displayobject(self) -> DisplayObject<'gc>;
 
     /// Check if the interactive object accepts user input.
     fn mouse_enabled(self) -> bool {
-        self.ibase()
+        self.raw_interactive()
             .flags
             .contains(InteractiveObjectFlags::MOUSE_ENABLED)
     }
 
     /// Set if the interactive object accepts user input.
     fn set_mouse_enabled(self, mc: MutationContext<'gc, '_>, value: bool) {
-        self.ibase_mut(mc)
+        self.raw_interactive_mut(mc)
             .flags
             .set(InteractiveObjectFlags::MOUSE_ENABLED, value)
     }
 
     /// Check if the interactive object accepts double-click events.
     fn double_click_enabled(self) -> bool {
-        self.ibase()
+        self.raw_interactive()
             .flags
             .contains(InteractiveObjectFlags::DOUBLE_CLICK_ENABLED)
     }
 
     // Set if the interactive object accepts double-click events.
     fn set_double_click_enabled(self, mc: MutationContext<'gc, '_>, value: bool) {
-        self.ibase_mut(mc)
+        self.raw_interactive_mut(mc)
             .flags
             .set(InteractiveObjectFlags::DOUBLE_CLICK_ENABLED, value)
     }
 
     fn context_menu(self) -> Avm2Value<'gc> {
-        self.ibase().context_menu
+        self.raw_interactive().context_menu
     }
 
     fn set_context_menu(self, mc: MutationContext<'gc, '_>, value: Avm2Value<'gc>) {
-        self.ibase_mut(mc).context_menu = value;
+        self.raw_interactive_mut(mc).context_menu = value;
     }
 
     /// Filter the incoming clip event.
@@ -172,7 +175,7 @@ pub trait TInteractiveObject<'gc>:
     /// terminate, including the event default.
     fn propagate_to_children(
         self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         event: ClipEvent<'gc>,
     ) -> ClipEventResult {
         if event.propagates() {
@@ -199,7 +202,7 @@ pub trait TInteractiveObject<'gc>:
     /// if the event will be passed onto siblings and parents.
     fn event_dispatch(
         self,
-        _context: &mut UpdateContext<'_, 'gc, '_>,
+        _context: &mut UpdateContext<'_, 'gc>,
         _event: ClipEvent<'gc>,
     ) -> ClipEventResult;
 
@@ -211,7 +214,7 @@ pub trait TInteractiveObject<'gc>:
     /// event types should dispatch them in `event_dispatch`.
     fn event_dispatch_to_avm2(
         self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         event: ClipEvent<'gc>,
     ) -> ClipEventResult {
         let target = if let Avm2Value::Object(target) = self.as_displayobject().object2() {
@@ -233,7 +236,7 @@ pub trait TInteractiveObject<'gc>:
                 );
 
                 if let Err(e) = Avm2::dispatch_event(&mut activation.context, avm2_event, target) {
-                    log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                    tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                 }
 
                 ClipEventResult::Handled
@@ -248,13 +251,13 @@ pub trait TInteractiveObject<'gc>:
                 );
 
                 if let Err(e) = Avm2::dispatch_event(&mut activation.context, avm2_event, target) {
-                    log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                    tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                 }
 
                 ClipEventResult::Handled
             }
             ClipEvent::Release => {
-                let read = self.ibase();
+                let read = self.raw_interactive();
                 let last_click = read.last_click;
                 let this_click = Instant::now();
 
@@ -279,10 +282,10 @@ pub trait TInteractiveObject<'gc>:
                     if let Err(e) =
                         Avm2::dispatch_event(&mut activation.context, avm2_event, target)
                     {
-                        log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                        tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                     }
 
-                    self.ibase_mut(context.gc_context).last_click = None;
+                    self.raw_interactive_mut(context.gc_context).last_click = None;
                 } else {
                     let avm2_event = Avm2EventObject::mouse_event(
                         &mut activation,
@@ -295,10 +298,10 @@ pub trait TInteractiveObject<'gc>:
                     if let Err(e) =
                         Avm2::dispatch_event(&mut activation.context, avm2_event, target)
                     {
-                        log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                        tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                     }
 
-                    self.ibase_mut(context.gc_context).last_click = Some(this_click);
+                    self.raw_interactive_mut(context.gc_context).last_click = Some(this_click);
                 }
 
                 ClipEventResult::Handled
@@ -313,10 +316,10 @@ pub trait TInteractiveObject<'gc>:
                 );
 
                 if let Err(e) = Avm2::dispatch_event(&mut activation.context, avm2_event, target) {
-                    log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                    tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                 }
 
-                self.ibase_mut(context.gc_context).last_click = None;
+                self.raw_interactive_mut(context.gc_context).last_click = None;
 
                 ClipEventResult::Handled
             }
@@ -330,7 +333,7 @@ pub trait TInteractiveObject<'gc>:
                 );
 
                 if let Err(e) = Avm2::dispatch_event(&mut activation.context, avm2_event, target) {
-                    log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                    tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                 }
 
                 let lca = lowest_common_ancestor(
@@ -339,9 +342,9 @@ pub trait TInteractiveObject<'gc>:
                         .unwrap_or_else(|| activation.context.stage.into()),
                 );
 
-                let mut rollover_target = Some(self.as_displayobject());
-                while let Some(tgt) = rollover_target {
-                    if DisplayObject::option_ptr_eq(rollover_target, lca) {
+                let mut rollout_target = Some(self.as_displayobject());
+                while let Some(tgt) = rollout_target {
+                    if DisplayObject::option_ptr_eq(rollout_target, lca) {
                         break;
                     }
 
@@ -352,14 +355,18 @@ pub trait TInteractiveObject<'gc>:
                         if let Err(e) =
                             Avm2::dispatch_event(&mut activation.context, avm2_event, avm2_target)
                         {
-                            log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                            tracing::error!(
+                                "Got error when dispatching {:?} to AVM2: {}",
+                                event,
+                                e
+                            );
                         }
                     }
 
-                    rollover_target = tgt.parent();
+                    rollout_target = tgt.parent();
                 }
 
-                self.ibase_mut(context.gc_context).last_click = None;
+                self.raw_interactive_mut(context.gc_context).last_click = None;
 
                 ClipEventResult::Handled
             }
@@ -377,13 +384,17 @@ pub trait TInteractiveObject<'gc>:
                     }
 
                     let avm2_event =
-                        Avm2EventObject::mouse_event(&mut activation, "mouseOut", tgt, from, 0);
+                        Avm2EventObject::mouse_event(&mut activation, "rollOver", tgt, from, 0);
 
                     if let Avm2Value::Object(avm2_target) = tgt.object2() {
                         if let Err(e) =
                             Avm2::dispatch_event(&mut activation.context, avm2_event, avm2_target)
                         {
-                            log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                            tracing::error!(
+                                "Got error when dispatching {:?} to AVM2: {}",
+                                event,
+                                e
+                            );
                         }
                     }
 
@@ -399,7 +410,7 @@ pub trait TInteractiveObject<'gc>:
                 );
 
                 if let Err(e) = Avm2::dispatch_event(&mut activation.context, avm2_event, target) {
-                    log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                    tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                 }
 
                 ClipEventResult::Handled
@@ -414,7 +425,7 @@ pub trait TInteractiveObject<'gc>:
                 );
 
                 if let Err(e) = Avm2::dispatch_event(&mut activation.context, avm2_event, target) {
-                    log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                    tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                 }
 
                 ClipEventResult::Handled
@@ -429,7 +440,7 @@ pub trait TInteractiveObject<'gc>:
                 );
 
                 if let Err(e) = Avm2::dispatch_event(&mut activation.context, avm2_event, target) {
-                    log::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
+                    tracing::error!("Got error when dispatching {:?} to AVM2: {}", event, e);
                 }
 
                 ClipEventResult::Handled
@@ -443,7 +454,7 @@ pub trait TInteractiveObject<'gc>:
     /// by its parent, and so forth.
     fn handle_clip_event(
         self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         event: ClipEvent<'gc>,
     ) -> ClipEventResult {
         if !self.mouse_enabled() {
@@ -470,7 +481,7 @@ pub trait TInteractiveObject<'gc>:
     /// an `InteractiveObject`.
     fn mouse_pick(
         &self,
-        _context: &mut UpdateContext<'_, 'gc, '_>,
+        _context: &mut UpdateContext<'_, 'gc>,
         _pos: (Twips, Twips),
         _require_button_mode: bool,
     ) -> Option<InteractiveObject<'gc>> {
@@ -478,7 +489,7 @@ pub trait TInteractiveObject<'gc>:
     }
 
     /// The cursor to use when this object is the hovered element under a mouse.
-    fn mouse_cursor(self, _context: &mut UpdateContext<'_, 'gc, '_>) -> MouseCursor {
+    fn mouse_cursor(self, _context: &mut UpdateContext<'_, 'gc>) -> MouseCursor {
         MouseCursor::Hand
     }
 }

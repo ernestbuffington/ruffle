@@ -16,7 +16,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 
 /// `Boolean` constructor
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -33,7 +33,7 @@ pub fn constructor<'gc>(
 
 /// `Boolean` function
 pub fn boolean_function<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -48,7 +48,7 @@ pub fn boolean_function<'gc>(
 pub fn create_boolean_object<'gc>(
     gc_context: MutationContext<'gc, '_>,
     boolean_proto: Object<'gc>,
-    fn_proto: Option<Object<'gc>>,
+    fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     FunctionObject::constructor(
         gc_context,
@@ -65,14 +65,14 @@ pub fn create_proto<'gc>(
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let boolean_proto = ValueObject::empty_box(gc_context, Some(proto));
-    let object = boolean_proto.as_script_object().unwrap();
+    let boolean_proto = ValueObject::empty_box(gc_context, proto);
+    let object = boolean_proto.raw_script_object();
     define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
     boolean_proto
 }
 
 pub fn to_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -88,7 +88,7 @@ pub fn to_string<'gc>(
 }
 
 pub fn value_of<'gc>(
-    _activation: &mut Activation<'_, 'gc, '_>,
+    _activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {

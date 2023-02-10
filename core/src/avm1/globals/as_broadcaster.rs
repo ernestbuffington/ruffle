@@ -5,7 +5,8 @@ use crate::avm1::function::ExecutionReason;
 use crate::avm1::object::TObject;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::Declaration;
-use crate::avm1::{Activation, ArrayObject, AvmString, Object, ScriptObject, Value};
+use crate::avm1::{Activation, ArrayObject, Object, ScriptObject, Value};
+use crate::string::AvmString;
 use gc_arena::{Collect, MutationContext};
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
@@ -17,10 +18,10 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 
 pub fn create<'gc>(
     gc_context: MutationContext<'gc, '_>,
-    proto: Option<Object<'gc>>,
+    proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> (BroadcasterFunctions<'gc>, Object<'gc>) {
-    let object = ScriptObject::new(gc_context, proto);
+    let object = ScriptObject::new(gc_context, Some(proto));
 
     let define_as_object = |index: usize| -> Object<'gc> {
         match OBJECT_DECLS[index].define_on(gc_context, object, fn_proto) {
@@ -40,7 +41,7 @@ pub fn create<'gc>(
     )
 }
 
-#[derive(Clone, Collect, Debug, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct BroadcasterFunctions<'gc> {
     pub add_listener: Object<'gc>,
@@ -60,7 +61,7 @@ impl<'gc> BroadcasterFunctions<'gc> {
 }
 
 pub fn add_listener<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -84,7 +85,7 @@ pub fn add_listener<'gc>(
 }
 
 pub fn remove_listener<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -110,7 +111,7 @@ pub fn remove_listener<'gc>(
 }
 
 pub fn broadcast_message<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -125,7 +126,7 @@ pub fn broadcast_message<'gc>(
 }
 
 pub fn broadcast_internal<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     call_args: &[Value<'gc>],
     method_name: AvmString<'gc>,
@@ -154,7 +155,7 @@ pub fn broadcast_internal<'gc>(
 }
 
 pub fn initialize<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -163,7 +164,7 @@ pub fn initialize<'gc>(
         initialize_internal(
             activation.context.gc_context,
             broadcaster,
-            activation.context.avm1.broadcaster_functions,
+            activation.context.avm1.broadcaster_functions(),
             activation.context.avm1.prototypes().array,
         );
     }

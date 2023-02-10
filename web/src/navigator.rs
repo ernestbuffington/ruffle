@@ -55,7 +55,7 @@ impl WebNavigatorBackend {
         };
 
         if base_url.is_none() {
-            log::error!("Could not get base URL for base directory inference.");
+            tracing::error!("Could not get base URL for base directory inference.");
         }
 
         Self {
@@ -93,7 +93,7 @@ impl NavigatorBackend for WebNavigatorBackend {
         // If `allowScriptAccess` is disabled, reject the `javascript:` scheme.
         if let Ok(url) = Url::parse(&url) {
             if !self.allow_script_access && url.scheme() == "javascript" {
-                log::warn!("SWF tried to run a script, but script access is not allowed");
+                tracing::warn!("SWF tried to run a script, but script access is not allowed");
                 return;
             }
         }
@@ -110,9 +110,9 @@ impl NavigatorBackend for WebNavigatorBackend {
 
                 let form = document
                     .create_element("form")
-                    .unwrap()
+                    .expect("create_element() must succeed")
                     .dyn_into::<web_sys::HtmlFormElement>()
-                    .unwrap();
+                    .expect("create_element('form') didn't give us a form");
 
                 let _ = form.set_attribute(
                     "method",
@@ -129,7 +129,9 @@ impl NavigatorBackend for WebNavigatorBackend {
                 }
 
                 for (k, v) in formvars.iter() {
-                    let hidden = document.create_element("input").unwrap();
+                    let hidden = document
+                        .create_element("input")
+                        .expect("create_element() must succeed");
 
                     let _ = hidden.set_attribute("type", "hidden");
                     let _ = hidden.set_attribute("name", k);
@@ -178,22 +180,24 @@ impl NavigatorBackend for WebNavigatorBackend {
 
                 let datablob =
                     Blob::new_with_buffer_source_sequence_and_options(&blobparts, &blobprops)
-                        .unwrap()
+                        .map_err(|_| Error::FetchError("Got JS error".to_string()))?
                         .dyn_into()
-                        .unwrap();
+                        .map_err(|_| Error::FetchError("Got JS error".to_string()))?;
 
                 init.body(Some(&datablob));
             }
 
             let request = WebRequest::new_with_str_and_init(&url, &init)
-                .map_err(|_| Error::FetchError(format!("Unable to create request for {}", url)))?;
+                .map_err(|_| Error::FetchError(format!("Unable to create request for {url}")))?;
 
             let window = web_sys::window().expect("window()");
             let fetchval = JsFuture::from(window.fetch_with_request(&request))
                 .await
                 .map_err(|_| Error::FetchError("Got JS error".to_string()))?;
 
-            let response: WebResponse = fetchval.dyn_into().unwrap();
+            let response: WebResponse = fetchval
+                .dyn_into()
+                .map_err(|_| Error::FetchError("Fetch result wasn't a WebResponse".to_string()))?;
             if !response.ok() {
                 return Err(Error::FetchError(format!(
                     "HTTP status is not ok, got {}",
@@ -203,13 +207,19 @@ impl NavigatorBackend for WebNavigatorBackend {
 
             let url = response.url();
 
-            let body: ArrayBuffer = JsFuture::from(response.array_buffer().unwrap())
-                .await
-                .map_err(|_| {
-                    Error::FetchError("Could not allocate array buffer for response".to_string())
-                })?
-                .dyn_into()
-                .unwrap();
+            let body: ArrayBuffer = JsFuture::from(
+                response
+                    .array_buffer()
+                    .map_err(|_| Error::FetchError("Got JS error".to_string()))?,
+            )
+            .await
+            .map_err(|_| {
+                Error::FetchError("Could not allocate array buffer for response".to_string())
+            })?
+            .dyn_into()
+            .map_err(|_| {
+                Error::FetchError("array_buffer result wasn't an ArrayBuffer".to_string())
+            })?;
             let body = Uint8Array::new(&body).to_vec();
 
             Ok(Response { url, body })
@@ -219,14 +229,14 @@ impl NavigatorBackend for WebNavigatorBackend {
     fn spawn_future(&mut self, future: OwnedFuture<(), Error>) {
         spawn_local(async move {
             if let Err(e) = future.await {
-                log::error!("Asynchronous error occurred: {}", e);
+                tracing::error!("Asynchronous error occurred: {}", e);
             }
         })
     }
 
     fn pre_process_url(&self, mut url: Url) -> Url {
         if self.upgrade_to_https && url.scheme() == "http" && url.set_scheme("https").is_err() {
-            log::error!("Url::set_scheme failed on: {}", url);
+            tracing::error!("Url::set_scheme failed on: {}", url);
         }
         url
     }

@@ -4,22 +4,25 @@ use crate::avm1::{Object as Avm1Object, StageObject as Avm1StageObject};
 use crate::avm2::{
     Activation as Avm2Activation, Object as Avm2Object, StageObject as Avm2StageObject,
 };
-use crate::backend::video::{EncodedFrame, Error, VideoStreamHandle};
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
 use crate::prelude::*;
 use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::vminterface::{AvmObject, Instantiator};
+use core::fmt;
 use gc_arena::{Collect, GcCell, MutationContext};
 use ruffle_render::bitmap::BitmapInfo;
 use ruffle_render::bounding_box::BoundingBox;
+use ruffle_render::commands::CommandHandler;
+use ruffle_render::quality::StageQuality;
+use ruffle_video::error::Error;
+use ruffle_video::frame::EncodedFrame;
+use ruffle_video::VideoStreamHandle;
 use std::borrow::{Borrow, BorrowMut};
 use std::cell::{Ref, RefMut};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use swf::{CharacterId, DefineVideoStream, VideoFrame};
-
-use super::StageQuality;
 
 /// A Video display object is a high-level interface to a video player.
 ///
@@ -27,11 +30,19 @@ use super::StageQuality;
 /// a host SWF, or an externally-loaded FLV or F4V file. In the latter form,
 /// video framerates are (supposedly) permitted to differ from the stage
 /// framerate.
-#[derive(Clone, Debug, Collect, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct Video<'gc>(GcCell<'gc, VideoData<'gc>>);
 
-#[derive(Clone, Debug, Collect)]
+impl fmt::Debug for Video<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Video")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct VideoData<'gc> {
     base: DisplayObjectBase<'gc>,
@@ -124,7 +135,7 @@ impl<'gc> Video<'gc> {
     ///
     /// This function yields an error if this video player is not playing an
     /// embedded SWF video.
-    pub fn preload_swf_frame(&mut self, tag: VideoFrame, context: &mut UpdateContext<'_, 'gc, '_>) {
+    pub fn preload_swf_frame(&mut self, tag: VideoFrame, context: &mut UpdateContext<'_, 'gc>) {
         match (*self
             .0
             .write(context.gc_context)
@@ -140,7 +151,7 @@ impl<'gc> Video<'gc> {
                 let subslice = SwfSlice::from(movie.clone()).to_unbounded_subslice(tag.data);
 
                 if frames.contains_key(&tag.frame_num.into()) {
-                    log::warn!("Duplicate frame {}", tag.frame_num);
+                    tracing::warn!("Duplicate frame {}", tag.frame_num);
                 }
 
                 frames.insert(tag.frame_num.into(), (subslice.start, subslice.end));
@@ -155,7 +166,7 @@ impl<'gc> Video<'gc> {
     /// snapping it to the last independently seekable frame. Then, all frames
     /// from that keyframe up to the (wrapped) requested frame are decoded in
     /// order. This matches Flash Player behavior.
-    pub fn seek(self, context: &mut UpdateContext<'_, 'gc, '_>, mut frame_id: u32) {
+    pub fn seek(self, context: &mut UpdateContext<'_, 'gc>, mut frame_id: u32) {
         let read = self.0.read();
         if let VideoStream::Uninstantiated(_) = &read.stream {
             drop(read);
@@ -227,13 +238,13 @@ impl<'gc> Video<'gc> {
     /// This function makes no attempt to ensure that the proposed seek is
     /// valid, hence the fact that it's not `pub`. To do a seek that accounts
     /// for keyframes, see `Video.seek`.
-    fn seek_internal(self, context: &mut UpdateContext<'_, 'gc, '_>, frame_id: u32) {
+    fn seek_internal(self, context: &mut UpdateContext<'_, 'gc>, frame_id: u32) {
         let read = self.0.read();
         let source = read.source;
         let stream = if let VideoStream::Instantiated(stream) = &read.stream {
             stream
         } else {
-            log::error!("Attempted to seek uninstantiated video stream.");
+            tracing::error!("Attempted to seek uninstantiated video stream.");
             return;
         };
 
@@ -254,8 +265,8 @@ impl<'gc> Video<'gc> {
                         .decode_video_stream_frame(*stream, encframe, context.renderer)
                 }
                 None => {
-                    if let Some((_old_id, old_frame)) = read.decoded_frame {
-                        Ok(old_frame)
+                    if let Some((_old_id, old_frame)) = &read.decoded_frame {
+                        Ok(old_frame.clone())
                     } else {
                         Err(Error::SeekingBeforeDecoding(frame_id))
                     }
@@ -269,7 +280,7 @@ impl<'gc> Video<'gc> {
             Ok(bitmap) => {
                 self.0.write(context.gc_context).decoded_frame = Some((frame_id, bitmap));
             }
-            Err(e) => log::error!("Got error when seeking to video frame {}: {}", frame_id, e),
+            Err(e) => tracing::error!("Got error when seeking to video frame {}: {}", frame_id, e),
         }
     }
 }
@@ -297,7 +308,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
 
     fn post_instantiation(
         &self,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
         _init_object: Option<Avm1Object<'gc>>,
         _instantiated_by: Instantiator,
         run_frame: bool,
@@ -323,7 +334,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
                     streamdef.deblocking,
                 );
                 if stream.is_err() {
-                    log::error!(
+                    tracing::error!(
                         "Got error when post-instantiating video: {}",
                         stream.unwrap_err()
                     );
@@ -349,7 +360,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
                         }
                         Ok(_) => {}
                         Err(e) => {
-                            log::error!("Got error when pre-loading video frame: {}", e);
+                            tracing::error!("Got error when pre-loading video frame: {}", e);
                         }
                     }
                 }
@@ -361,7 +372,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         let starting_seek = if let VideoStream::Uninstantiated(seek_to) = write.stream {
             seek_to
         } else {
-            log::warn!("Reinstantiating already-instantiated video stream!");
+            tracing::warn!("Reinstantiating already-instantiated video stream!");
 
             0
         };
@@ -373,7 +384,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
             let object: Avm1Object<'_> = Avm1StageObject::for_display_object(
                 context.gc_context,
                 (*self).into(),
-                Some(context.avm1.prototypes().video),
+                context.avm1.prototypes().video,
             )
             .into();
             write.object = Some(object.into());
@@ -388,8 +399,8 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         }
     }
 
-    fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc, '_>) {
-        if context.is_action_script_3() && matches!(self.object2(), Avm2Value::Undefined) {
+    fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc>) {
+        if context.is_action_script_3() && matches!(self.object2(), Avm2Value::Null) {
             let video_constr = context.avm2.classes().video;
             let mut activation = Avm2Activation::from_nothing(context.reborrow());
             match Avm2StageObject::for_display_object_childless(
@@ -401,8 +412,10 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
                     let object: Avm2Object<'gc> = object.into();
                     self.0.write(context.gc_context).object = Some(object.into())
                 }
-                Err(e) => log::error!("Got {} when constructing AVM2 side of video player", e),
+                Err(e) => tracing::error!("Got {} when constructing AVM2 side of video player", e),
             }
+
+            self.on_construction_complete(context);
         }
     }
 
@@ -426,7 +439,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
     }
 
     fn render(&self, context: &mut RenderContext) {
-        if !self.world_bounds().intersects(&context.stage.view_bounds()) {
+        if !context.is_offscreen && !self.world_bounds().intersects(&context.stage.view_bounds()) {
             // Off-screen; culled
             return;
         }
@@ -436,7 +449,7 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
         let read = self.0.read();
 
         if let Some((_frame_id, ref bitmap)) = read.decoded_frame {
-            let mut transform = context.transform_stack.transform().clone();
+            let mut transform = context.transform_stack.transform();
             let bounds = self.self_bounds();
 
             // The actual decoded frames might be different in size than the declared
@@ -463,10 +476,10 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
             };
 
             context
-                .renderer
-                .render_bitmap(bitmap.handle, &transform, smoothing);
+                .commands
+                .render_bitmap(bitmap.handle.clone(), transform, smoothing);
         } else {
-            log::warn!("Video has no decoded frame to render.");
+            tracing::warn!("Video has no decoded frame to render.");
         }
 
         context.transform_stack.pop();
@@ -474,5 +487,11 @@ impl<'gc> TDisplayObject<'gc> for Video<'gc> {
 
     fn set_object2(&mut self, mc: MutationContext<'gc, '_>, to: Avm2Object<'gc>) {
         self.0.write(mc).object = Some(to.into());
+    }
+
+    fn movie(&self) -> Arc<SwfMovie> {
+        match &*self.0.read().source.read() {
+            VideoSource::Swf { movie, .. } => movie.clone(),
+        }
     }
 }

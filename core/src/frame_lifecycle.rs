@@ -13,13 +13,14 @@
 
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, TDisplayObject};
+use tracing::instrument;
 
 /// Which phase of the frame we're currently in.
 ///
 /// AVM2 frames exist in one of five phases: `Enter`, `Construct`, `Update`,
 /// `FrameScripts`, or `Exit`. An additional `Idle` phase covers rendering and
 /// event processing.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
 pub enum FramePhase {
     /// We're entering the next frame.
     ///
@@ -66,17 +67,13 @@ pub enum FramePhase {
     ///
     /// At this point in time, event handlers are expected to run. No frame
     /// catch-up work should execute.
+    #[default]
     Idle,
 }
 
-impl Default for FramePhase {
-    fn default() -> Self {
-        FramePhase::Idle
-    }
-}
-
 /// Run one frame according to AVM2 frame order.
-pub fn run_all_phases_avm2<'gc>(context: &mut UpdateContext<'_, 'gc, '_>) {
+#[instrument(level = "debug", skip_all)]
+pub fn run_all_phases_avm2(context: &mut UpdateContext<'_, '_>) {
     let stage = context.stage;
 
     *context.frame_phase = FramePhase::Enter;
@@ -103,7 +100,7 @@ pub fn run_all_phases_avm2<'gc>(context: &mut UpdateContext<'_, 'gc, '_>) {
 ///
 /// This is a no-op on AVM1, which has it's own catch-up logic.
 pub fn catchup_display_object_to_frame<'gc>(
-    context: &mut UpdateContext<'_, 'gc, '_>,
+    context: &mut UpdateContext<'_, 'gc>,
     dobj: DisplayObject<'gc>,
 ) {
     if !context.is_action_script_3() {
@@ -111,12 +108,10 @@ pub fn catchup_display_object_to_frame<'gc>(
     }
 
     match *context.frame_phase {
-        //NOTE: We currently do not have test coverage to justify `Enter`
-        //running `construct_frame`. However, `Idle` *does* need frame
-        //construction to happen, because event handlers expect to be able to
-        //construct new movie clips and see their grandchildren. So I suspect
-        //that constructing symbols in `enterFrame` works the same way.
-        FramePhase::Enter | FramePhase::Construct => {
+        FramePhase::Enter => {
+            dobj.enter_frame(context);
+        }
+        FramePhase::Construct => {
             dobj.enter_frame(context);
             dobj.construct_frame(context);
         }

@@ -1,19 +1,29 @@
 use crate::context::{RenderContext, UpdateContext};
 use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
-use crate::library::Library;
+use crate::library::{Library, MovieLibrarySource};
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
+use core::fmt;
 use gc_arena::{Collect, Gc, GcCell, MutationContext};
-use ruffle_render::backend::{RenderBackend, ShapeHandle};
+use ruffle_render::backend::ShapeHandle;
+use ruffle_render::commands::CommandHandler;
 use std::cell::{Ref, RefCell, RefMut};
 use std::sync::Arc;
 use swf::{Fixed16, Fixed8, Twips};
 
-#[derive(Clone, Debug, Collect, Copy)]
+#[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
 pub struct MorphShape<'gc>(GcCell<'gc, MorphShapeData<'gc>>);
 
-#[derive(Clone, Debug, Collect)]
+impl fmt::Debug for MorphShape<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MorphShape")
+            .field("ptr", &self.0.as_ptr())
+            .finish()
+    }
+}
+
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct MorphShapeData<'gc> {
     base: DisplayObjectBase<'gc>,
@@ -72,15 +82,15 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
         Some(*self)
     }
 
-    fn replace_with(&self, context: &mut UpdateContext<'_, 'gc, '_>, id: CharacterId) {
+    fn replace_with(&self, context: &mut UpdateContext<'_, 'gc>, id: CharacterId) {
         if let Some(new_morph_shape) = context
             .library
-            .library_for_movie_mut(self.movie().unwrap())
+            .library_for_movie_mut(self.movie())
             .get_morph_shape(id)
         {
             self.0.write(context.gc_context).static_data = new_morph_shape.0.read().static_data;
         } else {
-            log::warn!("PlaceObject: expected morph shape at character ID {}", id);
+            tracing::warn!("PlaceObject: expected morph shape at character ID {}", id);
         }
     }
 
@@ -92,9 +102,9 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
         let this = self.0.read();
         let ratio = this.ratio;
         let static_data = this.static_data;
-        let shape_handle = static_data.get_shape(context.renderer, context.library, ratio);
+        let shape_handle = static_data.get_shape(context, context.library, ratio);
         context
-            .renderer
+            .commands
             .render_shape(shape_handle, context.transform_stack.transform());
     }
 
@@ -108,7 +118,7 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
 
     fn hit_test_shape(
         &self,
-        _context: &mut UpdateContext<'_, 'gc, '_>,
+        _context: &mut UpdateContext<'_, 'gc>,
         point: (Twips, Twips),
         _options: HitTestOptions,
     ) -> bool {
@@ -122,11 +132,15 @@ impl<'gc> TDisplayObject<'gc> for MorphShape<'gc> {
                     &local_matrix,
                 );
             } else {
-                log::warn!("Missing ratio for morph shape");
+                tracing::warn!("Missing ratio for morph shape");
             }
         }
 
         false
+    }
+
+    fn movie(&self) -> Arc<SwfMovie> {
+        self.0.read().static_data.movie.clone()
     }
 }
 
@@ -173,10 +187,10 @@ impl MorphShapeStatic {
 
     /// Retrieves the `ShapeHandle` for the given ratio.
     /// Lazily intializes and tessellates the shape if it does not yet exist.
-    fn get_shape(
+    fn get_shape<'gc>(
         &self,
-        renderer: &'_ mut dyn RenderBackend,
-        library: &Library<'_>,
+        context: &mut RenderContext<'_, 'gc>,
+        library: &Library<'gc>,
         ratio: u16,
     ) -> ShapeHandle {
         let mut frame = self.get_frame(ratio);
@@ -184,7 +198,13 @@ impl MorphShapeStatic {
             handle
         } else {
             let library = library.library_for_movie(self.movie.clone()).unwrap();
-            let handle = renderer.register_shape((&frame.shape).into(), library);
+            let handle = context.renderer.register_shape(
+                (&frame.shape).into(),
+                &MovieLibrarySource {
+                    library,
+                    gc_context: context.gc_context,
+                },
+            );
             frame.shape_handle = Some(handle);
             handle
         }
@@ -414,7 +434,7 @@ fn lerp_fill(start: &swf::FillStyle, end: &swf::FillStyle, a: f32, b: f32) -> sw
         // If you happened to make, say, a solid color-to-radial gradient tween in the IDE, this would get baked down into
         // a radial-to-radial gradient on export.
         _ => {
-            log::warn!(
+            tracing::warn!(
                 "Unexpected morph shape fill style combination: {:#?}, {:#?}",
                 start,
                 end

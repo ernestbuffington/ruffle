@@ -20,7 +20,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -39,7 +39,7 @@ pub fn constructor<'gc>(
 }
 
 fn load_clip<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -65,6 +65,7 @@ fn load_clip<'gc>(
                     Request::get(url.to_utf8_lossy().into_owned()),
                     None,
                     Some(MovieLoaderEventHandler::Avm1Broadcast(this)),
+                    None,
                 );
                 activation.context.navigator.spawn_future(future);
 
@@ -79,7 +80,7 @@ fn load_clip<'gc>(
 }
 
 fn unload_clip<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -112,7 +113,7 @@ fn unload_clip<'gc>(
 }
 
 fn get_progress<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -134,20 +135,18 @@ fn get_progress<'gc>(
         };
         let result = ScriptObject::new(activation.context.gc_context, None);
         if let Some(target) = target {
-            if let Some(movie) = target.movie() {
-                result.define_value(
-                    activation.context.gc_context,
-                    "bytesLoaded",
-                    movie.compressed_len().into(),
-                    Attribute::empty(),
-                );
-                result.define_value(
-                    activation.context.gc_context,
-                    "bytesTotal",
-                    movie.compressed_len().into(),
-                    Attribute::empty(),
-                );
-            }
+            result.define_value(
+                activation.context.gc_context,
+                "bytesLoaded",
+                target.movie().compressed_len().into(),
+                Attribute::empty(),
+            );
+            result.define_value(
+                activation.context.gc_context,
+                "bytesTotal",
+                target.movie().compressed_len().into(),
+                Attribute::empty(),
+            );
         }
         return Ok(result.into());
     }

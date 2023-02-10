@@ -24,7 +24,7 @@ pub struct ExternalNavigatorBackend {
     event_loop: EventLoopProxy<RuffleEvent>,
 
     /// The url to use for all relative fetches.
-    movie_url: Url,
+    base_url: Url,
 
     // Client to use for network requests
     client: Option<Rc<HttpClient>>,
@@ -47,12 +47,19 @@ impl ExternalNavigatorBackend {
             .redirect_policy(RedirectPolicy::Follow);
 
         let client = builder.build().ok().map(Rc::new);
+        let mut base_url = movie_url;
+
+        // Force replace the last segment with empty. //
+
+        if let Ok(mut base_url) = base_url.path_segments_mut() {
+            base_url.pop_if_empty().pop().push("");
+        }
 
         Self {
             channel,
             event_loop,
             client,
-            movie_url,
+            base_url,
             upgrade_to_https,
         }
     }
@@ -72,7 +79,7 @@ impl NavigatorBackend for ExternalNavigatorBackend {
         let mut parsed_url = match Url::parse(&url) {
             Ok(parsed_url) => parsed_url,
             Err(e) => {
-                log::error!(
+                tracing::error!(
                     "Could not parse URL because of {}, the corrupt URL was: {}",
                     e,
                     url
@@ -101,16 +108,16 @@ impl NavigatorBackend for ExternalNavigatorBackend {
 
         match webbrowser::open(processed_url.as_ref()) {
             Ok(_output) => {}
-            Err(e) => log::error!("Could not open URL {}: {}", processed_url.as_str(), e),
+            Err(e) => tracing::error!("Could not open URL {}: {}", processed_url.as_str(), e),
         };
     }
 
     fn fetch(&self, request: Request) -> OwnedFuture<Response, Error> {
         // TODO: honor sandbox type (local-with-filesystem, local-with-network, remote, ...)
-        let full_url = match self.movie_url.join(request.url()) {
+        let full_url = match self.base_url.join(request.url()) {
             Ok(url) => url,
             Err(e) => {
-                let msg = format!("Invalid URL {}: {}", request.url(), e);
+                let msg = format!("Invalid URL {}: {e}", request.url());
                 return Box::pin(async move { Err(Error::FetchError(msg)) });
             }
         };
@@ -133,7 +140,7 @@ impl NavigatorBackend for ExternalNavigatorBackend {
                         if e.kind() == ErrorKind::PermissionDenied {
                             let attempt_sandbox_open = MessageDialog::new()
                                 .set_level(MessageLevel::Warning)
-                                .set_description(&format!("The current movie is attempting to read files stored in {}.\n\nTo allow it to do so, click Yes, and then Open to grant read access to that directory.\n\nOtherwise, click No to deny access.", path.parent().unwrap().to_string_lossy()))
+                                .set_description(&format!("The current movie is attempting to read files stored in {}.\n\nTo allow it to do so, click Yes, and then Open to grant read access to that directory.\n\nOtherwise, click No to deny access.", path.parent().unwrap_or(&path).to_string_lossy()))
                                 .set_buttons(MessageButtons::YesNo)
                                 .show();
 
@@ -197,7 +204,7 @@ impl NavigatorBackend for ExternalNavigatorBackend {
         self.channel.send(future).expect("working channel send");
 
         if self.event_loop.send_event(RuffleEvent::TaskPoll).is_err() {
-            log::warn!(
+            tracing::warn!(
                 "A task was queued on an event loop that has already ended. It will not be polled."
             );
         }
@@ -205,7 +212,7 @@ impl NavigatorBackend for ExternalNavigatorBackend {
 
     fn pre_process_url(&self, mut url: Url) -> Url {
         if self.upgrade_to_https && url.scheme() == "http" && url.set_scheme("https").is_err() {
-            log::error!("Url::set_scheme failed on: {}", url);
+            tracing::error!("Url::set_scheme failed on: {}", url);
         }
         url
     }

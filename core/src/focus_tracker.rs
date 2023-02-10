@@ -1,9 +1,10 @@
-use crate::avm1::{Avm1, Value};
+use crate::avm1::Avm1;
+use crate::avm1::Value;
 use crate::context::UpdateContext;
 pub use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
 use gc_arena::{Collect, GcCell, MutationContext};
 
-#[derive(Clone, Copy, Collect, Debug)]
+#[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
 pub struct FocusTracker<'gc>(GcCell<'gc, Option<DisplayObject<'gc>>>);
 
@@ -19,7 +20,7 @@ impl<'gc> FocusTracker<'gc> {
     pub fn set(
         &self,
         focused_element: Option<DisplayObject<'gc>>,
-        context: &mut UpdateContext<'_, 'gc, '_>,
+        context: &mut UpdateContext<'_, 'gc>,
     ) {
         let old = std::mem::replace(&mut *self.0.write(context.gc_context), focused_element);
 
@@ -41,7 +42,7 @@ impl<'gc> FocusTracker<'gc> {
             new.on_focus_changed(context.gc_context, true);
         }
 
-        log::info!("Focus is now on {:?}", focused_element);
+        tracing::info!("Focus is now on {:?}", focused_element);
 
         let level0 = context.stage.root_clip();
         Avm1::notify_system_listeners(

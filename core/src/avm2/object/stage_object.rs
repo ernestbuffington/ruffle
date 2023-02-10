@@ -6,6 +6,7 @@ use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::display_object::DisplayObject;
+use crate::display_object::TDisplayObject;
 use gc_arena::{Collect, GcCell, MutationContext};
 use std::cell::{Ref, RefMut};
 use std::fmt::Debug;
@@ -13,8 +14,8 @@ use std::fmt::Debug;
 /// A class instance allocator that allocates Stage objects.
 pub fn stage_allocator<'gc>(
     class: ClassObject<'gc>,
-    activation: &mut Activation<'_, 'gc, '_>,
-) -> Result<Object<'gc>, Error> {
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
     Ok(StageObject(GcCell::allocate(
@@ -31,7 +32,7 @@ pub fn stage_allocator<'gc>(
 #[collect(no_drop)]
 pub struct StageObject<'gc>(GcCell<'gc, StageObjectData<'gc>>);
 
-#[derive(Clone, Collect, Debug)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct StageObjectData<'gc> {
     /// The base data common to all AVM2 objects.
@@ -53,10 +54,10 @@ impl<'gc> StageObject<'gc> {
     /// Display objects that do not need to use this flow should use
     /// `for_display_object_childless`.
     pub fn for_display_object(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         display_object: DisplayObject<'gc>,
         class: ClassObject<'gc>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error<'gc>> {
         let mut instance = Self(GcCell::allocate(
             activation.context.gc_context,
             StageObjectData {
@@ -75,10 +76,10 @@ impl<'gc> StageObject<'gc> {
     /// This function is intended for display objects that do not have children
     /// and thus do not need to be allocated and initialized in separate phases.
     pub fn for_display_object_childless(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         display_object: DisplayObject<'gc>,
         class: ClassObject<'gc>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error<'gc>> {
         let this = Self::for_display_object(activation, display_object, class)?;
 
         class.call_native_init(Some(this.into()), &[], activation)?;
@@ -88,9 +89,9 @@ impl<'gc> StageObject<'gc> {
 
     /// Create a `graphics` object for a given display object.
     pub fn graphics(
-        activation: &mut Activation<'_, 'gc, '_>,
+        activation: &mut Activation<'_, 'gc>,
         display_object: DisplayObject<'gc>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error<'gc>> {
         let class = activation.avm2().classes().graphics;
         let mut this = Self(GcCell::allocate(
             activation.context.gc_context,
@@ -124,11 +125,12 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         self.0.read().display_object
     }
 
-    fn init_display_object(&self, mc: MutationContext<'gc, '_>, obj: DisplayObject<'gc>) {
+    fn init_display_object(&self, mc: MutationContext<'gc, '_>, mut obj: DisplayObject<'gc>) {
         self.0.write(mc).display_object = Some(obj);
+        obj.set_object2(mc, (*self).into());
     }
 
-    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error> {
+    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error<'gc>> {
         Ok(Value::Object(Object::from(*self)))
     }
 }
@@ -139,7 +141,7 @@ impl<'gc> Debug for StageObject<'gc> {
             Ok(obj) => f
                 .debug_struct("StageObject")
                 .field("name", &obj.base.debug_class_name())
-                .field("display_object", &obj.display_object)
+                // .field("display_object", &obj.display_object) TOOO(moulins)
                 .field("ptr", &self.0.as_ptr())
                 .finish(),
             Err(err) => f

@@ -35,7 +35,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 };
 
 fn constructor<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -71,7 +71,7 @@ fn constructor<'gc>(
 }
 
 fn to_string<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -96,7 +96,7 @@ fn to_string<'gc>(
 pub fn create_rectangle_object<'gc>(
     gc_context: MutationContext<'gc, '_>,
     rectangle_proto: Object<'gc>,
-    fn_proto: Option<Object<'gc>>,
+    fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     FunctionObject::constructor(
         gc_context,
@@ -108,7 +108,7 @@ pub fn create_rectangle_object<'gc>(
 }
 
 fn is_empty<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -118,7 +118,7 @@ fn is_empty<'gc>(
 }
 
 fn set_empty<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -130,7 +130,7 @@ fn set_empty<'gc>(
 }
 
 fn clone<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -140,13 +140,13 @@ fn clone<'gc>(
         this.get("width", activation)?,
         this.get("height", activation)?,
     ];
-    let constructor = activation.context.avm1.prototypes.rectangle_constructor;
+    let constructor = activation.context.avm1.prototypes().rectangle_constructor;
     let cloned = constructor.construct(activation, &args)?;
     Ok(cloned)
 }
 
 fn contains<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -175,7 +175,7 @@ fn contains<'gc>(
 }
 
 fn contains_point<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -196,7 +196,7 @@ fn contains_point<'gc>(
 }
 
 fn contains_rectangle<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -228,7 +228,7 @@ fn contains_rectangle<'gc>(
 }
 
 fn intersects<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -256,7 +256,7 @@ fn intersects<'gc>(
 }
 
 fn union<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -308,7 +308,7 @@ fn union<'gc>(
         this_bottom.max(other_bottom)
     } - top;
 
-    let constructor = activation.context.avm1.prototypes.rectangle_constructor;
+    let constructor = activation.context.avm1.prototypes().rectangle_constructor;
     let result = constructor.construct(
         activation,
         &[left.into(), top.into(), width.into(), height.into()],
@@ -317,7 +317,7 @@ fn union<'gc>(
 }
 
 fn inflate<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -345,7 +345,7 @@ fn inflate<'gc>(
 }
 
 fn inflate_point<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -367,7 +367,7 @@ fn inflate_point<'gc>(
 }
 
 fn offset<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -391,7 +391,7 @@ fn offset<'gc>(
 }
 
 fn offset_point<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -409,7 +409,7 @@ fn offset_point<'gc>(
 }
 
 fn intersection<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -458,7 +458,7 @@ fn intersection<'gc>(
         top = 0.0;
     }
 
-    let constructor = activation.context.avm1.prototypes.rectangle_constructor;
+    let constructor = activation.context.avm1.prototypes().rectangle_constructor;
     let result = constructor.construct(
         activation,
         &[
@@ -472,7 +472,7 @@ fn intersection<'gc>(
 }
 
 fn equals<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -485,8 +485,8 @@ fn equals<'gc>(
         let other_y = other.get("y", activation)?;
         let other_width = other.get("width", activation)?;
         let other_height = other.get("height", activation)?;
-        let proto = activation.context.avm1.prototypes.rectangle;
-        let constructor = activation.context.avm1.prototypes.rectangle_constructor;
+        let proto = activation.context.avm1.prototypes().rectangle;
+        let constructor = activation.context.avm1.prototypes().rectangle_constructor;
         return Ok((this_x == other_x
             && this_y == other_y
             && this_width == other_width
@@ -499,7 +499,7 @@ fn equals<'gc>(
 }
 
 fn get_left<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -507,7 +507,7 @@ fn get_left<'gc>(
 }
 
 fn set_left<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -524,7 +524,7 @@ fn set_left<'gc>(
 }
 
 fn get_top<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -532,7 +532,7 @@ fn get_top<'gc>(
 }
 
 fn set_top<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -549,7 +549,7 @@ fn set_top<'gc>(
 }
 
 fn get_right<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -559,7 +559,7 @@ fn get_right<'gc>(
 }
 
 fn set_right<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -576,7 +576,7 @@ fn set_right<'gc>(
 }
 
 fn get_bottom<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -586,7 +586,7 @@ fn get_bottom<'gc>(
 }
 
 fn set_bottom<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -603,7 +603,7 @@ fn set_bottom<'gc>(
 }
 
 fn get_size<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -614,7 +614,7 @@ fn get_size<'gc>(
 }
 
 fn set_size<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -631,7 +631,7 @@ fn set_size<'gc>(
 }
 
 fn get_top_left<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -642,7 +642,7 @@ fn get_top_left<'gc>(
 }
 
 fn set_top_left<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -673,7 +673,7 @@ fn set_top_left<'gc>(
 }
 
 fn get_bottom_right<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
@@ -686,7 +686,7 @@ fn get_bottom_right<'gc>(
 }
 
 fn set_bottom_right<'gc>(
-    activation: &mut Activation<'_, 'gc, '_>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {

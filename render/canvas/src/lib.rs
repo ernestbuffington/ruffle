@@ -1,13 +1,23 @@
-use fnv::FnvHashMap;
+#![deny(clippy::unwrap_used)]
+
+use gc_arena::MutationContext;
 use ruffle_render::backend::null::NullBitmapSource;
-use ruffle_render::backend::{RenderBackend, ShapeHandle, ViewportDimensions};
-use ruffle_render::bitmap::{Bitmap, BitmapFormat, BitmapHandle, BitmapSource};
+use ruffle_render::backend::{
+    Context3D, Context3DCommand, RenderBackend, ShapeHandle, ViewportDimensions,
+};
+use ruffle_render::bitmap::{
+    Bitmap, BitmapFormat, BitmapHandle, BitmapHandleImpl, BitmapSource, SyncHandle,
+};
 use ruffle_render::color_transform::ColorTransform;
+use ruffle_render::commands::{CommandHandler, CommandList};
 use ruffle_render::error::Error;
 use ruffle_render::matrix::Matrix;
+use ruffle_render::quality::StageQuality;
 use ruffle_render::shape_utils::{DistilledShape, DrawCommand, LineScaleMode, LineScales};
 use ruffle_render::transform::Transform;
 use ruffle_web_common::{JsError, JsResult};
+use std::borrow::Cow;
+use std::sync::Arc;
 use swf::{BlendMode, Color};
 use wasm_bindgen::{Clamped, JsCast, JsValue};
 use web_sys::{
@@ -22,12 +32,10 @@ pub struct WebCanvasRenderBackend {
     context: CanvasRenderingContext2d,
     color_matrix: Element,
     shapes: Vec<ShapeData>,
-    bitmaps: FnvHashMap<BitmapHandle, BitmapData>,
     viewport_width: u32,
     viewport_height: u32,
     rect: Path2d,
     mask_state: MaskState,
-    next_bitmap_handle: BitmapHandle,
     blend_modes: Vec<BlendMode>,
 
     // This is currnetly unused - we just store it to report
@@ -66,7 +74,7 @@ impl CanvasColor {
         let g = (*g as f32 * cxform.g_mult.to_f32() + (cxform.g_add as f32)) as u8;
         let b = (*b as f32 * cxform.b_mult.to_f32() + (cxform.b_add as f32)) as u8;
         let a = (*a as f32 * cxform.a_mult.to_f32() + (cxform.a_add as f32)) as u8;
-        let colstring = format!("rgba({},{},{},{})", r, g, b, f32::from(a) / 255.0);
+        let colstring = format!("rgba({r},{g},{b},{})", f32::from(a) / 255.0);
         Self(colstring, r, g, b, a)
     }
 }
@@ -129,11 +137,19 @@ struct CanvasBitmap {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 struct BitmapData {
     bitmap: Bitmap,
     image_data: ImageData,
     canvas: HtmlCanvasElement,
     context: CanvasRenderingContext2d,
+}
+
+impl BitmapHandleImpl for BitmapData {}
+
+fn as_bitmap_data(handle: &BitmapHandle) -> &BitmapData {
+    <dyn BitmapHandleImpl>::downcast_ref(&*handle.0)
+        .expect("Bitmap handle must be a Canvas BitmapData")
 }
 
 impl BitmapData {
@@ -144,8 +160,8 @@ impl BitmapData {
             ImageData::new_with_u8_clamped_array(Clamped(bitmap.data()), bitmap.width())
                 .into_js_result()?;
 
-        let window = web_sys::window().unwrap();
-        let document = window.document().unwrap();
+        let window = web_sys::window().expect("window()");
+        let document = window.document().expect("document()");
         let canvas: HtmlCanvasElement = document
             .create_element("canvas")
             .into_js_result()?
@@ -154,11 +170,10 @@ impl BitmapData {
         canvas.set_height(bitmap.height());
 
         let context: CanvasRenderingContext2d = canvas
-            .get_context("2d")
-            .unwrap()
-            .unwrap()
+            .get_context("2d")?
+            .expect("get_context method must return a value")
             .dyn_into()
-            .unwrap();
+            .expect("get_context method returned something other than a CanvasRenderingContext2d");
         context
             .put_image_data(&image_data, 0.0, 0.0)
             .into_js_result()?;
@@ -170,28 +185,17 @@ impl BitmapData {
         })
     }
 
-    fn get_pixels(&self) -> Option<Bitmap> {
-        if let Ok(bitmap_pixels) =
-            self.context
-                .get_image_data(0.0, 0.0, self.width().into(), self.height().into())
-        {
-            Some(Bitmap::new(
-                self.width(),
-                self.height(),
-                BitmapFormat::Rgba,
-                bitmap_pixels.data().to_vec(),
-            ))
-        } else {
-            None
-        }
-    }
-
-    fn width(&self) -> u32 {
-        self.bitmap.width()
-    }
-
-    fn height(&self) -> u32 {
-        self.bitmap.height()
+    fn update_pixels(&self, bitmap: Bitmap) -> Result<(), JsValue> {
+        let bitmap = bitmap.to_rgba();
+        let image_data =
+            ImageData::new_with_u8_clamped_array(Clamped(bitmap.data()), bitmap.width())
+                .into_js_result()?;
+        self.canvas.set_width(bitmap.width());
+        self.canvas.set_height(bitmap.height());
+        self.context
+            .put_image_data(&image_data, 0.0, 0.0)
+            .into_js_result()?;
+        Ok(())
     }
 }
 
@@ -220,8 +224,8 @@ impl WebCanvasRenderBackend {
             .dyn_into()
             .map_err(|_| "Expected CanvasRenderingContext2d")?;
 
-        let window = web_sys::window().unwrap();
-        let document = window.document().unwrap();
+        let window = web_sys::window().expect("window()");
+        let document = window.document().expect("document()");
 
         // Create a color matrix filter to handle Flash color effects.
         // We may have a previous instance if this canvas was re-used, so remove it.
@@ -287,13 +291,11 @@ impl WebCanvasRenderBackend {
             color_matrix,
             context,
             shapes: vec![],
-            bitmaps: Default::default(),
             viewport_width: 0,
             viewport_height: 0,
             viewport_scale_factor: 1.0,
             rect,
             mask_state: MaskState::DrawContent,
-            next_bitmap_handle: BitmapHandle(0),
             blend_modes: vec![BlendMode::Normal],
         };
         Ok(renderer)
@@ -311,7 +313,7 @@ impl WebCanvasRenderBackend {
                 matrix.tx.to_pixels(),
                 matrix.ty.to_pixels(),
             )
-            .unwrap();
+            .warn_on_error();
     }
 
     #[allow(clippy::float_cmp)]
@@ -340,7 +342,7 @@ impl WebCanvasRenderBackend {
 
             self.color_matrix
                 .set_attribute("values", &matrix_str)
-                .unwrap();
+                .warn_on_error();
 
             self.context.set_filter("url('#_cm')");
         }
@@ -377,6 +379,44 @@ impl WebCanvasRenderBackend {
             .set_global_composite_operation(mode)
             .expect("Failed to update BlendMode");
     }
+
+    fn begin_frame(&mut self, clear: Color) {
+        // Reset canvas transform in case it was left in a dirty state.
+        self.context.reset_transform().warn_on_error();
+
+        let width = self.canvas.width();
+        let height = self.canvas.height();
+
+        if clear.a > 0 {
+            let color = format!("rgba({}, {}, {}, {})", clear.r, clear.g, clear.b, clear.a);
+            self.context.set_fill_style(&color.into());
+            let _ = self.context.set_global_composite_operation("copy");
+            self.context
+                .fill_rect(0.0, 0.0, width.into(), height.into());
+            let _ = self.context.set_global_composite_operation("source-over");
+        } else {
+            self.context
+                .clear_rect(0.0, 0.0, width.into(), height.into());
+        }
+
+        self.mask_state = MaskState::DrawContent;
+    }
+
+    fn push_blend_mode(&mut self, blend: BlendMode) {
+        if Some(&blend) != self.blend_modes.last() {
+            self.apply_blend_mode(blend);
+        }
+        self.blend_modes.push(blend);
+    }
+
+    fn pop_blend_mode(&mut self) {
+        let old = self.blend_modes.pop();
+        // We should never pop our base 'BlendMode::Normal'
+        let current = *self.blend_modes.last().unwrap_or(&BlendMode::Normal);
+        if old != Some(current) {
+            self.apply_blend_mode(current);
+        }
+    }
 }
 
 impl RenderBackend for WebCanvasRenderBackend {
@@ -400,8 +440,7 @@ impl RenderBackend for WebCanvasRenderBackend {
         bitmap_source: &dyn BitmapSource,
     ) -> ShapeHandle {
         let handle = ShapeHandle(self.shapes.len());
-        let data =
-            swf_shape_to_canvas_commands(&shape, bitmap_source, &self.bitmaps, &self.context);
+        let data = swf_shape_to_canvas_commands(&shape, bitmap_source, self);
         self.shapes.push(data);
         handle
     }
@@ -412,8 +451,7 @@ impl RenderBackend for WebCanvasRenderBackend {
         bitmap_source: &dyn BitmapSource,
         handle: ShapeHandle,
     ) {
-        let data =
-            swf_shape_to_canvas_commands(&shape, bitmap_source, &self.bitmaps, &self.context);
+        let data = swf_shape_to_canvas_commands(&shape, bitmap_source, self);
         self.shapes[handle.0] = data;
     }
 
@@ -422,33 +460,60 @@ impl RenderBackend for WebCanvasRenderBackend {
         self.register_shape((&shape).into(), &NullBitmapSource)
     }
 
-    fn begin_frame(&mut self, clear: Color) {
-        // Reset canvas transform in case it was left in a dirty state.
-        self.context.reset_transform().unwrap();
-
-        let width = self.canvas.width();
-        let height = self.canvas.height();
-
-        if clear.a > 0 {
-            let color = format!("rgba({}, {}, {}, {})", clear.r, clear.g, clear.b, clear.a);
-            self.context.set_fill_style(&color.into());
-            let _ = self.context.set_global_composite_operation("copy");
-            self.context
-                .fill_rect(0.0, 0.0, width.into(), height.into());
-            let _ = self.context.set_global_composite_operation("source-over");
-        } else {
-            self.context
-                .clear_rect(0.0, 0.0, width.into(), height.into());
-        }
-
-        self.mask_state = MaskState::DrawContent;
+    fn render_offscreen(
+        &mut self,
+        _handle: BitmapHandle,
+        _width: u32,
+        _height: u32,
+        _commands: CommandList,
+    ) -> Option<Box<dyn SyncHandle>> {
+        None
     }
 
-    fn end_frame(&mut self) {
-        // Noop
+    fn submit_frame(&mut self, clear: Color, commands: CommandList) {
+        self.begin_frame(clear);
+        commands.execute(self);
     }
 
-    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool) {
+    fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
+        let bitmap_data = BitmapData::new(bitmap).map_err(Error::JavascriptError)?;
+        Ok(BitmapHandle(Arc::new(bitmap_data)))
+    }
+
+    fn update_texture(
+        &mut self,
+        handle: &BitmapHandle,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Result<(), Error> {
+        let data = as_bitmap_data(handle);
+        data.update_pixels(Bitmap::new(width, height, BitmapFormat::Rgba, rgba))
+            .map_err(Error::JavascriptError)?;
+        Ok(())
+    }
+
+    fn create_context3d(&mut self) -> Result<Box<dyn Context3D>, Error> {
+        Err(Error::Unimplemented)
+    }
+    fn context3d_present<'gc>(
+        &mut self,
+        _context: &mut dyn Context3D,
+        _commands: Vec<Context3DCommand<'gc>>,
+        _mc: MutationContext<'gc, '_>,
+    ) -> Result<(), Error> {
+        Err(Error::Unimplemented)
+    }
+
+    fn debug_info(&self) -> Cow<'static, str> {
+        Cow::Borrowed("Renderer: Canvas")
+    }
+
+    fn set_quality(&mut self, _quality: StageQuality) {}
+}
+
+impl CommandHandler for WebCanvasRenderBackend {
+    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: Transform, smoothing: bool) {
         if self.mask_state == MaskState::ClearMask {
             return;
         }
@@ -456,16 +521,15 @@ impl RenderBackend for WebCanvasRenderBackend {
         self.context.set_image_smoothing_enabled(smoothing);
 
         self.set_transform(&transform.matrix);
-        self.set_color_filter(transform);
-        if let Some(bitmap) = self.bitmaps.get(&bitmap) {
-            let _ = self
-                .context
-                .draw_image_with_html_canvas_element(&bitmap.canvas, 0.0, 0.0);
-        }
+        self.set_color_filter(&transform);
+        let bitmap = as_bitmap_data(&bitmap);
+        let _ = self
+            .context
+            .draw_image_with_html_canvas_element(&bitmap.canvas, 0.0, 0.0);
         self.clear_color_filter();
     }
 
-    fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform) {
+    fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {
         match &self.mask_state {
             MaskState::DrawContent => {
                 let mut line_scale = LineScales::new(&transform.matrix);
@@ -497,7 +561,7 @@ impl RenderBackend for WebCanvasRenderBackend {
                                         );
                                     }
                                     CanvasFillStyle::Gradient(gradient) => {
-                                        self.set_color_filter(transform);
+                                        self.set_color_filter(&transform);
                                         self.context.set_fill_style(&gradient.gradient);
 
                                         if let Some(gradient_transform) = &gradient.transform {
@@ -510,7 +574,8 @@ impl RenderBackend for WebCanvasRenderBackend {
                                                 matrix[4], matrix[5],
                                             );
                                             transform_dirty = true;
-                                            let untransformed_path = Path2d::new().unwrap();
+                                            let untransformed_path = Path2d::new()
+                                                .expect("Path2d constructor must succeed");
                                             untransformed_path.add_path_with_transformation(
                                                 path,
                                                 gradient_transform.inverse_matrix.unchecked_ref(),
@@ -529,7 +594,7 @@ impl RenderBackend for WebCanvasRenderBackend {
                                         self.clear_color_filter();
                                     }
                                     CanvasFillStyle::Bitmap(bitmap) => {
-                                        self.set_color_filter(transform);
+                                        self.set_color_filter(&transform);
                                         self.context.set_image_smoothing_enabled(bitmap.smoothed);
                                         self.context.set_fill_style(&bitmap.pattern);
                                         self.context.fill_with_path_2d_and_winding(
@@ -554,7 +619,8 @@ impl RenderBackend for WebCanvasRenderBackend {
                                 // that the geometry remains untransformed.
                                 let _ = self.context.reset_transform();
                                 transform_dirty = true;
-                                let transformed_path = Path2d::new().unwrap();
+                                let transformed_path =
+                                    Path2d::new().expect("Path2d constructor must succeed");
                                 transformed_path
                                     .add_path_with_transformation(path, dom_matrix.unchecked_ref());
 
@@ -599,7 +665,7 @@ impl RenderBackend for WebCanvasRenderBackend {
                                             ),
                                         };
                                         if let Ok(gradient) = gradient {
-                                            self.set_color_filter(transform);
+                                            self.set_color_filter(&transform);
                                             self.context.set_stroke_style(&gradient.gradient);
                                             self.context.stroke_with_path(&transformed_path);
                                             self.clear_color_filter();
@@ -613,7 +679,7 @@ impl RenderBackend for WebCanvasRenderBackend {
                                         bitmap.pattern.set_transform(
                                             bitmap_matrix.to_dom_matrix().unchecked_ref(),
                                         );
-                                        self.set_color_filter(transform);
+                                        self.set_color_filter(&transform);
                                         self.context.set_image_smoothing_enabled(bitmap.smoothed);
                                         self.context.set_stroke_style(&bitmap.pattern);
                                         self.context.stroke_with_path(&transformed_path);
@@ -646,10 +712,10 @@ impl RenderBackend for WebCanvasRenderBackend {
         }
     }
 
-    fn draw_rect(&mut self, color: Color, matrix: &Matrix) {
+    fn draw_rect(&mut self, color: Color, matrix: Matrix) {
         match &self.mask_state {
             MaskState::DrawContent => {
-                self.set_transform(matrix);
+                self.set_transform(&matrix);
                 self.clear_color_filter();
                 self.context.set_fill_style(
                     &format!(
@@ -677,13 +743,14 @@ impl RenderBackend for WebCanvasRenderBackend {
         if self.mask_state == MaskState::DrawContent {
             // Save the current mask layer so that it can be restored when the mask is popped.
             self.context.save();
-            self.mask_state = MaskState::DrawMask(Path2d::new().unwrap());
+            self.mask_state =
+                MaskState::DrawMask(Path2d::new().expect("Path2d constructor must succeed"));
         }
     }
 
     fn activate_mask(&mut self) {
         if let MaskState::DrawMask(mask_path) = &self.mask_state {
-            self.context.reset_transform().unwrap();
+            self.context.reset_transform().warn_on_error();
             // Apply the clipping path to the canvas for future draws.
             // TODO: Canvas almost, but not completely, provides a clean way to implement Flash masks.
             // Subsequent calls to `CanvasRenderingContext2d.clip` support nested masks (intersection),
@@ -714,54 +781,10 @@ impl RenderBackend for WebCanvasRenderBackend {
         }
     }
 
-    fn push_blend_mode(&mut self, blend: BlendMode) {
-        if Some(&blend) != self.blend_modes.last() {
-            self.apply_blend_mode(blend);
-        }
-        self.blend_modes.push(blend);
-    }
-
-    fn pop_blend_mode(&mut self) {
-        let old = self.blend_modes.pop();
-        // We should never pop our base 'BlendMode::Normal'
-        let current = *self.blend_modes.last().unwrap();
-        if old != Some(current) {
-            self.apply_blend_mode(current);
-        }
-    }
-
-    fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap> {
-        let bitmap = &self.bitmaps[&bitmap];
-        bitmap.get_pixels()
-    }
-
-    fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error> {
-        let handle = self.next_bitmap_handle;
-        self.next_bitmap_handle = BitmapHandle(self.next_bitmap_handle.0 + 1);
-        let bitmap_data = BitmapData::new(bitmap).map_err(Error::JavascriptError)?;
-        self.bitmaps.insert(handle, bitmap_data);
-        Ok(handle)
-    }
-
-    fn unregister_bitmap(&mut self, bitmap: BitmapHandle) {
-        self.bitmaps.remove(&bitmap);
-    }
-
-    fn update_texture(
-        &mut self,
-        handle: BitmapHandle,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    ) -> Result<BitmapHandle, Error> {
-        // TODO: Could be optimized to a single put_image_data call
-        // in case it is already stored as a canvas+context.
-        self.bitmaps.insert(
-            handle,
-            BitmapData::new(Bitmap::new(width, height, BitmapFormat::Rgba, rgba))
-                .map_err(Error::JavascriptError)?,
-        );
-        Ok(handle)
+    fn blend(&mut self, commands: CommandList, blend: BlendMode) {
+        self.push_blend_mode(blend);
+        commands.execute(self);
+        self.pop_blend_mode();
     }
 }
 
@@ -772,7 +795,7 @@ impl RenderBackend for WebCanvasRenderBackend {
 /// The resulting path is in the shape's own coordinate space and needs to be
 /// transformed to fit within the shape's bounds.
 fn draw_commands_to_path2d(commands: &[DrawCommand], is_closed: bool) -> Path2d {
-    let path = Path2d::new().unwrap();
+    let path = Path2d::new().expect("Path2d constructor must succeed");
     for command in commands {
         match command {
             DrawCommand::MoveTo { x, y } => path.move_to(x.get().into(), y.get().into()),
@@ -796,8 +819,7 @@ fn draw_commands_to_path2d(commands: &[DrawCommand], is_closed: bool) -> Path2d 
 fn swf_shape_to_canvas_commands(
     shape: &DistilledShape,
     bitmap_source: &dyn BitmapSource,
-    bitmaps: &FnvHashMap<BitmapHandle, BitmapData>,
-    context: &CanvasRenderingContext2d,
+    backend: &mut WebCanvasRenderBackend,
 ) -> ShapeData {
     use ruffle_render::shape_utils::DrawPath;
     use swf::{FillStyle, LineCapStyle, LineJoinStyle};
@@ -805,20 +827,10 @@ fn swf_shape_to_canvas_commands(
     // Some browsers will vomit if you try to load/draw an image with 0 width/height.
     // TODO(Herschel): Might be better to just return None in this case and skip
     // rendering altogether.
-    let (_width, _height) = (
-        f32::max(
-            (shape.shape_bounds.x_max - shape.shape_bounds.x_min).get() as f32,
-            1.0,
-        ),
-        f32::max(
-            (shape.shape_bounds.y_max - shape.shape_bounds.y_min).get() as f32,
-            1.0,
-        ),
-    );
 
     let mut canvas_data = ShapeData(vec![]);
 
-    let bounds_viewbox_matrix = DomMatrix::new().unwrap();
+    let bounds_viewbox_matrix = DomMatrix::new().expect("DomMatrix constructor must succeed");
     bounds_viewbox_matrix.set_a(1.0 / 20.0);
     bounds_viewbox_matrix.set_d(1.0 / 20.0);
 
@@ -827,7 +839,7 @@ fn swf_shape_to_canvas_commands(
             DrawPath::Fill {
                 commands, style, ..
             } => {
-                let canvas_path = Path2d::new().unwrap();
+                let canvas_path = Path2d::new().expect("Path2d constructor must succeed");
                 canvas_path.add_path_with_transformation(
                     &draw_commands_to_path2d(commands, false),
                     bounds_viewbox_matrix.unchecked_ref(),
@@ -836,17 +848,24 @@ fn swf_shape_to_canvas_commands(
                 let fill_style = match style {
                     FillStyle::Color(color) => CanvasFillStyle::Color(color.into()),
                     FillStyle::LinearGradient(gradient) => CanvasFillStyle::Gradient(
-                        create_linear_gradient(context, gradient, true).unwrap(),
+                        create_linear_gradient(&backend.context, gradient, true)
+                            .expect("Couldn't create linear gradient"),
                     ),
                     FillStyle::RadialGradient(gradient) => CanvasFillStyle::Gradient(
-                        create_radial_gradient(context, gradient, 0.0, true).unwrap(),
+                        create_radial_gradient(&backend.context, gradient, 0.0, true)
+                            .expect("Couldn't create radial gradient"),
                     ),
                     FillStyle::FocalGradient {
                         gradient,
                         focal_point,
                     } => CanvasFillStyle::Gradient(
-                        create_radial_gradient(context, gradient, focal_point.to_f64(), true)
-                            .unwrap(),
+                        create_radial_gradient(
+                            &backend.context,
+                            gradient,
+                            focal_point.to_f64(),
+                            true,
+                        )
+                        .expect("Couldn't create radial gradient"),
                     ),
                     FillStyle::Bitmap {
                         id,
@@ -860,8 +879,7 @@ fn swf_shape_to_canvas_commands(
                             *is_smoothed,
                             *is_repeating,
                             bitmap_source,
-                            bitmaps,
-                            context,
+                            backend,
                         ) {
                             bitmap
                         } else {
@@ -881,7 +899,7 @@ fn swf_shape_to_canvas_commands(
                 style,
                 is_closed,
             } => {
-                let canvas_path = Path2d::new().unwrap();
+                let canvas_path = Path2d::new().expect("Path2d constructor must succeed");
                 canvas_path.add_path_with_transformation(
                     &draw_commands_to_path2d(commands, *is_closed),
                     bounds_viewbox_matrix.unchecked_ref(),
@@ -911,8 +929,7 @@ fn swf_shape_to_canvas_commands(
                             *is_smoothed,
                             *is_repeating,
                             bitmap_source,
-                            bitmaps,
-                            context,
+                            backend,
                         ) {
                             bitmap
                         } else {
@@ -1104,24 +1121,24 @@ fn swf_to_canvas_gradient(
             }
         }
         swf::GradientSpread::Repeat => {
-            let first_stop = color_stops.first().unwrap();
-            let last_stop = color_stops.last().unwrap();
-            let mut t = 0.0;
-            let step = 1.0 / NUM_REPEATS;
-            while t < 1.0 {
-                // Duplicate the start/end stops to ensure we don't blend between the seams.
-                canvas_gradient
-                    .add_color_stop(t, &first_stop.1)
-                    .warn_on_error();
-                for stop in &color_stops {
+            if let (Some(first_stop), Some(last_stop)) = (color_stops.first(), color_stops.last()) {
+                let mut t = 0.0;
+                let step = 1.0 / NUM_REPEATS;
+                while t < 1.0 {
+                    // Duplicate the start/end stops to ensure we don't blend between the seams.
                     canvas_gradient
-                        .add_color_stop(t + stop.0 * step, &stop.1)
+                        .add_color_stop(t, &first_stop.1)
                         .warn_on_error();
+                    for stop in &color_stops {
+                        canvas_gradient
+                            .add_color_stop(t + stop.0 * step, &stop.1)
+                            .warn_on_error();
+                    }
+                    canvas_gradient
+                        .add_color_stop(t + step, &last_stop.1)
+                        .warn_on_error();
+                    t += step;
                 }
-                canvas_gradient
-                    .add_color_stop(t + step, &last_stop.1)
-                    .warn_on_error();
-                t += step;
             }
         }
     }
@@ -1155,13 +1172,10 @@ fn create_bitmap_pattern(
     is_smoothed: bool,
     is_repeating: bool,
     bitmap_source: &dyn BitmapSource,
-    bitmaps: &FnvHashMap<BitmapHandle, BitmapData>,
-    context: &CanvasRenderingContext2d,
+    backend: &mut WebCanvasRenderBackend,
 ) -> Option<CanvasBitmap> {
-    if let Some(bitmap) = bitmap_source
-        .bitmap(id)
-        .and_then(|bitmap| bitmaps.get(&bitmap.handle))
-    {
+    if let Some(handle) = bitmap_source.bitmap_handle(id, backend) {
+        let bitmap = as_bitmap_data(&handle);
         let repeat = if !is_repeating {
             // NOTE: The WebGL backend does clamping in this case, just like
             // Flash Player, but CanvasPattern has no such option...
@@ -1170,7 +1184,9 @@ fn create_bitmap_pattern(
             "repeat"
         };
 
-        let pattern = match context.create_pattern_with_html_canvas_element(&bitmap.canvas, repeat)
+        let pattern = match backend
+            .context
+            .create_pattern_with_html_canvas_element(&bitmap.canvas, repeat)
         {
             Ok(Some(pattern)) => pattern,
             _ => {
@@ -1223,7 +1239,7 @@ impl MatrixExt for Matrix {
             ]
             .as_mut_slice(),
         )
-        .unwrap()
+        .expect("DomMatrix constructor must succeed")
     }
 }
 
@@ -1240,6 +1256,6 @@ impl MatrixExt for swf::Matrix {
             ]
             .as_mut_slice(),
         )
-        .unwrap()
+        .expect("DomMatrix constructor must succeed")
     }
 }

@@ -1,7 +1,8 @@
 //! Contexts and helper types passed between functions.
 
-use crate::avm1::globals::system::SystemProperties;
-use crate::avm1::{Avm1, Object as Avm1Object, Value as Avm1Value};
+use crate::avm1::Avm1;
+use crate::avm1::SystemProperties;
+use crate::avm1::{Object as Avm1Object, Value as Avm1Value};
 use crate::avm2::{Avm2, Object as Avm2Object, SoundChannelObject, Value as Avm2Value};
 use crate::backend::{
     audio::{AudioBackend, AudioManager, SoundHandle, SoundInstanceHandle},
@@ -9,7 +10,6 @@ use crate::backend::{
     navigator::NavigatorBackend,
     storage::StorageBackend,
     ui::{InputManager, UiBackend},
-    video::VideoBackend,
 };
 use crate::context_menu::ContextMenuState;
 use crate::display_object::{EditText, InteractiveObject, MovieClip, SoundTransform, Stage};
@@ -20,6 +20,7 @@ use crate::library::Library;
 use crate::loader::LoadManager;
 use crate::player::Player;
 use crate::prelude::*;
+use crate::stub::StubCollection;
 use crate::tag_utils::{SwfMovie, SwfSlice};
 use crate::timer::Timers;
 use core::fmt;
@@ -27,7 +28,9 @@ use gc_arena::{Collect, MutationContext};
 use instant::Instant;
 use rand::rngs::SmallRng;
 use ruffle_render::backend::RenderBackend;
+use ruffle_render::commands::CommandList;
 use ruffle_render::transform::TransformStack;
+use ruffle_video::backend::VideoBackend;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -35,13 +38,16 @@ use std::time::Duration;
 /// `UpdateContext` holds shared data that is used by the various subsystems of Ruffle.
 /// `Player` creates this when it begins a tick and passes it through the call stack to
 /// children and the VM.
-pub struct UpdateContext<'a, 'gc, 'gc_context> {
+pub struct UpdateContext<'a, 'gc> {
     /// The queue of actions that will be run after the display list updates.
     /// Display objects and actions can push actions onto the queue.
     pub action_queue: &'a mut ActionQueue<'gc>,
 
     /// The mutation context to allocate and mutate `GcCell` types.
-    pub gc_context: MutationContext<'gc, 'gc_context>,
+    pub gc_context: MutationContext<'gc, 'a>,
+
+    /// A collection of stubs encountered during this movie.
+    pub stub_tracker: &'a mut StubCollection,
 
     /// The library containing character definitions for this SWF.
     /// Used to instantiate a `DisplayObject` of a given ID.
@@ -126,7 +132,10 @@ pub struct UpdateContext<'a, 'gc, 'gc_context> {
     pub instance_counter: &'a mut i32,
 
     /// Shared objects cache
-    pub shared_objects: &'a mut HashMap<String, Avm1Object<'gc>>,
+    pub avm1_shared_objects: &'a mut HashMap<String, Avm1Object<'gc>>,
+
+    /// Shared objects cache
+    pub avm2_shared_objects: &'a mut HashMap<String, Avm2Object<'gc>>,
 
     /// Text fields with unbound variable bindings.
     pub unbound_text_fields: &'a mut Vec<EditText<'gc>>,
@@ -177,7 +186,7 @@ pub struct UpdateContext<'a, 'gc, 'gc_context> {
 }
 
 /// Convenience methods for controlling audio.
-impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
+impl<'a, 'gc> UpdateContext<'a, 'gc> {
     pub fn update_sounds(&mut self) {
         self.audio_manager.update_sounds(
             self.audio,
@@ -280,7 +289,7 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
     }
 }
 
-impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
+impl<'a, 'gc> UpdateContext<'a, 'gc> {
     /// Transform a borrowed update context into an owned update context with
     /// a shorter internal lifetime.
     ///
@@ -288,13 +297,14 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
     /// update context without adding further lifetimes for its borrowing.
     /// Please note that you will not be able to use the original update
     /// context until this reborrowed copy has fallen out of scope.
-    pub fn reborrow<'b>(&'b mut self) -> UpdateContext<'b, 'gc, 'gc_context>
+    pub fn reborrow<'b>(&'b mut self) -> UpdateContext<'b, 'gc>
     where
         'a: 'b,
     {
         UpdateContext {
             action_queue: self.action_queue,
             gc_context: self.gc_context,
+            stub_tracker: self.stub_tracker,
             library: self.library,
             player_version: self.player_version,
             needs_render: self.needs_render,
@@ -318,7 +328,8 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
             load_manager: self.load_manager,
             system: self.system,
             instance_counter: self.instance_counter,
-            shared_objects: self.shared_objects,
+            avm1_shared_objects: self.avm1_shared_objects,
+            avm2_shared_objects: self.avm2_shared_objects,
             unbound_text_fields: self.unbound_text_fields,
             timers: self.timers,
             current_context_menu: self.current_context_menu,
@@ -349,7 +360,7 @@ impl<'a, 'gc, 'gc_context> UpdateContext<'a, 'gc, 'gc_context> {
 /// A queued ActionScript call.
 #[derive(Collect)]
 #[collect(no_drop)]
-pub struct QueuedActions<'gc> {
+pub struct QueuedAction<'gc> {
     /// The movie clip this ActionScript is running on.
     pub clip: DisplayObject<'gc>,
 
@@ -365,7 +376,7 @@ pub struct QueuedActions<'gc> {
 #[collect(no_drop)]
 pub struct ActionQueue<'gc> {
     /// Each priority is kept in a separate bucket.
-    action_queue: Vec<VecDeque<QueuedActions<'gc>>>,
+    action_queue: [VecDeque<QueuedAction<'gc>>; ActionQueue::NUM_PRIORITIES],
 }
 
 impl<'gc> ActionQueue<'gc> {
@@ -374,24 +385,20 @@ impl<'gc> ActionQueue<'gc> {
 
     /// Crates a new `ActionQueue` with an empty queue.
     pub fn new() -> Self {
-        let mut action_queue = Vec::with_capacity(Self::NUM_PRIORITIES);
-        for _ in 0..Self::NUM_PRIORITIES {
-            action_queue.push(VecDeque::with_capacity(Self::DEFAULT_CAPACITY))
-        }
+        let action_queue = std::array::from_fn(|_| VecDeque::with_capacity(Self::DEFAULT_CAPACITY));
         Self { action_queue }
     }
 
-    /// Queues ActionScript to run for the given movie clip.
-    /// `actions` is the slice of ActionScript bytecode to run.
-    /// The actions will be skipped if the clip is removed before the actions run.
-    pub fn queue_actions(
+    /// Queues an action to run for the given movie clip.
+    /// The action will be skipped if the clip is removed before the action runs.
+    pub fn queue_action(
         &mut self,
         clip: DisplayObject<'gc>,
         action_type: ActionType<'gc>,
         is_unload: bool,
     ) {
         let priority = action_type.priority();
-        let action = QueuedActions {
+        let action = QueuedAction {
             clip,
             action_type,
             is_unload,
@@ -403,14 +410,11 @@ impl<'gc> ActionQueue<'gc> {
     }
 
     /// Sorts and drains the actions from the queue.
-    pub fn pop_action(&mut self) -> Option<QueuedActions<'gc>> {
-        for queue in self.action_queue.iter_mut().rev() {
-            let action = queue.pop_front();
-            if action.is_some() {
-                return action;
-            }
-        }
-        None
+    pub fn pop_action(&mut self) -> Option<QueuedAction<'gc>> {
+        self.action_queue
+            .iter_mut()
+            .rev()
+            .find_map(VecDeque::pop_front)
     }
 }
 
@@ -422,13 +426,16 @@ impl<'gc> Default for ActionQueue<'gc> {
 
 /// Shared data used during rendering.
 /// `Player` creates this when it renders a frame and passes it down to display objects.
-pub struct RenderContext<'a, 'gc, 'gc_context> {
-    /// The renderer, used by the display objects to draw themselves.
+pub struct RenderContext<'a, 'gc> {
+    /// The renderer, used by the display objects to register themselves.
     pub renderer: &'a mut dyn RenderBackend,
+
+    /// The command list, used by the display objects to draw themselves.
+    pub commands: CommandList,
 
     /// The GC MutationContext, used to perform any GcCell writes
     /// that must occur during rendering.
-    pub gc_context: MutationContext<'gc, 'gc_context>,
+    pub gc_context: MutationContext<'gc, 'a>,
 
     /// The UI backend, used to detect user interactions.
     pub ui: &'a mut dyn UiBackend,
@@ -438,6 +445,9 @@ pub struct RenderContext<'a, 'gc, 'gc_context> {
 
     /// The transform stack controls the matrix and color transform as we traverse the display hierarchy.
     pub transform_stack: &'a mut TransformStack,
+
+    /// Whether we're rendering offscreen. This can disable some logic like Ruffle-side render culling
+    pub is_offscreen: bool,
 
     /// The current player's stage (including all loaded levels)
     pub stage: Stage<'gc>,

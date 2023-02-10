@@ -1,12 +1,16 @@
 pub mod null;
 
-use crate::bitmap::{Bitmap, BitmapHandle, BitmapInfo, BitmapSource};
+use crate::bitmap::{Bitmap, BitmapHandle, BitmapSource, SyncHandle};
+use crate::commands::CommandList;
 use crate::error::Error;
-use crate::matrix::Matrix;
+use crate::filters::Filter;
+use crate::quality::StageQuality;
 use crate::shape_utils::DistilledShape;
-use crate::transform::Transform;
-use crate::utils;
 use downcast_rs::{impl_downcast, Downcast};
+use gc_arena::{Collect, GcCell, MutationContext};
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::rc::Rc;
 use swf;
 
 pub trait RenderBackend: Downcast {
@@ -27,90 +31,205 @@ pub trait RenderBackend: Downcast {
     );
     fn register_glyph_shape(&mut self, shape: &swf::Glyph) -> ShapeHandle;
 
-    fn register_bitmap_jpeg(
+    /// Creates a new `RenderBackend` which renders directly
+    /// to the texture specified by `BitmapHandle` with the given
+    /// `width` and `height`. This backend is passed to the callback
+    /// `f`, which performs the desired draw operations.
+    ///
+    /// After the callback `f` exectures, the texture data is copied
+    /// from the GPU texture to an `RgbaImage`. There is no need to call
+    /// `update_texture` with the pixels from this image, as they
+    /// reflect data that is already stored on the GPU texture.
+    fn render_offscreen(
         &mut self,
-        data: &[u8],
-        jpeg_tables: Option<&[u8]>,
-    ) -> Result<BitmapInfo, Error> {
-        let data = utils::glue_tables_to_jpeg(data, jpeg_tables);
-        self.register_bitmap_jpeg_2(&data)
-    }
+        handle: BitmapHandle,
+        width: u32,
+        height: u32,
+        commands: CommandList,
+    ) -> Option<Box<dyn SyncHandle>>;
 
-    fn register_bitmap_jpeg_2(&mut self, data: &[u8]) -> Result<BitmapInfo, Error> {
-        let bitmap = utils::decode_define_bits_jpeg(data, None)?;
-        let width = bitmap.width() as u16;
-        let height = bitmap.height() as u16;
-        let handle = self.register_bitmap(bitmap)?;
-        Ok(BitmapInfo {
-            handle,
-            width,
-            height,
-        })
-    }
-
-    fn register_bitmap_jpeg_3_or_4(
+    /// Applies the given filter with a `BitmapHandle` source onto a destination `BitmapHandle`.
+    /// The `destination_rect` must be calculated by the caller and is assumed to be correct.
+    /// Both `source_rect` and `destination_rect` must be valid (`BoundingBox::valid`).
+    /// `source` may equal `destination`, in which case a temporary buffer is used internally.
+    ///
+    /// Returns None if the backend does not support this filter.
+    fn apply_filter(
         &mut self,
-        jpeg_data: &[u8],
-        alpha_data: &[u8],
-    ) -> Result<BitmapInfo, Error> {
-        let bitmap = utils::decode_define_bits_jpeg(jpeg_data, Some(alpha_data))?;
-        let width = bitmap.width() as u16;
-        let height = bitmap.height() as u16;
-        let handle = self.register_bitmap(bitmap)?;
-        Ok(BitmapInfo {
-            handle,
-            width,
-            height,
-        })
+        _source: BitmapHandle,
+        _source_point: (u32, u32),
+        _source_size: (u32, u32),
+        _destination: BitmapHandle,
+        _dest_point: (u32, u32),
+        _filter: Filter,
+    ) -> Option<Box<dyn SyncHandle>> {
+        None
     }
 
-    fn register_bitmap_png(
-        &mut self,
-        swf_tag: &swf::DefineBitsLossless,
-    ) -> Result<BitmapInfo, Error> {
-        let bitmap = utils::decode_define_bits_lossless(swf_tag)?;
-        let width = bitmap.width() as u16;
-        let height = bitmap.height() as u16;
-        let handle = self.register_bitmap(bitmap)?;
-        Ok(BitmapInfo {
-            handle,
-            width,
-            height,
-        })
-    }
+    fn submit_frame(&mut self, clear: swf::Color, commands: CommandList);
 
-    fn begin_frame(&mut self, clear: swf::Color);
-    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: &Transform, smoothing: bool);
-    fn render_shape(&mut self, shape: ShapeHandle, transform: &Transform);
-    fn draw_rect(&mut self, color: swf::Color, matrix: &Matrix);
-    fn end_frame(&mut self);
-    fn push_mask(&mut self);
-    fn activate_mask(&mut self);
-    fn deactivate_mask(&mut self);
-    fn pop_mask(&mut self);
-
-    fn push_blend_mode(&mut self, blend: swf::BlendMode);
-    fn pop_blend_mode(&mut self);
-
-    fn get_bitmap_pixels(&mut self, bitmap: BitmapHandle) -> Option<Bitmap>;
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, Error>;
-    // Frees memory used by the bitmap. After this call, `handle` can no longer
-    // be used.
-    fn unregister_bitmap(&mut self, handle: BitmapHandle);
     fn update_texture(
         &mut self,
-        bitmap: BitmapHandle,
+        bitmap: &BitmapHandle,
         width: u32,
         height: u32,
         rgba: Vec<u8>,
-    ) -> Result<BitmapHandle, Error>;
+    ) -> Result<(), Error>;
+
+    fn create_context3d(&mut self) -> Result<Box<dyn Context3D>, Error>;
+    fn context3d_present<'gc>(
+        &mut self,
+        context: &mut dyn Context3D,
+        commands: Vec<Context3DCommand<'gc>>,
+        mc: MutationContext<'gc, '_>,
+    ) -> Result<(), Error>;
+
+    fn debug_info(&self) -> Cow<'static, str>;
+
+    fn set_quality(&mut self, quality: StageQuality);
 }
 impl_downcast!(RenderBackend);
+
+pub trait IndexBuffer: Downcast + Collect {}
+impl_downcast!(IndexBuffer);
+pub trait VertexBuffer: Downcast + Collect {}
+impl_downcast!(VertexBuffer);
+
+pub trait ShaderModule: Downcast + Collect {}
+impl_downcast!(ShaderModule);
+
+#[derive(Collect)]
+#[collect(require_static)]
+pub enum BufferUsage {
+    DynamicDraw,
+    StaticDraw,
+}
+
+#[derive(Collect)]
+#[collect(require_static)]
+pub enum ProgramType {
+    Vertex,
+    Fragment,
+}
+
+pub trait Context3D: Collect + Downcast {
+    // The BitmapHandle for the texture we're rendering to
+    fn bitmap_handle(&self) -> BitmapHandle;
+    // Whether or not we should actually render the texture
+    // as part of stage rendering
+    fn should_render(&self) -> bool;
+
+    // Get a 'disposed' handle - this is what we store in all IndexBuffer3D
+    // objects after dispose() has been called.
+    fn disposed_index_buffer_handle(&self) -> Rc<dyn IndexBuffer>;
+
+    // Get a 'disposed' handle - this is what we store in all VertexBuffer3D
+    // objects after dispose() has been called.
+    fn disposed_vertex_buffer_handle(&self) -> Rc<dyn VertexBuffer>;
+
+    fn create_index_buffer(&mut self, usage: BufferUsage, num_indices: u32) -> Rc<dyn IndexBuffer>;
+    fn create_vertex_buffer(
+        &mut self,
+        usage: BufferUsage,
+        num_vertices: u32,
+        vertex_size: u32,
+    ) -> Rc<dyn VertexBuffer>;
+}
+impl_downcast!(Context3D);
+
+#[derive(Collect, Copy, Clone, Debug)]
+#[collect(require_static)]
+pub enum Context3DVertexBufferFormat {
+    Float1,
+    Float2,
+    Float3,
+    Float4,
+    Bytes4,
+}
+
+#[derive(Collect, Copy, Clone, Debug)]
+#[collect(require_static)]
+pub enum Context3DTriangleFace {
+    None,
+    Back,
+    Front,
+    FrontAndBack,
+}
+
+#[derive(Collect)]
+#[collect(no_drop)]
+pub enum Context3DCommand<'gc> {
+    Clear {
+        red: f64,
+        green: f64,
+        blue: f64,
+        alpha: f64,
+        depth: f64,
+        stencil: u32,
+        mask: u32,
+    },
+    ConfigureBackBuffer {
+        width: u32,
+        height: u32,
+        anti_alias: u32,
+        depth_and_stencil: bool,
+        wants_best_resolution: bool,
+        wants_best_resolution_on_browser_zoom: bool,
+    },
+
+    UploadToIndexBuffer {
+        buffer: Rc<dyn IndexBuffer>,
+        start_offset: usize,
+        data: Vec<u8>,
+    },
+
+    UploadToVertexBuffer {
+        buffer: Rc<dyn VertexBuffer>,
+        start_vertex: usize,
+        data_per_vertex: usize,
+        data: Vec<u8>,
+    },
+
+    DrawTriangles {
+        index_buffer: Rc<dyn IndexBuffer>,
+        first_index: usize,
+        num_triangles: isize,
+    },
+
+    SetVertexBufferAt {
+        index: u32,
+        buffer: Rc<dyn VertexBuffer>,
+        buffer_offset: u32,
+        format: Context3DVertexBufferFormat,
+    },
+
+    UploadShaders {
+        vertex_shader: GcCell<'gc, Option<Rc<dyn ShaderModule>>>,
+        vertex_shader_agal: Vec<u8>,
+        fragment_shader: GcCell<'gc, Option<Rc<dyn ShaderModule>>>,
+        fragment_shader_agal: Vec<u8>,
+    },
+
+    SetShaders {
+        vertex_shader: GcCell<'gc, Option<Rc<dyn ShaderModule>>>,
+        fragment_shader: GcCell<'gc, Option<Rc<dyn ShaderModule>>>,
+    },
+    SetProgramConstantsFromVector {
+        program_type: ProgramType,
+        first_register: u32,
+        matrix_raw_data_column_major: Vec<f32>,
+    },
+    SetCulling {
+        face: Context3DTriangleFace,
+    },
+}
 
 #[derive(Copy, Clone, Debug)]
 pub struct ShapeHandle(pub usize);
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ViewportDimensions {
     /// The dimensions of the stage's containing viewport.
     pub width: u32,
