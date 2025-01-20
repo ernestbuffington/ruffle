@@ -7,14 +7,14 @@ use crate::avm1_stub;
 use crate::display_object::{AutoSizeMode, EditText, TDisplayObject};
 use crate::ecma_conversions::round_to_even;
 use crate::html::TextFormat;
-use crate::string::{AvmString, WStr};
-use gc_arena::{GcCell, MutationContext};
+use crate::string::{AvmString, StringContext, WStr};
+use gc_arena::Gc;
 
 macro_rules! getter {
     ($name:ident) => {
         |activation, this, _args| {
             if let NativeObject::TextFormat(text_format) = this.native() {
-                return Ok($name(activation, &text_format.read()));
+                return Ok($name(activation, &text_format.borrow()));
             }
             Ok(Value::Undefined)
         }
@@ -26,11 +26,7 @@ macro_rules! setter {
         |activation, this, args| {
             if let NativeObject::TextFormat(text_format) = this.native() {
                 let value = args.get(0).unwrap_or(&Value::Undefined);
-                $name(
-                    activation,
-                    &mut text_format.write(activation.context.gc_context),
-                    value,
-                )?;
+                $name(activation, &mut text_format.borrow_mut(), value)?;
             }
             Ok(Value::Undefined)
         }
@@ -41,7 +37,7 @@ macro_rules! method {
     ($name:ident) => {
         |activation, this, args| {
             if let NativeObject::TextFormat(text_format) = this.native() {
-                return $name(activation, &text_format.read(), args);
+                return $name(activation, &text_format.borrow(), args);
             }
             Ok(Value::Undefined)
         }
@@ -73,7 +69,7 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 
 fn font<'gc>(activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format.font.as_ref().map_or(Value::Null, |font| {
-        AvmString::new(activation.context.gc_context, font.clone()).into()
+        AvmString::new(activation.gc(), font.clone()).into()
     })
 }
 
@@ -103,6 +99,7 @@ fn set_size<'gc>(
 ) -> Result<(), Error<'gc>> {
     text_format.size = match value {
         Value::Undefined | Value::Null => None,
+        value if activation.swf_version() < 8 => Some(value.coerce_to_i32(activation)?.into()),
         value => Some(round_to_even(value.coerce_to_f64(activation)?).into()),
     };
     Ok(())
@@ -129,7 +126,7 @@ fn set_color<'gc>(
 
 fn url<'gc>(activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format.url.as_ref().map_or(Value::Null, |url| {
-        AvmString::new(activation.context.gc_context, url.clone()).into()
+        AvmString::new(activation.gc(), url.clone()).into()
     })
 }
 
@@ -147,7 +144,7 @@ fn set_url<'gc>(
 
 fn target<'gc>(activation: &mut Activation<'_, 'gc>, text_format: &TextFormat) -> Value<'gc> {
     text_format.target.as_ref().map_or(Value::Null, |target| {
-        AvmString::new(activation.context.gc_context, target.clone()).into()
+        AvmString::new(activation.gc(), target.clone()).into()
     })
 }
 
@@ -238,7 +235,6 @@ fn set_align<'gc>(
     value: &Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if matches!(value, Value::Undefined | Value::Null) {
-        text_format.align = None;
         return Ok(());
     }
 
@@ -272,6 +268,9 @@ fn set_left_margin<'gc>(
 ) -> Result<(), Error<'gc>> {
     text_format.left_margin = match value {
         Value::Undefined | Value::Null => None,
+        value if activation.swf_version() < 8 => {
+            Some(value.coerce_to_i32(activation)?.max(0).into())
+        }
         value => Some(round_to_even(value.coerce_to_f64(activation)?.max(0.0)).into()),
     };
     Ok(())
@@ -294,6 +293,9 @@ fn set_right_margin<'gc>(
 ) -> Result<(), Error<'gc>> {
     text_format.right_margin = match value {
         Value::Undefined | Value::Null => None,
+        value if activation.swf_version() < 8 => {
+            Some(value.coerce_to_i32(activation)?.max(0).into())
+        }
         value => Some(round_to_even(value.coerce_to_f64(activation)?.max(0.0)).into()),
     };
     Ok(())
@@ -313,6 +315,9 @@ fn set_indent<'gc>(
 ) -> Result<(), Error<'gc>> {
     text_format.indent = match value {
         Value::Undefined | Value::Null => None,
+        value if activation.swf_version() < 8 => {
+            Some(value.coerce_to_i32(activation)?.max(0).into())
+        }
         value => Some(round_to_even(value.coerce_to_f64(activation)?).into()),
     };
     Ok(())
@@ -332,6 +337,9 @@ fn set_leading<'gc>(
 ) -> Result<(), Error<'gc>> {
     text_format.leading = match value {
         Value::Undefined | Value::Null => None,
+        value if activation.swf_version() < 8 => {
+            Some(value.coerce_to_i32(activation)?.max(0).into())
+        }
         value => Some(round_to_even(value.coerce_to_f64(activation)?).into()),
     };
     Ok(())
@@ -354,6 +362,9 @@ fn set_block_indent<'gc>(
 ) -> Result<(), Error<'gc>> {
     text_format.block_indent = match value {
         Value::Undefined | Value::Null => None,
+        value if activation.swf_version() < 8 => {
+            Some(value.coerce_to_i32(activation)?.max(0).into())
+        }
         value => Some(round_to_even(value.coerce_to_f64(activation)?).into()),
     };
     Ok(())
@@ -365,7 +376,7 @@ fn tab_stops<'gc>(activation: &mut Activation<'_, 'gc>, text_format: &TextFormat
         .as_ref()
         .map_or(Value::Null, |tab_stops| {
             ArrayObject::new(
-                activation.context.gc_context,
+                activation.gc(),
                 activation.context.avm1.prototypes().array,
                 tab_stops.iter().map(|&x| x.into()),
             )
@@ -486,7 +497,7 @@ fn get_text_extent<'gc>(
         .transpose()?;
 
     let temp_edittext = EditText::new(
-        &mut activation.context,
+        activation.context,
         movie,
         0.0,
         0.0,
@@ -494,14 +505,14 @@ fn get_text_extent<'gc>(
         0.0,
     );
 
-    temp_edittext.set_autosize(AutoSizeMode::Left, &mut activation.context);
-    temp_edittext.set_word_wrap(width.is_some(), &mut activation.context);
-    temp_edittext.set_new_text_format(text_format.clone(), &mut activation.context);
-    temp_edittext.set_text(&text, &mut activation.context);
+    temp_edittext.set_autosize(AutoSizeMode::Left, activation.context);
+    temp_edittext.set_word_wrap(width.is_some(), activation.context);
+    temp_edittext.set_new_text_format(text_format.clone(), activation.context);
+    temp_edittext.set_text(&text, activation.context);
 
-    let result = ScriptObject::new(activation.context.gc_context, None);
+    let result = ScriptObject::new(activation.gc(), None);
     let metrics = temp_edittext
-        .layout_metrics(None)
+        .layout_metrics()
         .expect("All text boxes should have at least one line at all times");
 
     result.set_data(
@@ -540,17 +551,23 @@ pub fn constructor<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let mut text_format = Default::default();
+    fn get_arg_as_i32<'gc>(
+        activation: &mut Activation<'_, 'gc>,
+        arg: Option<&Value<'gc>>,
+    ) -> Result<Option<f64>, Error<'gc>> {
+        Ok(match arg.unwrap_or(&Value::Undefined) {
+            Value::Undefined | Value::Null => None,
+            value => Some(value.coerce_to_i32(activation)?.into()),
+        })
+    }
+
+    let mut text_format: TextFormat = Default::default();
     set_font(
         activation,
         &mut text_format,
         args.get(0).unwrap_or(&Value::Undefined),
     )?;
-    set_size(
-        activation,
-        &mut text_format,
-        args.get(1).unwrap_or(&Value::Undefined),
-    )?;
+    text_format.size = get_arg_as_i32(activation, args.get(1))?;
     set_color(
         activation,
         &mut text_format,
@@ -586,40 +603,24 @@ pub fn constructor<'gc>(
         &mut text_format,
         args.get(8).unwrap_or(&Value::Undefined),
     )?;
-    set_left_margin(
-        activation,
-        &mut text_format,
-        args.get(9).unwrap_or(&Value::Undefined),
-    )?;
-    set_right_margin(
-        activation,
-        &mut text_format,
-        args.get(10).unwrap_or(&Value::Undefined),
-    )?;
-    set_indent(
-        activation,
-        &mut text_format,
-        args.get(11).unwrap_or(&Value::Undefined),
-    )?;
-    set_leading(
-        activation,
-        &mut text_format,
-        args.get(12).unwrap_or(&Value::Undefined),
-    )?;
+    text_format.left_margin = get_arg_as_i32(activation, args.get(9))?;
+    text_format.right_margin = get_arg_as_i32(activation, args.get(10))?;
+    text_format.indent = get_arg_as_i32(activation, args.get(11))?;
+    text_format.leading = get_arg_as_i32(activation, args.get(12))?;
     this.set_native(
-        activation.context.gc_context,
-        NativeObject::TextFormat(GcCell::allocate(activation.context.gc_context, text_format)),
+        activation.gc(),
+        NativeObject::TextFormat(Gc::new(activation.gc(), text_format.into())),
     );
     Ok(this.into())
 }
 
 /// `TextFormat.prototype` constructor
 pub fn create_proto<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
+    let object = ScriptObject::new(context.gc(), Some(proto));
+    define_properties_on(PROTO_DECLS, context, object, fn_proto);
     object.into()
 }

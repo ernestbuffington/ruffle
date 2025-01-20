@@ -5,9 +5,8 @@ use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
 use crate::display_object::{DisplayObject, TDisplayObject, TDisplayObjectContainer};
-use crate::string::{AvmString, WStr, WString};
+use crate::string::{AvmString, StringContext, WStr, WString};
 use gc_arena::Collect;
-use gc_arena::MutationContext;
 use std::str;
 
 mod accessibility;
@@ -20,28 +19,30 @@ pub(crate) mod blur_filter;
 pub(crate) mod boolean;
 pub(crate) mod button;
 mod color;
-pub mod color_matrix_filter;
+pub(crate) mod color_matrix_filter;
 pub(crate) mod color_transform;
 pub(crate) mod context_menu;
 pub(crate) mod context_menu_item;
-pub mod convolution_filter;
+pub(crate) mod convolution_filter;
 pub(crate) mod date;
-pub mod displacement_map_filter;
-pub mod drop_shadow_filter;
+pub(crate) mod displacement_map_filter;
+pub(crate) mod drop_shadow_filter;
 pub(crate) mod error;
 mod external_interface;
+pub(crate) mod file_reference;
 mod function;
-mod glow_filter;
-pub mod gradient_bevel_filter;
-pub mod gradient_glow_filter;
+pub(crate) mod glow_filter;
+pub(crate) mod gradient_filter;
 mod key;
 mod load_vars;
-mod local_connection;
+pub(crate) mod local_connection;
 mod math;
 mod matrix;
 pub(crate) mod mouse;
 pub(crate) mod movie_clip;
 mod movie_clip_loader;
+pub(crate) mod netconnection;
+pub(crate) mod netstream;
 pub(crate) mod number;
 mod object;
 mod point;
@@ -51,16 +52,18 @@ pub(crate) mod shared_object;
 pub(crate) mod sound;
 mod stage;
 pub(crate) mod string;
+pub(crate) mod style_sheet;
 pub(crate) mod system;
 pub(crate) mod system_capabilities;
 pub(crate) mod system_ime;
 pub(crate) mod system_security;
 pub(crate) mod text_field;
 mod text_format;
-mod transform;
+pub(crate) mod transform;
 mod video;
-mod xml;
+pub(crate) mod xml;
 mod xml_node;
+pub(crate) mod xml_socket;
 
 const GLOBAL_DECLS: &[Declaration] = declare_properties! {
     "trace" => method(trace; DONT_ENUM);
@@ -401,7 +404,7 @@ pub fn escape<'gc>(
             }
         };
     }
-    Ok(AvmString::new(activation.context.gc_context, WString::from_buf(buffer)).into())
+    Ok(AvmString::new(activation.gc(), WString::from_buf(buffer)).into())
 }
 
 pub fn unescape<'gc>(
@@ -447,16 +450,15 @@ pub fn unescape<'gc>(
                 remain = 0;
                 hex_chars.clear();
             }
+            b'+' => {
+                out_bytes.push(b' ');
+            }
             _ => {
                 out_bytes.push(c);
             }
         }
     }
-    Ok(AvmString::new_utf8(
-        activation.context.gc_context,
-        String::from_utf8_lossy(&out_bytes),
-    )
-    .into())
+    Ok(AvmString::new_utf8(activation.gc(), String::from_utf8_lossy(&out_bytes)).into())
 }
 
 /// This structure represents all system builtins that are used regardless of
@@ -475,7 +477,7 @@ pub struct SystemPrototypes<'gc> {
     pub text_format: Object<'gc>,
     pub array: Object<'gc>,
     pub array_constructor: Object<'gc>,
-    pub xml_node: Object<'gc>,
+    pub xml_node_constructor: Object<'gc>,
     pub xml_constructor: Object<'gc>,
     pub string: Object<'gc>,
     pub number: Object<'gc>,
@@ -486,9 +488,7 @@ pub struct SystemPrototypes<'gc> {
     pub point_constructor: Object<'gc>,
     pub rectangle: Object<'gc>,
     pub rectangle_constructor: Object<'gc>,
-    pub transform: Object<'gc>,
     pub transform_constructor: Object<'gc>,
-    pub shared_object: Object<'gc>,
     pub shared_object_constructor: Object<'gc>,
     pub color_transform: Object<'gc>,
     pub color_transform_constructor: Object<'gc>,
@@ -496,81 +496,73 @@ pub struct SystemPrototypes<'gc> {
     pub context_menu_constructor: Object<'gc>,
     pub context_menu_item: Object<'gc>,
     pub context_menu_item_constructor: Object<'gc>,
-    pub bitmap_filter: Object<'gc>,
-    pub bitmap_filter_constructor: Object<'gc>,
-    pub glow_filter: Object<'gc>,
-    pub glow_filter_constructor: Object<'gc>,
-    pub drop_shadow_filter: Object<'gc>,
-    pub drop_shadow_filter_constructor: Object<'gc>,
-    pub color_matrix_filter: Object<'gc>,
-    pub color_matrix_filter_constructor: Object<'gc>,
-    pub displacement_map_filter: Object<'gc>,
-    pub displacement_map_filter_constructor: Object<'gc>,
-    pub convolution_filter: Object<'gc>,
-    pub convolution_filter_constructor: Object<'gc>,
-    pub gradient_bevel_filter: Object<'gc>,
-    pub gradient_bevel_filter_constructor: Object<'gc>,
-    pub gradient_glow_filter: Object<'gc>,
-    pub gradient_glow_filter_constructor: Object<'gc>,
     pub date_constructor: Object<'gc>,
     pub bitmap_data: Object<'gc>,
-    pub bitmap_data_constructor: Object<'gc>,
     pub video: Object<'gc>,
     pub video_constructor: Object<'gc>,
+    pub blur_filter: Object<'gc>,
+    pub bevel_filter: Object<'gc>,
+    pub glow_filter: Object<'gc>,
+    pub drop_shadow_filter: Object<'gc>,
+    pub color_matrix_filter: Object<'gc>,
+    pub displacement_map_filter: Object<'gc>,
+    pub convolution_filter: Object<'gc>,
+    pub gradient_bevel_filter: Object<'gc>,
+    pub gradient_glow_filter: Object<'gc>,
 }
 
 /// Initialize default global scope and builtins for an AVM1 instance.
 pub fn create_globals<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
 ) -> (
     SystemPrototypes<'gc>,
     Object<'gc>,
     as_broadcaster::BroadcasterFunctions<'gc>,
 ) {
+    let gc_context = context.gc();
+
     let object_proto = ScriptObject::new(gc_context, None).into();
-    let function_proto = function::create_proto(gc_context, object_proto);
+    let function_proto = function::create_proto(context, object_proto);
 
-    object::fill_proto(gc_context, object_proto, function_proto);
+    object::fill_proto(context, object_proto, function_proto);
 
-    let button_proto = button::create_proto(gc_context, object_proto, function_proto);
+    let button_proto = button::create_proto(context, object_proto, function_proto);
 
-    let movie_clip_proto = movie_clip::create_proto(gc_context, object_proto, function_proto);
+    let movie_clip_proto = movie_clip::create_proto(context, object_proto, function_proto);
 
-    let sound_proto = sound::create_proto(gc_context, object_proto, function_proto);
+    let sound_proto = sound::create_proto(context, object_proto, function_proto);
 
-    let text_field_proto = text_field::create_proto(gc_context, object_proto, function_proto);
-    let text_format_proto = text_format::create_proto(gc_context, object_proto, function_proto);
+    let style_sheet_proto = style_sheet::create_proto(context, object_proto, function_proto);
+    let text_field_proto = text_field::create_proto(context, object_proto, function_proto);
+    let text_format_proto = text_format::create_proto(context, object_proto, function_proto);
 
-    let array_proto = array::create_proto(gc_context, object_proto, function_proto);
+    let array_proto = array::create_proto(context, object_proto, function_proto);
 
-    let color_proto = color::create_proto(gc_context, object_proto, function_proto);
+    let color_proto = color::create_proto(context, object_proto, function_proto);
 
-    let error_proto = error::create_proto(gc_context, object_proto, function_proto);
+    let error_proto = error::create_proto(context, object_proto, function_proto);
 
-    let xmlnode_proto = xml_node::create_proto(gc_context, object_proto, function_proto);
+    let xmlnode_proto = xml_node::create_proto(context, object_proto, function_proto);
 
-    let xml_proto = xml::create_proto(gc_context, xmlnode_proto, function_proto);
-
-    let string_proto = string::create_proto(gc_context, object_proto, function_proto);
-    let number_proto = number::create_proto(gc_context, object_proto, function_proto);
-    let boolean_proto = boolean::create_proto(gc_context, object_proto, function_proto);
-    let load_vars_proto = load_vars::create_proto(gc_context, object_proto, function_proto);
+    let string_proto = string::create_proto(context, object_proto, function_proto);
+    let number_proto = number::create_proto(context, object_proto, function_proto);
+    let boolean_proto = boolean::create_proto(context, object_proto, function_proto);
+    let load_vars_proto = load_vars::create_proto(context, object_proto, function_proto);
     let local_connection_proto =
-        local_connection::create_proto(gc_context, object_proto, function_proto);
-    let matrix_proto = matrix::create_proto(gc_context, object_proto, function_proto);
-    let point_proto = point::create_proto(gc_context, object_proto, function_proto);
-    let rectangle_proto = rectangle::create_proto(gc_context, object_proto, function_proto);
+        local_connection::create_proto(context, object_proto, function_proto);
+    let matrix_proto = matrix::create_proto(context, object_proto, function_proto);
+    let point_proto = point::create_proto(context, object_proto, function_proto);
+    let rectangle_proto = rectangle::create_proto(context, object_proto, function_proto);
     let color_transform_proto =
-        color_transform::create_proto(gc_context, object_proto, function_proto);
-    let transform_proto = transform::create_proto(gc_context, object_proto, function_proto);
-    let external_interface_proto = external_interface::create_proto(gc_context, object_proto);
-    let selection_proto = selection::create_proto(gc_context, object_proto);
+        color_transform::create_proto(context, object_proto, function_proto);
+    let external_interface_proto = external_interface::create_proto(context, object_proto);
+    let selection_proto = selection::create_proto(context, object_proto);
 
     let (broadcaster_functions, as_broadcaster) =
-        as_broadcaster::create(gc_context, object_proto, function_proto);
+        as_broadcaster::create(context, object_proto, function_proto);
 
     let movie_clip_loader_proto = movie_clip_loader::create_proto(
-        gc_context,
+        context,
         object_proto,
         function_proto,
         array_proto,
@@ -585,14 +577,17 @@ pub fn create_globals<'gc>(
         movie_clip_loader_proto,
     );
 
-    let video_proto = video::create_proto(gc_context, object_proto, function_proto);
+    let video_proto = video::create_proto(context, object_proto, function_proto);
+    let netstream_proto = netstream::create_proto(context, object_proto, function_proto);
+    let netconnection_proto = netconnection::create_proto(context, object_proto, function_proto);
+    let xml_socket_proto = xml_socket::create_proto(context, object_proto, function_proto);
 
     //TODO: These need to be constructors and should also set `.prototype` on each one
-    let object = object::create_object_object(gc_context, object_proto, function_proto);
+    let object = object::create_object_object(context, object_proto, function_proto);
 
-    let context_menu_proto = context_menu::create_proto(gc_context, object_proto, function_proto);
+    let context_menu_proto = context_menu::create_proto(context, object_proto, function_proto);
     let context_menu_item_proto =
-        context_menu_item::create_proto(gc_context, object_proto, function_proto);
+        context_menu_item::create_proto(context, object_proto, function_proto);
 
     let button = FunctionObject::constructor(
         gc_context,
@@ -651,6 +646,13 @@ pub fn create_globals<'gc>(
         function_proto,
         sound_proto,
     );
+    let style_sheet = FunctionObject::constructor(
+        gc_context,
+        Executable::Native(style_sheet::constructor),
+        constructor_to_fn!(style_sheet::constructor),
+        function_proto,
+        style_sheet_proto,
+    );
     let text_field = FunctionObject::constructor(
         gc_context,
         Executable::Native(text_field::constructor),
@@ -665,7 +667,7 @@ pub fn create_globals<'gc>(
         function_proto,
         text_format_proto,
     );
-    let array = array::create_array_object(gc_context, array_proto, function_proto);
+    let array = array::create_array_object(context, array_proto, function_proto);
     let xmlnode = FunctionObject::constructor(
         gc_context,
         Executable::Native(xml_node::constructor),
@@ -673,27 +675,25 @@ pub fn create_globals<'gc>(
         function_proto,
         xmlnode_proto,
     );
-    let xml = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(xml::constructor),
-        constructor_to_fn!(xml::constructor),
-        function_proto,
-        xml_proto,
-    );
-    let string = string::create_string_object(gc_context, string_proto, function_proto);
-    let number = number::create_number_object(gc_context, number_proto, function_proto);
-    let boolean = boolean::create_boolean_object(gc_context, boolean_proto, function_proto);
-    let date = date::create_constructor(gc_context, object_proto, function_proto);
+    let xml = xml::create_constructor(context, xmlnode_proto, function_proto);
+    let string = string::create_string_object(context, string_proto, function_proto);
+    let number = number::create_number_object(context, number_proto, function_proto);
+    let boolean = boolean::create_boolean_object(context, boolean_proto, function_proto);
+    let date = date::create_constructor(context, object_proto, function_proto);
+    let netstream = netstream::create_class(context, netstream_proto, function_proto);
+    let netconnection = netconnection::create_class(context, netconnection_proto, function_proto);
+    let xml_socket = xml_socket::create_class(context, xml_socket_proto, function_proto);
 
     let flash = ScriptObject::new(gc_context, Some(object_proto));
 
     let geom = ScriptObject::new(gc_context, Some(object_proto));
     let filters = ScriptObject::new(gc_context, Some(object_proto));
     let display = ScriptObject::new(gc_context, Some(object_proto));
+    let net = ScriptObject::new(gc_context, Some(object_proto));
 
-    let matrix = matrix::create_matrix_object(gc_context, matrix_proto, function_proto);
-    let point = point::create_point_object(gc_context, point_proto, function_proto);
-    let rectangle = rectangle::create_rectangle_object(gc_context, rectangle_proto, function_proto);
+    let matrix = matrix::create_matrix_object(context, matrix_proto, function_proto);
+    let point = point::create_point_object(context, point_proto, function_proto);
+    let rectangle = rectangle::create_rectangle_object(context, rectangle_proto, function_proto);
     let color_transform = FunctionObject::constructor(
         gc_context,
         Executable::Native(color_transform::constructor),
@@ -701,13 +701,7 @@ pub fn create_globals<'gc>(
         function_proto,
         color_transform_proto,
     );
-    let transform = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(transform::constructor),
-        constructor_to_fn!(transform::constructor),
-        function_proto,
-        transform_proto,
-    );
+    let transform = transform::create_constructor(context, object_proto, function_proto);
     let video = FunctionObject::constructor(
         gc_context,
         Executable::Native(video::constructor),
@@ -740,7 +734,7 @@ pub fn create_globals<'gc>(
         Attribute::empty(),
     );
 
-    let bitmap_filter_proto = bitmap_filter::create_proto(gc_context, object_proto, function_proto);
+    let bitmap_filter_proto = bitmap_filter::create_proto(context, object_proto, function_proto);
     let bitmap_filter = FunctionObject::constructor(
         gc_context,
         Executable::Native(bitmap_filter::constructor),
@@ -749,81 +743,50 @@ pub fn create_globals<'gc>(
         bitmap_filter_proto,
     );
 
-    let blur_filter =
-        blur_filter::create_constructor(gc_context, bitmap_filter_proto, function_proto);
+    let blur_filter = blur_filter::create_proto(context, bitmap_filter_proto, function_proto);
+    let blur_filter_constructor =
+        blur_filter::create_constructor(context, blur_filter, function_proto);
 
-    let bevel_filter =
-        bevel_filter::create_constructor(gc_context, bitmap_filter_proto, function_proto);
+    let bevel_filter = bevel_filter::create_proto(context, bitmap_filter_proto, function_proto);
+    let bevel_filter_constructor =
+        bevel_filter::create_constructor(context, bevel_filter, function_proto);
 
-    let glow_filter_proto =
-        glow_filter::create_proto(gc_context, bitmap_filter_proto, function_proto);
-    let glow_filter = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(glow_filter::constructor),
-        constructor_to_fn!(glow_filter::constructor),
+    let glow_filter = glow_filter::create_proto(context, bitmap_filter_proto, function_proto);
+    let glow_filter_constructor =
+        glow_filter::create_constructor(context, glow_filter, function_proto);
+
+    let drop_shadow_filter =
+        drop_shadow_filter::create_proto(context, bitmap_filter_proto, function_proto);
+    let drop_shadow_filter_constructor =
+        drop_shadow_filter::create_constructor(context, drop_shadow_filter, function_proto);
+
+    let color_matrix_filter =
+        color_matrix_filter::create_proto(context, bitmap_filter_proto, function_proto);
+    let color_matrix_filter_constructor =
+        color_matrix_filter::create_constructor(context, color_matrix_filter, function_proto);
+
+    let displacement_map_filter =
+        displacement_map_filter::create_proto(context, bitmap_filter_proto, function_proto);
+    let displacement_map_filter_constructor = displacement_map_filter::create_constructor(
+        context,
+        displacement_map_filter,
         function_proto,
-        glow_filter_proto,
     );
 
-    let drop_shadow_filter_proto =
-        drop_shadow_filter::create_proto(gc_context, bitmap_filter_proto, function_proto);
-    let drop_shadow_filter = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(drop_shadow_filter::constructor),
-        constructor_to_fn!(drop_shadow_filter::constructor),
-        function_proto,
-        drop_shadow_filter_proto,
-    );
+    let convolution_filter =
+        convolution_filter::create_proto(context, bitmap_filter_proto, function_proto);
+    let convolution_filter_constructor =
+        convolution_filter::create_constructor(context, convolution_filter, function_proto);
 
-    let color_matrix_filter_proto =
-        color_matrix_filter::create_proto(gc_context, bitmap_filter_proto, function_proto);
-    let color_matrix_filter = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(color_matrix_filter::constructor),
-        constructor_to_fn!(color_matrix_filter::constructor),
-        function_proto,
-        color_matrix_filter_proto,
-    );
+    let gradient_bevel_filter =
+        gradient_filter::create_bevel_proto(context, bitmap_filter_proto, function_proto);
+    let gradient_bevel_filter_constructor =
+        gradient_filter::create_bevel_constructor(context, gradient_bevel_filter, function_proto);
 
-    let displacement_map_filter_proto =
-        displacement_map_filter::create_proto(gc_context, bitmap_filter_proto, function_proto);
-    let displacement_map_filter = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(displacement_map_filter::constructor),
-        constructor_to_fn!(displacement_map_filter::constructor),
-        function_proto,
-        displacement_map_filter_proto,
-    );
-
-    let convolution_filter_proto =
-        convolution_filter::create_proto(gc_context, bitmap_filter_proto, function_proto);
-    let convolution_filter = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(convolution_filter::constructor),
-        constructor_to_fn!(convolution_filter::constructor),
-        function_proto,
-        convolution_filter_proto,
-    );
-
-    let gradient_bevel_filter_proto =
-        gradient_bevel_filter::create_proto(gc_context, bitmap_filter_proto, function_proto);
-    let gradient_bevel_filter = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(gradient_bevel_filter::constructor),
-        constructor_to_fn!(gradient_bevel_filter::constructor),
-        function_proto,
-        gradient_bevel_filter_proto,
-    );
-
-    let gradient_glow_filter_proto =
-        gradient_glow_filter::create_proto(gc_context, bitmap_filter_proto, function_proto);
-    let gradient_glow_filter = FunctionObject::constructor(
-        gc_context,
-        Executable::Native(gradient_glow_filter::constructor),
-        constructor_to_fn!(gradient_glow_filter::constructor),
-        function_proto,
-        gradient_glow_filter_proto,
-    );
+    let gradient_glow_filter =
+        gradient_filter::create_glow_proto(context, bitmap_filter_proto, function_proto);
+    let gradient_glow_filter_constructor =
+        gradient_filter::create_glow_constructor(context, gradient_glow_filter, function_proto);
 
     filters.define_value(
         gc_context,
@@ -834,62 +797,61 @@ pub fn create_globals<'gc>(
     filters.define_value(
         gc_context,
         "BlurFilter",
-        blur_filter.into(),
+        blur_filter_constructor.into(),
         Attribute::empty(),
     );
     filters.define_value(
         gc_context,
         "BevelFilter",
-        bevel_filter.into(),
+        bevel_filter_constructor.into(),
         Attribute::empty(),
     );
     filters.define_value(
         gc_context,
         "GlowFilter",
-        glow_filter.into(),
+        glow_filter_constructor.into(),
         Attribute::empty(),
     );
     filters.define_value(
         gc_context,
         "DropShadowFilter",
-        drop_shadow_filter.into(),
+        drop_shadow_filter_constructor.into(),
         Attribute::empty(),
     );
     filters.define_value(
         gc_context,
         "ColorMatrixFilter",
-        color_matrix_filter.into(),
+        color_matrix_filter_constructor.into(),
         Attribute::empty(),
     );
     filters.define_value(
         gc_context,
         "DisplacementMapFilter",
-        displacement_map_filter.into(),
+        displacement_map_filter_constructor.into(),
         Attribute::empty(),
     );
     filters.define_value(
         gc_context,
         "ConvolutionFilter",
-        convolution_filter.into(),
+        convolution_filter_constructor.into(),
         Attribute::empty(),
     );
 
     filters.define_value(
         gc_context,
         "GradientBevelFilter",
-        gradient_bevel_filter.into(),
+        gradient_bevel_filter_constructor.into(),
         Attribute::empty(),
     );
     filters.define_value(
         gc_context,
         "GradientGlowFilter",
-        gradient_glow_filter.into(),
+        gradient_glow_filter_constructor.into(),
         Attribute::empty(),
     );
 
-    let bitmap_data_proto = bitmap_data::create_proto(gc_context, object_proto, function_proto);
-    let bitmap_data =
-        bitmap_data::create_bitmap_data_object(gc_context, bitmap_data_proto, function_proto);
+    let bitmap_data_proto = ScriptObject::new(context.gc(), Some(object_proto));
+    let bitmap_data = bitmap_data::create_constructor(context, bitmap_data_proto, function_proto);
 
     display.define_value(
         gc_context,
@@ -900,7 +862,7 @@ pub fn create_globals<'gc>(
 
     let external = ScriptObject::new(gc_context, Some(object_proto));
     let external_interface = external_interface::create_external_interface_object(
-        gc_context,
+        context,
         external_interface_proto,
         function_proto,
     );
@@ -910,6 +872,23 @@ pub fn create_globals<'gc>(
         gc_context,
         "ExternalInterface",
         external_interface.into(),
+        Attribute::empty(),
+    );
+
+    flash.define_value(gc_context, "net", net.into(), Attribute::empty());
+
+    let file_reference_obj = file_reference::create_constructor(
+        context,
+        object_proto,
+        function_proto,
+        array_proto,
+        broadcaster_functions,
+    );
+
+    net.define_value(
+        gc_context,
+        "FileReference",
+        file_reference_obj.into(),
         Attribute::empty(),
     );
 
@@ -963,6 +942,12 @@ pub fn create_globals<'gc>(
         text_field.into(),
         Attribute::DONT_ENUM,
     );
+    text_field.define_value(
+        gc_context,
+        "StyleSheet",
+        style_sheet.into(),
+        Attribute::DONT_ENUM | Attribute::VERSION_7,
+    );
     globals.define_value(
         gc_context,
         "TextFormat",
@@ -976,14 +961,11 @@ pub fn create_globals<'gc>(
     globals.define_value(gc_context, "Boolean", boolean.into(), Attribute::DONT_ENUM);
     globals.define_value(gc_context, "Date", date.into(), Attribute::DONT_ENUM);
 
-    let shared_object_proto = shared_object::create_proto(gc_context, object_proto, function_proto);
-
-    let shared_obj =
-        shared_object::create_shared_object_object(gc_context, shared_object_proto, function_proto);
+    let shared_object = shared_object::create_constructor(context, object_proto, function_proto);
     globals.define_value(
         gc_context,
         "SharedObject",
-        shared_obj.into(),
+        shared_object.into(),
         Attribute::DONT_ENUM,
     );
 
@@ -1002,7 +984,7 @@ pub fn create_globals<'gc>(
     );
 
     let selection = selection::create_selection_object(
-        gc_context,
+        context,
         selection_proto,
         function_proto,
         broadcaster_functions,
@@ -1029,10 +1011,10 @@ pub fn create_globals<'gc>(
         Attribute::DONT_ENUM,
     );
 
-    let system_security = system_security::create(gc_context, object_proto, function_proto);
-    let system_capabilities = system_capabilities::create(gc_context, object_proto, function_proto);
+    let system_security = system_security::create(context, object_proto, function_proto);
+    let system_capabilities = system_capabilities::create(context, object_proto, function_proto);
     let system_ime = system_ime::create(
-        gc_context,
+        context,
         object_proto,
         function_proto,
         broadcaster_functions,
@@ -1040,7 +1022,7 @@ pub fn create_globals<'gc>(
     );
 
     let system = system::create(
-        gc_context,
+        context,
         object_proto,
         function_proto,
         system_security,
@@ -1052,14 +1034,14 @@ pub fn create_globals<'gc>(
     globals.define_value(
         gc_context,
         "Math",
-        Value::Object(math::create(gc_context, object_proto, function_proto)),
+        Value::Object(math::create(context, object_proto, function_proto)),
         Attribute::DONT_ENUM,
     );
     globals.define_value(
         gc_context,
         "Mouse",
         Value::Object(mouse::create_mouse_object(
-            gc_context,
+            context,
             object_proto,
             function_proto,
             broadcaster_functions,
@@ -1071,7 +1053,7 @@ pub fn create_globals<'gc>(
         gc_context,
         "Key",
         Value::Object(key::create_key_object(
-            gc_context,
+            context,
             object_proto,
             function_proto,
             broadcaster_functions,
@@ -1083,7 +1065,7 @@ pub fn create_globals<'gc>(
         gc_context,
         "Stage",
         Value::Object(stage::create_stage_object(
-            gc_context,
+            context,
             object_proto,
             array_proto,
             function_proto,
@@ -1095,14 +1077,32 @@ pub fn create_globals<'gc>(
         gc_context,
         "Accessibility",
         Value::Object(accessibility::create_accessibility_object(
-            gc_context,
+            context,
             object_proto,
             function_proto,
         )),
         Attribute::DONT_ENUM,
     );
+    globals.define_value(
+        gc_context,
+        "NetStream",
+        netstream.into(),
+        Attribute::DONT_ENUM,
+    );
+    globals.define_value(
+        gc_context,
+        "NetConnection",
+        netconnection.into(),
+        Attribute::DONT_ENUM,
+    );
+    globals.define_value(
+        gc_context,
+        "XMLSocket",
+        xml_socket.into(),
+        Attribute::DONT_ENUM,
+    );
 
-    define_properties_on(GLOBAL_DECLS, gc_context, globals, function_proto);
+    define_properties_on(GLOBAL_DECLS, context, globals, function_proto);
 
     (
         SystemPrototypes {
@@ -1116,7 +1116,7 @@ pub fn create_globals<'gc>(
             text_format: text_format_proto,
             array: array_proto,
             array_constructor: array,
-            xml_node: xmlnode_proto,
+            xml_node_constructor: xmlnode,
             xml_constructor: xml,
             string: string_proto,
             number: number_proto,
@@ -1127,37 +1127,27 @@ pub fn create_globals<'gc>(
             point_constructor: point,
             rectangle: rectangle_proto,
             rectangle_constructor: rectangle,
-            transform: transform_proto,
             transform_constructor: transform,
-            shared_object: shared_object_proto,
-            shared_object_constructor: shared_obj,
+            shared_object_constructor: shared_object,
             color_transform: color_transform_proto,
             color_transform_constructor: color_transform,
             context_menu: context_menu_proto,
             context_menu_constructor: context_menu,
             context_menu_item: context_menu_item_proto,
             context_menu_item_constructor: context_menu_item,
-            bitmap_filter: bitmap_filter_proto,
-            bitmap_filter_constructor: bitmap_filter,
-            glow_filter: glow_filter_proto,
-            glow_filter_constructor: glow_filter,
-            drop_shadow_filter: drop_shadow_filter_proto,
-            drop_shadow_filter_constructor: drop_shadow_filter,
-            color_matrix_filter: color_matrix_filter_proto,
-            color_matrix_filter_constructor: color_matrix_filter,
-            displacement_map_filter: displacement_map_filter_proto,
-            displacement_map_filter_constructor: displacement_map_filter,
-            convolution_filter: convolution_filter_proto,
-            convolution_filter_constructor: convolution_filter,
-            gradient_bevel_filter: gradient_bevel_filter_proto,
-            gradient_bevel_filter_constructor: gradient_bevel_filter,
-            gradient_glow_filter: gradient_glow_filter_proto,
-            gradient_glow_filter_constructor: gradient_glow_filter,
             date_constructor: date,
-            bitmap_data: bitmap_data_proto,
-            bitmap_data_constructor: bitmap_data,
+            bitmap_data: bitmap_data_proto.into(),
             video: video_proto,
             video_constructor: video,
+            blur_filter,
+            bevel_filter,
+            glow_filter,
+            drop_shadow_filter,
+            color_matrix_filter,
+            displacement_map_filter,
+            convolution_filter,
+            gradient_bevel_filter,
+            gradient_glow_filter,
         },
         globals.into(),
         broadcaster_functions,
@@ -1198,10 +1188,10 @@ pub fn remove_display_object<'gc>(this: DisplayObject<'gc>, activation: &mut Act
     // Generally this prevents you from removing non-dynamically created clips,
     // although you can get around it with swapDepths.
     // TODO: Figure out the derivation of this range.
-    if depth >= AVM_DEPTH_BIAS && depth < AVM_MAX_REMOVE_DEPTH && !this.removed() {
+    if depth >= AVM_DEPTH_BIAS && depth < AVM_MAX_REMOVE_DEPTH && !this.avm1_removed() {
         // Need a parent to remove from.
         if let Some(mut parent) = this.avm1_parent().and_then(|o| o.as_movie_clip()) {
-            parent.remove_child(&mut activation.context, this);
+            parent.remove_child(activation.context, this);
         }
     }
 }
@@ -1212,7 +1202,7 @@ mod tests {
     use super::*;
 
     fn setup<'gc>(activation: &mut Activation<'_, 'gc>) -> Object<'gc> {
-        create_globals(activation.context.gc_context).1
+        create_globals(activation.strings()).1
     }
 
     test_method!(boolean_function, "Boolean", setup,

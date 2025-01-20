@@ -3,7 +3,8 @@ use crate::avm1::error::Error;
 use crate::avm1::object::Object;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{ScriptObject, Value};
-use gc_arena::MutationContext;
+use crate::string::StringContext;
+
 use rand::Rng;
 use std::f64::consts;
 
@@ -153,16 +154,20 @@ pub fn random<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(activation.context.rng.gen_range(0.0f64..1.0f64).into())
+    // See https://github.com/adobe/avmplus/blob/858d034a3bd3a54d9b70909386435cf4aec81d21/core/MathUtils.cpp#L1731C24-L1731C44
+    // This generated a restricted set of 'f64' values, which some SWFs implicitly rely on.
+    const MAX_VAL: u32 = 0x7FFFFFFF;
+    let rand = activation.context.rng.gen_range(0..MAX_VAL);
+    Ok(((rand as f64) / (MAX_VAL as f64 + 1f64)).into())
 }
 
 pub fn create<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let math = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(OBJECT_DECLS, gc_context, math, fn_proto);
+    let math = ScriptObject::new(context.gc(), Some(proto));
+    define_properties_on(OBJECT_DECLS, context, math, fn_proto);
     math.into()
 }
 
@@ -172,11 +177,9 @@ mod tests {
     use crate::avm1::test_utils::with_avm;
 
     fn setup<'gc>(activation: &mut Activation<'_, 'gc>) -> Object<'gc> {
-        create(
-            activation.context.gc_context,
-            activation.context.avm1.prototypes().object,
-            activation.context.avm1.prototypes().function,
-        )
+        let object_proto = activation.context.avm1.prototypes().object;
+        let function_proto = activation.context.avm1.prototypes().function;
+        create(activation.strings(), object_proto, function_proto)
     }
 
     test_method!(test_abs, "abs", setup,
@@ -192,9 +195,10 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [-1.0] => f64::acos(-1.0),
             [0.0] => f64::acos(0.0),
-            [1.0] => f64::acos(1.0)
+            [1.0] => 0.0 // f64::acos(1.0)
         }
     );
 
@@ -202,8 +206,9 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [-1.0] => f64::asin(-1.0),
-            [0.0] => f64::asin(0.0),
+            [0.0] => 0.0, // f64::asin(0.0),
             [1.0] => f64::asin(1.0)
         }
     );
@@ -212,8 +217,9 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [-1.0] => f64::atan(-1.0),
-            [0.0] => f64::atan(0.0),
+            [0.0] => 0.0, // f64::atan(0.0),
             [1.0] => f64::atan(1.0)
         }
     );
@@ -231,7 +237,7 @@ mod tests {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
             [0.0] => 1.0,
-            [std::f64::consts::PI] => f64::cos(std::f64::consts::PI)
+            [std::f64::consts::PI] => -1.0 // f64::cos(std::f64::consts::PI)
         }
     );
 
@@ -239,8 +245,8 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
-            [1.0] => f64::exp(1.0),
-            [2.0] => f64::exp(2.0)
+            @epsilon(1e-12) [1.0] => f64::from_bits(0x4005bf0a8b145769), // f64::exp(1.0), e, 2.718281828459045
+            @epsilon(1e-12) [2.0] => f64::from_bits(0x401d8e64b8d4ddae)  // f64::exp(2.0), e^2, 7.3890560989306495
         }
     );
 
@@ -291,8 +297,8 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
-            [0.0] => f64::sin(0.0),
-            [std::f64::consts::PI / 2.0] => f64::sin(std::f64::consts::PI / 2.0)
+            [0.0] => 0.0, // f64::sin(0.0),
+            [std::f64::consts::PI / 2.0] => 1.0 // f64::sin(std::f64::consts::PI / 2.0)
         }
     );
 
@@ -300,7 +306,8 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
-            [0.0] => f64::sqrt(0.0),
+            [0.0] => 0.0, // f64::sqrt(0.0),
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [5.0] => f64::sqrt(5.0)
         }
     );
@@ -309,7 +316,8 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
-            [0.0] => f64::tan(0.0),
+            [0.0] => 0.0, // f64::tan(0.0),
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [1.0] => f64::tan(1.0)
         }
     );
@@ -339,9 +347,10 @@ mod tests {
         [19] => {
             [] => f64::NAN,
             [Value::Null] => f64::NAN,
+            // TODO: figure out the exact f64 returned, and add @epsilon as needed, see test_exp
             [2.0] => f64::ln(2.0),
-            [0.0] => f64::ln(0.0),
-            [1.0] => f64::ln(1.0)
+            [0.0] => f64::NEG_INFINITY, // f64::ln(0.0),
+            [1.0] => 0 // f64::ln(1.0)
         }
     );
 
@@ -390,11 +399,7 @@ mod tests {
     #[test]
     fn test_atan2_nan() {
         with_avm(19, |activation, _root| -> Result<(), Error> {
-            let math = create(
-                activation.context.gc_context,
-                activation.context.avm1.prototypes().object,
-                activation.context.avm1.prototypes().function,
-            );
+            let math = setup(activation);
 
             assert_eq!(atan2(activation, math, &[]).unwrap(), f64::NAN.into());
             assert_eq!(
@@ -416,11 +421,7 @@ mod tests {
     #[test]
     fn test_atan2_valid() {
         with_avm(19, |activation, _root| -> Result<(), Error> {
-            let math = create(
-                activation.context.gc_context,
-                activation.context.avm1.prototypes().object,
-                activation.context.avm1.prototypes().function,
-            );
+            let math = setup(activation);
 
             assert_eq!(
                 atan2(activation, math, &[10.into()]).unwrap(),

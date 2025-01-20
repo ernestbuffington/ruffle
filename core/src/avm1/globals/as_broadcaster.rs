@@ -2,12 +2,13 @@
 
 use crate::avm1::error::Error;
 use crate::avm1::function::ExecutionReason;
+use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::object::TObject;
 use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::Declaration;
 use crate::avm1::{Activation, ArrayObject, Object, ScriptObject, Value};
-use crate::string::AvmString;
-use gc_arena::{Collect, MutationContext};
+use crate::string::{AvmString, StringContext};
+use gc_arena::{Collect, Mutation};
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "initialize" => method(initialize; DONT_ENUM | DONT_DELETE);
@@ -17,14 +18,23 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn create<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> (BroadcasterFunctions<'gc>, Object<'gc>) {
-    let object = ScriptObject::new(gc_context, Some(proto));
+    let gc_context = context.gc();
+    let as_broadcaster_proto = ScriptObject::new(gc_context, Some(proto));
+    let as_broadcaster = FunctionObject::constructor(
+        gc_context,
+        Executable::Native(constructor),
+        constructor_to_fn!(constructor),
+        fn_proto,
+        as_broadcaster_proto.into(),
+    );
+    let object = as_broadcaster.raw_script_object();
 
-    let define_as_object = |index: usize| -> Object<'gc> {
-        match OBJECT_DECLS[index].define_on(gc_context, object, fn_proto) {
+    let mut define_as_object = |index: usize| -> Object<'gc> {
+        match OBJECT_DECLS[index].define_on(context, object, fn_proto) {
             Value::Object(o) => o,
             _ => panic!("expected object for broadcaster function"),
         }
@@ -37,7 +47,7 @@ pub fn create<'gc>(
             remove_listener: define_as_object(2),
             broadcast_message: define_as_object(3),
         },
-        object.into(),
+        as_broadcaster,
     )
 }
 
@@ -52,7 +62,7 @@ pub struct BroadcasterFunctions<'gc> {
 impl<'gc> BroadcasterFunctions<'gc> {
     pub fn initialize(
         self,
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         broadcaster: Object<'gc>,
         array_proto: Object<'gc>,
     ) {
@@ -60,7 +70,7 @@ impl<'gc> BroadcasterFunctions<'gc> {
     }
 }
 
-pub fn add_listener<'gc>(
+fn add_listener<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
@@ -84,7 +94,7 @@ pub fn add_listener<'gc>(
     Ok(true.into())
 }
 
-pub fn remove_listener<'gc>(
+fn remove_listener<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
@@ -110,7 +120,7 @@ pub fn remove_listener<'gc>(
     Ok(false.into())
 }
 
-pub fn broadcast_message<'gc>(
+fn broadcast_message<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
@@ -145,6 +155,9 @@ pub fn broadcast_internal<'gc>(
                     activation,
                     ExecutionReason::Special,
                 )?;
+            } else if let Value::MovieClip(_) = listener {
+                let object = listener.coerce_to_object(activation);
+                object.call_method(method_name, call_args, activation, ExecutionReason::Special)?;
             }
         }
 
@@ -154,7 +167,19 @@ pub fn broadcast_internal<'gc>(
     }
 }
 
-pub fn initialize<'gc>(
+/// Implements `AsBroadcaster` constructor and function.
+// Despite the documentation says that there is no constructor function for the `AsBroadcaster`
+// class, Flash accepts expressions like `new AsBroadcaster()`, and a newly-created object is
+// returned in such cases.
+fn constructor<'gc>(
+    _activation: &mut Activation<'_, 'gc>,
+    this: Object<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    Ok(this.into())
+}
+
+fn initialize<'gc>(
     activation: &mut Activation<'_, 'gc>,
     _this: Object<'gc>,
     args: &[Value<'gc>],
@@ -162,7 +187,7 @@ pub fn initialize<'gc>(
     if let Some(val) = args.get(0) {
         let broadcaster = val.coerce_to_object(activation);
         initialize_internal(
-            activation.context.gc_context,
+            activation.gc(),
             broadcaster,
             activation.context.avm1.broadcaster_functions(),
             activation.context.avm1.prototypes().array,
@@ -172,7 +197,7 @@ pub fn initialize<'gc>(
 }
 
 fn initialize_internal<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    gc_context: &Mutation<'gc>,
     broadcaster: Object<'gc>,
     functions: BroadcasterFunctions<'gc>,
     array_proto: Object<'gc>,

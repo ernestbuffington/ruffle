@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use thiserror::Error;
 
 use crate::bitmap::BitmapHandle;
@@ -6,6 +8,9 @@ use crate::bitmap::BitmapHandle;
 pub enum Error {
     #[error("Bitmap texture is larger than the rendering device supports")]
     TooLarge,
+
+    #[error("Bitmap texture has a size of 0 and is invalid")]
+    InvalidSize,
 
     #[error("Unknown bitmap format")]
     UnknownType,
@@ -35,6 +40,6 @@ pub enum Error {
     #[error("Unknown handle {0:?}")]
     UnknownHandle(BitmapHandle),
 
-    #[error("Not yet implemented")]
-    Unimplemented,
+    #[error("Not yet implemented: {0}")]
+    Unimplemented(Cow<'static, str>),
 }

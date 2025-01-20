@@ -5,8 +5,7 @@ use crate::avm1::error::Error;
 use crate::avm1::function::{Executable, ExecutionReason, FunctionObject};
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
-use crate::string::AvmString;
-use gc_arena::MutationContext;
+use crate::string::{AvmString, StringContext};
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "toString" => method(to_string);
@@ -214,7 +213,7 @@ fn to_string<'gc>(
     let y = this.get("y", activation)?;
 
     Ok(AvmString::new_utf8(
-        activation.context.gc_context,
+        activation.gc(),
         format!(
             "(x={}, y={})",
             x.coerce_to_string(activation)?,
@@ -284,28 +283,28 @@ fn offset<'gc>(
 }
 
 pub fn create_point_object<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     point_proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     let point = FunctionObject::constructor(
-        gc_context,
+        context.gc(),
         Executable::Native(constructor),
         constructor_to_fn!(constructor),
         fn_proto,
         point_proto,
     );
     let object = point.raw_script_object();
-    define_properties_on(OBJECT_DECLS, gc_context, object, fn_proto);
+    define_properties_on(OBJECT_DECLS, context, object, fn_proto);
     point
 }
 
 pub fn create_proto<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
+    let object = ScriptObject::new(context.gc(), Some(proto));
+    define_properties_on(PROTO_DECLS, context, object, fn_proto);
     object.into()
 }

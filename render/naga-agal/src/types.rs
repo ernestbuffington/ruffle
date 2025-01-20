@@ -34,7 +34,7 @@ pub enum Opcode {
     Tex = 0x28,
     Sge = 0x29,
     Slt = 0x2a,
-    Seq = 0x2b,
+    Seq = 0x2c,
     Sne = 0x2d,
     Ddx = 0x1a,
     Ddy = 0x1b,
@@ -96,6 +96,7 @@ pub struct SourceField {
 }
 
 bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug)]
     pub struct Mask: u8 {
         const X = 0b0001;
         const Y = 0b0010;
@@ -126,41 +127,79 @@ impl SourceField {
     }
 }
 
-#[derive(FromPrimitive)]
+#[derive(FromPrimitive, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Filter {
     Nearest = 0,
     Linear = 1,
+    Anisotropic2x = 2,
+    Anisotropic4x = 3,
+    Anisotropic8x = 4,
+    Anisotropic16x = 5,
 }
 
-#[derive(FromPrimitive)]
+#[derive(FromPrimitive, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Mipmap {
     Disable = 0,
     Nearest = 1,
     Linear = 2,
 }
 
-#[derive(FromPrimitive)]
+#[derive(FromPrimitive, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Wrapping {
     Clamp = 0,
     Repeat = 1,
+    ClampURepeatV = 2,
+    RepeatUClampV = 3,
 }
 
-#[derive(FromPrimitive)]
+#[derive(FromPrimitive, Debug, Copy, Clone)]
 pub enum Dimension {
     TwoD = 0,
     Cube = 1,
 }
 
+#[derive(Debug)]
+pub struct Special {
+    pub ignore_sampler: bool,
+}
+
+impl Special {
+    pub fn parse(val: u8) -> Result<Special, Error> {
+        Ok(Special {
+            ignore_sampler: (val & 0x4) != 0,
+        })
+    }
+}
+
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct SamplerField {
     pub filter: Filter,
     pub mipmap: Mipmap,
     pub wrapping: Wrapping,
     pub dimension: Dimension,
+    pub special: Special,
     /// Texture level-of-detail (LOD) bias
     pub texture_lod_bias: i8,
     pub reg_num: u16,
     pub reg_type: RegisterType,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct SamplerConfig {
+    pub wrapping: Wrapping,
+    pub filter: Filter,
+    pub mipmap: Mipmap,
+}
+
+impl Default for SamplerConfig {
+    fn default() -> Self {
+        SamplerConfig {
+            wrapping: Wrapping::Clamp,
+            filter: Filter::Nearest,
+            mipmap: Mipmap::Disable,
+        }
+    }
 }
 
 impl SamplerField {
@@ -169,10 +208,7 @@ impl SamplerField {
         let load_bias = ((val >> 16) & 0xFF) as i8;
         let reg_type = RegisterType::from_u64((val >> 32) & 0xF).unwrap();
         let dimension = Dimension::from_u64((val >> 44) & 0xF).unwrap();
-
-        // FIXME - check that the actual field is 0
-        let _special = 0;
-
+        let special = Special::parse(((val >> 48) & 0xF) as u8).unwrap();
         let wrapping = Wrapping::from_u64((val >> 52) & 0xF).unwrap();
         let mipmap = Mipmap::from_u64((val >> 56) & 0xF).unwrap();
         let filter = Filter::from_u64((val >> 60) & 0xF).unwrap();
@@ -183,13 +219,30 @@ impl SamplerField {
             wrapping,
             dimension,
             texture_lod_bias: load_bias,
+            special,
             reg_num,
             reg_type,
         })
     }
 }
 
+#[derive(Debug)]
 pub enum Source2 {
     SourceField(SourceField),
     Sampler(SamplerField),
+}
+
+impl Source2 {
+    pub fn assert_source_field(&self) -> &SourceField {
+        match self {
+            Source2::SourceField(s) => s,
+            _ => panic!("Expected SourceField"),
+        }
+    }
+    pub fn assert_sampler(&self) -> &SamplerField {
+        match self {
+            Source2::Sampler(s) => s,
+            _ => panic!("Expected SamplerField"),
+        }
+    }
 }

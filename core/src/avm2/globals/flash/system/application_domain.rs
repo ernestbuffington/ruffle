@@ -1,57 +1,62 @@
 //! `flash.system.ApplicationDomain` class
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
-use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{appdomain_allocator, DomainObject, Object, TObject};
+use crate::avm2::object::{DomainObject, Object, TObject, VectorObject};
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::Error;
-use crate::avm2::Multiname;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
-use gc_arena::{GcCell, MutationContext};
+use crate::avm2::vector::VectorStorage;
+use crate::avm2::{Domain, Error};
 
-/// Implements `flash.system.ApplicationDomain`'s instance constructor.
-pub fn instance_init<'gc>(
+pub use crate::avm2::object::application_domain_allocator;
+
+/// Implements `flash.system.ApplicationDomain`'s init method, which
+/// is called from the constructor
+pub fn init<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
+    this: Value<'gc>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this {
-        activation.super_init(this, &[])?;
-    }
+    let this = this.as_object().unwrap();
 
-    Ok(Value::Undefined)
-}
+    let parent_domain = if matches!(args[0], Value::Null) {
+        activation.avm2().playerglobals_domain()
+    } else {
+        args.get_object(activation, 0, "parentDomain")?
+            .as_application_domain()
+            .expect("Invalid parent domain")
+    };
+    let fresh_domain = Domain::movie_domain(activation, parent_domain);
+    this.init_application_domain(activation.gc(), fresh_domain);
 
-/// Implements `flash.system.ApplicationDomain`'s class constructor.
-pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
     Ok(Value::Undefined)
 }
 
 /// `currentDomain` static property.
-pub fn current_domain<'gc>(
+pub fn get_current_domain<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let appdomain = activation.caller_domain();
+    let appdomain = activation
+        .caller_domain()
+        .expect("Missing caller domain in ApplicationDomain.currentDomain");
 
     Ok(DomainObject::from_domain(activation, appdomain)?.into())
 }
 
 /// `parentDomain` property
-pub fn parent_domain<'gc>(
+pub fn get_parent_domain<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(appdomain) = this.and_then(|this| this.as_application_domain()) {
+    let this = this.as_object().unwrap();
+
+    if let Some(appdomain) = this.as_application_domain() {
         if let Some(parent_domain) = appdomain.parent_domain() {
+            if parent_domain.is_playerglobals_domain(activation.avm2()) {
+                return Ok(Value::Null);
+            }
             return Ok(DomainObject::from_domain(activation, parent_domain)?.into());
         }
     }
@@ -62,33 +67,17 @@ pub fn parent_domain<'gc>(
 /// `getDefinition` method
 pub fn get_definition<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(appdomain) = this.and_then(|this| this.as_application_domain()) {
-        let name = args
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| "".into())
-            .coerce_to_string(activation)?;
-        let name = QName::from_qualified_name(name, activation.context.gc_context);
-        let (qname, mut defined_script) = match appdomain.get_defining_script(&name.into())? {
-            Some(data) => data,
-            None => {
-                return Err(Error::AvmError(crate::avm2::error::reference_error(
-                    activation,
-                    &format!(
-                        "Error #1065: Variable {} is not defined.",
-                        name.local_name()
-                    ),
-                    1065,
-                )?))
-            }
-        };
-        let globals = defined_script.globals(&mut activation.context)?;
-        let definition = globals.get_property(&qname.into(), activation)?;
+    let this = this.as_object().unwrap();
 
-        return Ok(definition);
+    if let Some(appdomain) = this.as_application_domain() {
+        let name = match args.get(0) {
+            Some(arg) => arg.coerce_to_string(activation)?,
+            None => activation.strings().empty(),
+        };
+        return appdomain.get_defined_value_handling_vector(activation, name);
     }
 
     Ok(Value::Undefined)
@@ -97,19 +86,57 @@ pub fn get_definition<'gc>(
 /// `hasDefinition` method
 pub fn has_definition<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(appdomain) = this.and_then(|this| this.as_application_domain()) {
-        let name = args
-            .get(0)
-            .cloned()
-            .unwrap_or_else(|| "".into())
-            .coerce_to_string(activation)?;
+    let this = this.as_object().unwrap();
 
-        let qname = QName::from_qualified_name(name, activation.context.gc_context);
+    if let Some(appdomain) = this.as_application_domain() {
+        let name = match args.get(0) {
+            Some(arg) => arg.coerce_to_string(activation)?,
+            None => activation.strings().empty(),
+        };
 
-        return Ok(appdomain.has_definition(qname).into());
+        return Ok(appdomain
+            .get_defined_value_handling_vector(activation, name)
+            .is_ok()
+            .into());
+    }
+
+    Ok(Value::Undefined)
+}
+
+/// 'getQualifiedDefinitionNames' method.
+///
+/// NOTE: Normally only available in Flash Player 11.3+.
+pub fn get_qualified_definition_names<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(appdomain) = this.as_application_domain() {
+        // NOTE: According to the docs of 'getQualifiedDeinitionNames',
+        // it is able to throw a 'SecurityError' if "The definition belongs
+        // to a domain to which the calling code does not have access."
+        //
+        // We do not implement this.
+
+        let storage = VectorStorage::from_values(
+            appdomain
+                .get_defined_names()
+                .iter()
+                .filter(|name| !name.namespace().is_private())
+                .map(|name| Value::String(name.to_qualified_name(activation.gc())))
+                .collect(),
+            false,
+            Some(activation.avm2().class_defs().string),
+        );
+
+        let name_vector = VectorObject::from_vector(storage, activation)?;
+
+        return Ok(name_vector.into());
     }
 
     Ok(Value::Undefined)
@@ -118,14 +145,17 @@ pub fn has_definition<'gc>(
 /// `domainMemory` property setter
 pub fn set_domain_memory<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(Value::Object(arg)) = args.get(0) {
-        if let Some(bytearray_obj) = arg.as_bytearray_object() {
-            if let Some(appdomain) = this.and_then(|this| this.as_application_domain()) {
-                appdomain.set_domain_memory(activation.context.gc_context, bytearray_obj);
-            }
+    let this = this.as_object().unwrap();
+
+    if let Some(appdomain) = this.as_application_domain() {
+        let obj = args.try_get_object(activation, 0);
+        if let Some(obj) = obj {
+            appdomain.set_domain_memory(activation, Some(obj.as_bytearray_object().unwrap()))?;
+        } else {
+            appdomain.set_domain_memory(activation, None)?;
         }
     }
 
@@ -133,55 +163,21 @@ pub fn set_domain_memory<'gc>(
 }
 
 /// `domainMemory` property getter
-pub fn domain_memory<'gc>(
+pub fn get_domain_memory<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(appdomain) = this.and_then(|this| this.as_application_domain()) {
-        let bytearray_object: Object<'gc> = appdomain.domain_memory().into();
-        return Ok(bytearray_object.into());
+    let this = this.as_object().unwrap();
+
+    if let Some(appdomain) = this.as_application_domain() {
+        if appdomain.is_default_domain_memory() {
+            return Ok(Value::Null);
+        } else {
+            let bytearray_object: Object<'gc> = appdomain.domain_memory().into();
+            return Ok(bytearray_object.into());
+        }
     }
 
     Ok(Value::Undefined)
-}
-
-/// Construct `ApplicationDomain`'s class.
-pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
-    let class = Class::new(
-        QName::new(Namespace::package("flash.system"), "ApplicationDomain"),
-        Some(Multiname::public("Object")),
-        Method::from_builtin(
-            instance_init,
-            "<ApplicationDomain instance initializer>",
-            mc,
-        ),
-        Method::from_builtin(class_init, "<ApplicationDomain class initializer>", mc),
-        mc,
-    );
-
-    let mut write = class.write(mc);
-    write.set_instance_allocator(appdomain_allocator);
-
-    const PUBLIC_CLASS_PROPERTIES: &[(&str, Option<NativeMethodImpl>, Option<NativeMethodImpl>)] =
-        &[("currentDomain", Some(current_domain), None)];
-    write.define_public_builtin_class_properties(mc, PUBLIC_CLASS_PROPERTIES);
-
-    const PUBLIC_INSTANCE_PROPERTIES: &[(
-        &str,
-        Option<NativeMethodImpl>,
-        Option<NativeMethodImpl>,
-    )] = &[
-        ("domainMemory", Some(domain_memory), Some(set_domain_memory)),
-        ("parentDomain", Some(parent_domain), None),
-    ];
-    write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
-
-    const PUBLIC_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[
-        ("getDefinition", get_definition),
-        ("hasDefinition", has_definition),
-    ];
-    write.define_public_builtin_instance_methods(mc, PUBLIC_INSTANCE_METHODS);
-
-    class
 }

@@ -1,20 +1,22 @@
 //! Declarative macro for defining AVM1 properties.
 
+use std::borrow::Cow;
+
 use crate::avm1::function::{Executable, FunctionObject, NativeFunction};
 use crate::avm1::property::Attribute;
 use crate::avm1::{Object, ScriptObject, TObject, Value};
-use gc_arena::MutationContext;
+use crate::string::{AvmAtom, StringContext};
 
 /// Defines a list of properties on a [`ScriptObject`].
 #[inline(never)]
 pub fn define_properties_on<'gc>(
     decls: &[Declaration],
-    mc: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     this: ScriptObject<'gc>,
     fn_proto: Object<'gc>,
 ) {
     for decl in decls {
-        decl.define_on(mc, this, fn_proto);
+        decl.define_on(context, this, fn_proto);
     }
 }
 
@@ -61,10 +63,20 @@ impl Declaration {
     /// defined a property.
     pub fn define_on<'gc>(
         &self,
-        mc: MutationContext<'gc, '_>,
+        context: &mut StringContext<'gc>,
         this: ScriptObject<'gc>,
         fn_proto: Object<'gc>,
     ) -> Value<'gc> {
+        let mc = context.gc();
+
+        let mut intern_utf8 = |s: &'static str| -> AvmAtom<'gc> {
+            match ruffle_wstr::from_utf8(s) {
+                Cow::Borrowed(s) => context.intern_static(s),
+                Cow::Owned(s) => context.intern_wstr(s),
+            }
+        };
+
+        let name = intern_utf8(self.name);
         let value = match self.kind {
             DeclKind::Property { getter, setter } => {
                 let getter =
@@ -72,7 +84,7 @@ impl Declaration {
                 let setter = setter.map(|setter| {
                     FunctionObject::function(mc, Executable::Native(setter), fn_proto, fn_proto)
                 });
-                this.add_property(mc, self.name.into(), getter, setter, self.attributes);
+                this.add_property(mc, name.into(), getter, setter, self.attributes);
                 return Value::Undefined;
             }
             DeclKind::Method(func) => {
@@ -82,13 +94,13 @@ impl Declaration {
             DeclKind::Function(func) => {
                 FunctionObject::function(mc, Executable::Native(func), fn_proto, fn_proto).into()
             }
-            DeclKind::String(s) => s.into(),
+            DeclKind::String(s) => intern_utf8(s).into(),
             DeclKind::Bool(b) => b.into(),
             DeclKind::Int(i) => i.into(),
             DeclKind::Float(f) => f.into(),
         };
 
-        this.define_value(mc, self.name, value, self.attributes);
+        this.define_value(mc, name, value, self.attributes);
         value
     }
 }

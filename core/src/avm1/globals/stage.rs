@@ -8,8 +8,7 @@ use crate::avm1::globals::as_broadcaster::BroadcasterFunctions;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, Value};
 use crate::display_object::StageDisplayState;
-use crate::string::{AvmString, WStr, WString};
-use gc_arena::MutationContext;
+use crate::string::{AvmString, StringContext, WStr, WString};
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "align" => property(align, set_align);
@@ -21,15 +20,15 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 };
 
 pub fn create_stage_object<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     array_proto: Object<'gc>,
     fn_proto: Object<'gc>,
     broadcaster_functions: BroadcasterFunctions<'gc>,
 ) -> Object<'gc> {
-    let stage = ScriptObject::new(gc_context, Some(proto));
-    broadcaster_functions.initialize(gc_context, stage.into(), array_proto);
-    define_properties_on(OBJECT_DECLS, gc_context, stage, fn_proto);
+    let stage = ScriptObject::new(context.gc(), Some(proto));
+    broadcaster_functions.initialize(context.gc(), stage.into(), array_proto);
+    define_properties_on(OBJECT_DECLS, context, stage, fn_proto);
     stage.into()
 }
 
@@ -57,7 +56,7 @@ fn align<'gc>(
     if align.contains(StageAlign::BOTTOM) {
         s.push_byte(b'B');
     }
-    let align = AvmString::new(activation.context.gc_context, s);
+    let align = AvmString::new(activation.gc(), s);
     Ok(align.into())
 }
 
@@ -75,7 +74,7 @@ fn set_align<'gc>(
     activation
         .context
         .stage
-        .set_align(&mut activation.context, align);
+        .set_align(activation.context, align);
     Ok(Value::Undefined)
 }
 
@@ -93,7 +92,7 @@ fn scale_mode<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let scale_mode = AvmString::new_utf8(
-        activation.context.gc_context,
+        activation.gc(),
         activation.context.stage.scale_mode().to_string(),
     );
     Ok(scale_mode.into())
@@ -113,7 +112,7 @@ fn set_scale_mode<'gc>(
     activation
         .context
         .stage
-        .set_scale_mode(&mut activation.context, scale_mode);
+        .set_scale_mode(activation.context, scale_mode, true);
     Ok(Value::Undefined)
 }
 
@@ -143,12 +142,12 @@ fn set_display_state<'gc>(
         activation
             .context
             .stage
-            .set_display_state(&mut activation.context, StageDisplayState::FullScreen);
+            .set_display_state(activation.context, StageDisplayState::FullScreen);
     } else if display_state.eq_ignore_case(WStr::from_units(b"normal")) {
         activation
             .context
             .stage
-            .set_display_state(&mut activation.context, StageDisplayState::Normal);
+            .set_display_state(activation.context, StageDisplayState::Normal);
     }
 
     Ok(Value::Undefined)
@@ -175,7 +174,7 @@ fn set_show_menu<'gc>(
     activation
         .context
         .stage
-        .set_show_menu(&mut activation.context, show_menu);
+        .set_show_menu(activation.context, show_menu);
     Ok(Value::Undefined)
 }
 

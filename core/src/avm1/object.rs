@@ -1,63 +1,75 @@
 //! Object trait to expose objects to AVM
 
 use crate::avm1::function::{Executable, ExecutionName, ExecutionReason, FunctionObject};
-use crate::avm1::globals::bevel_filter::BevelFilterObject;
-use crate::avm1::globals::blur_filter::BlurFilterObject;
+use crate::avm1::globals::bevel_filter::BevelFilter;
+use crate::avm1::globals::blur_filter::BlurFilter;
+use crate::avm1::globals::color_matrix_filter::ColorMatrixFilter;
 use crate::avm1::globals::color_transform::ColorTransformObject;
+use crate::avm1::globals::convolution_filter::ConvolutionFilter;
 use crate::avm1::globals::date::Date;
+use crate::avm1::globals::displacement_map_filter::DisplacementMapFilter;
+use crate::avm1::globals::drop_shadow_filter::DropShadowFilter;
+use crate::avm1::globals::file_reference::FileReferenceObject;
+use crate::avm1::globals::glow_filter::GlowFilter;
+use crate::avm1::globals::gradient_filter::GradientFilter;
+use crate::avm1::globals::local_connection::LocalConnection;
+use crate::avm1::globals::netconnection::NetConnection;
+use crate::avm1::globals::shared_object::SharedObject;
+use crate::avm1::globals::sound::Sound;
+use crate::avm1::globals::transform::TransformObject;
+use crate::avm1::globals::xml::Xml;
+use crate::avm1::globals::xml_socket::XmlSocket;
 use crate::avm1::object::array_object::ArrayObject;
-use crate::avm1::object::bitmap_data::BitmapDataObject;
-use crate::avm1::object::color_matrix_filter::ColorMatrixFilterObject;
-use crate::avm1::object::convolution_filter::ConvolutionFilterObject;
-use crate::avm1::object::displacement_map_filter::DisplacementMapFilterObject;
-use crate::avm1::object::drop_shadow_filter::DropShadowFilterObject;
-use crate::avm1::object::glow_filter::GlowFilterObject;
-use crate::avm1::object::gradient_bevel_filter::GradientBevelFilterObject;
-use crate::avm1::object::gradient_glow_filter::GradientGlowFilterObject;
-use crate::avm1::object::shared_object::SharedObject;
 use crate::avm1::object::super_object::SuperObject;
-use crate::avm1::object::transform_object::TransformObject;
-use crate::avm1::object::value_object::ValueObject;
-use crate::avm1::object::xml_node_object::XmlNodeObject;
-use crate::avm1::object::xml_object::XmlObject;
-use crate::avm1::{Activation, Attribute, Error, ScriptObject, SoundObject, StageObject, Value};
+use crate::avm1::{Activation, Attribute, Error, ScriptObject, StageObject, Value};
+use crate::bitmap::bitmap_data::BitmapDataWrapper;
 use crate::display_object::DisplayObject;
+use crate::display_object::TDisplayObject;
 use crate::html::TextFormat;
+use crate::streams::NetStream;
 use crate::string::AvmString;
 use crate::xml::XmlNode;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, Gc, GcCell, Mutation};
 use ruffle_macros::enum_trait_object;
+use std::cell::{Cell, RefCell};
 use std::fmt::Debug;
 
 pub mod array_object;
-pub mod bitmap_data;
-pub mod color_matrix_filter;
-pub mod convolution_filter;
-mod custom_object;
-pub mod displacement_map_filter;
-pub mod drop_shadow_filter;
-pub mod glow_filter;
-pub mod gradient_bevel_filter;
-pub mod gradient_glow_filter;
 pub mod script_object;
-pub mod shared_object;
-pub mod sound_object;
 pub mod stage_object;
 pub mod super_object;
-pub mod transform_object;
-pub mod value_object;
-pub mod xml_node_object;
-pub mod xml_object;
 
-#[derive(Clone, Collect)]
+#[derive(Copy, Clone, Collect)]
 #[collect(no_drop)]
 pub enum NativeObject<'gc> {
     None,
-    Date(GcCell<'gc, Date>),
-    BlurFilter(GcCell<'gc, BlurFilterObject>),
-    BevelFilter(GcCell<'gc, BevelFilterObject>),
+    /// A boxed primitive.
+    ///
+    /// It is a logic error for a boxed value to be a `Value::Object`.
+    Value(Gc<'gc, Value<'gc>>),
+    Date(Gc<'gc, Cell<Date>>),
+    BlurFilter(BlurFilter<'gc>),
+    BevelFilter(BevelFilter<'gc>),
+    GlowFilter(GlowFilter<'gc>),
+    DropShadowFilter(DropShadowFilter<'gc>),
+    ColorMatrixFilter(ColorMatrixFilter<'gc>),
+    DisplacementMapFilter(DisplacementMapFilter<'gc>),
+    ConvolutionFilter(ConvolutionFilter<'gc>),
+    GradientBevelFilter(GradientFilter<'gc>),
+    GradientGlowFilter(GradientFilter<'gc>),
     ColorTransform(GcCell<'gc, ColorTransformObject>),
-    TextFormat(GcCell<'gc, TextFormat>),
+    Transform(TransformObject<'gc>),
+    TextFormat(Gc<'gc, RefCell<TextFormat>>),
+    NetStream(NetStream<'gc>),
+    BitmapData(BitmapDataWrapper<'gc>),
+    Xml(Xml<'gc>),
+    XmlNode(XmlNode<'gc>),
+    SharedObject(GcCell<'gc, SharedObject>),
+    XmlSocket(XmlSocket<'gc>),
+    FileReference(FileReferenceObject<'gc>),
+    NetConnection(NetConnection<'gc>),
+    LocalConnection(LocalConnection<'gc>),
+    Sound(Sound<'gc>),
 }
 
 /// Represents an object that can be directly interacted with by the AVM
@@ -69,23 +81,9 @@ pub enum NativeObject<'gc> {
     pub enum Object<'gc> {
         ScriptObject(ScriptObject<'gc>),
         ArrayObject(ArrayObject<'gc>),
-        SoundObject(SoundObject<'gc>),
         StageObject(StageObject<'gc>),
         SuperObject(SuperObject<'gc>),
-        XmlObject(XmlObject<'gc>),
-        XmlNodeObject(XmlNodeObject<'gc>),
-        ValueObject(ValueObject<'gc>),
         FunctionObject(FunctionObject<'gc>),
-        SharedObject(SharedObject<'gc>),
-        TransformObject(TransformObject<'gc>),
-        GlowFilterObject(GlowFilterObject<'gc>),
-        DropShadowFilterObject(DropShadowFilterObject<'gc>),
-        ColorMatrixFilterObject(ColorMatrixFilterObject<'gc>),
-        DisplacementMapFilterObject(DisplacementMapFilterObject<'gc>),
-        ConvolutionFilterObject(ConvolutionFilterObject<'gc>),
-        GradientBevelFilterObject(GradientBevelFilterObject<'gc>),
-        GradientGlowFilterObject(GradientGlowFilterObject<'gc>),
-        BitmapData(BitmapDataObject<'gc>),
     }
 )]
 pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
@@ -100,8 +98,28 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         &self,
         name: impl Into<AvmString<'gc>>,
         activation: &mut Activation<'_, 'gc>,
+        is_slash_path: bool,
     ) -> Option<Value<'gc>> {
-        self.raw_script_object().get_local_stored(name, activation)
+        self.raw_script_object()
+            .get_local_stored(name, activation, is_slash_path)
+    }
+
+    /// Retrieve a named property from the object, or its prototype.
+    fn get_non_slash_path(
+        &self,
+        name: impl Into<AvmString<'gc>>,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<Value<'gc>, Error<'gc>> {
+        // TODO: Extract logic to a `lookup` function.
+        let (this, proto) = if let Some(super_object) = self.as_super_object() {
+            (super_object.this(), super_object.proto(activation))
+        } else {
+            ((*self).into(), Value::Object((*self).into()))
+        };
+        match search_prototype(proto, name.into(), activation, this, false)? {
+            Some((value, _depth)) => Ok(value),
+            None => Ok(Value::Undefined),
+        }
     }
 
     /// Retrieve a named property from the object, or its prototype.
@@ -116,7 +134,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         } else {
             ((*self).into(), Value::Object((*self).into()))
         };
-        match search_prototype(proto, name.into(), activation, this)? {
+        match search_prototype(proto, name.into(), activation, this, true)? {
             Some((value, _depth)) => Ok(value),
             None => Ok(Value::Undefined),
         }
@@ -138,7 +156,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
                 return Err(Error::PrototypeRecursionLimit);
             }
 
-            if let Some(value) = p.get_local_stored(name, activation) {
+            if let Some(value) = p.get_local_stored(name, activation, true) {
                 return Ok(value);
             }
 
@@ -259,10 +277,20 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         reason: ExecutionReason,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let this = (*self).into();
-        let (method, depth) = match search_prototype(Value::Object(this), name, activation, this)? {
-            Some((Value::Object(method), depth)) => (method, depth),
-            _ => return Ok(Value::Undefined),
-        };
+
+        if let Some(s) = this.as_stage_object() {
+            let d_o = s.as_display_object().unwrap();
+
+            if d_o.avm1_removed() {
+                return Ok(Value::Undefined);
+            }
+        }
+
+        let (method, depth) =
+            match search_prototype(Value::Object(this), name, activation, this, false)? {
+                Some((Value::Object(method), depth)) => (method, depth),
+                _ => return Ok(Value::Undefined),
+            };
 
         // If the method was found on the object itself, change `depth` as-if
         // the method was found on the object's prototype.
@@ -282,7 +310,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         }
     }
 
-    /// Retrive a getter defined on this object.
+    /// Retrieve a getter defined on this object.
     fn getter(
         &self,
         name: AvmString<'gc>,
@@ -291,7 +319,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         self.raw_script_object().getter(name, activation)
     }
 
-    /// Retrive a setter defined on this object.
+    /// Retrieve a setter defined on this object.
     fn setter(
         &self,
         name: AvmString<'gc>,
@@ -342,7 +370,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
     /// as `__proto__`.
     fn define_value(
         &self,
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         name: impl Into<AvmString<'gc>>,
         value: Value<'gc>,
         attributes: Attribute,
@@ -360,7 +388,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
     /// and `clear_attributes` parameters.
     fn set_attributes(
         &self,
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         name: Option<AvmString<'gc>>,
         set_attributes: Attribute,
         clear_attributes: Attribute,
@@ -381,7 +409,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
     /// as `__proto__`.
     fn add_property(
         &self,
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         name: AvmString<'gc>,
         get: Object<'gc>,
         set: Option<Object<'gc>>,
@@ -475,8 +503,13 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
     }
 
     /// Enumerate the object.
-    fn get_keys(&self, activation: &mut Activation<'_, 'gc>) -> Vec<AvmString<'gc>> {
-        self.raw_script_object().get_keys(activation)
+    fn get_keys(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        include_hidden: bool,
+    ) -> Vec<AvmString<'gc>> {
+        self.raw_script_object()
+            .get_keys(activation, include_hidden)
     }
 
     /// Enumerate all interfaces implemented by this object.
@@ -485,7 +518,7 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
     }
 
     /// Set the interface list for this object. (Only useful for prototypes.)
-    fn set_interfaces(&self, gc_context: MutationContext<'gc, '_>, iface_list: Vec<Object<'gc>>) {
+    fn set_interfaces(&self, gc_context: &Mutation<'gc>, iface_list: Vec<Object<'gc>>) {
         self.raw_script_object()
             .set_interfaces(gc_context, iface_list)
     }
@@ -541,15 +574,10 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         NativeObject::None
     }
 
-    fn set_native(&self, _gc_context: MutationContext<'gc, '_>, _native: NativeObject<'gc>) {}
+    fn set_native(&self, _gc_context: &Mutation<'gc>, _native: NativeObject<'gc>) {}
 
     /// Get the underlying array object, if it exists.
     fn as_array_object(&self) -> Option<ArrayObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying sound object, if it exists.
-    fn as_sound_object(&self) -> Option<SoundObject<'gc>> {
         None
     }
 
@@ -573,69 +601,13 @@ pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
         None
     }
 
-    /// Get the underlying XML document for this object, if it exists.
-    fn as_xml(&self) -> Option<XmlObject<'gc>> {
-        None
-    }
-
     /// Get the underlying XML node for this object, if it exists.
     fn as_xml_node(&self) -> Option<XmlNode<'gc>> {
-        None
-    }
-
-    /// Get the underlying `ValueObject`, if it exists.
-    fn as_value_object(&self) -> Option<ValueObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `SharedObject`, if it exists
-    fn as_shared_object(&self) -> Option<SharedObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `TransformObject`, if it exists
-    fn as_transform_object(&self) -> Option<TransformObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `GlowFilterObject`, if it exists
-    fn as_glow_filter_object(&self) -> Option<GlowFilterObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `DropShadowFilterObject`, if it exists
-    fn as_drop_shadow_filter_object(&self) -> Option<DropShadowFilterObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `ColorMatrixFilterObject`, if it exists
-    fn as_color_matrix_filter_object(&self) -> Option<ColorMatrixFilterObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `DisplacementMapFilterObject`, if it exists
-    fn as_displacement_map_filter_object(&self) -> Option<DisplacementMapFilterObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `ConvolutionFilterObject`, if it exists
-    fn as_convolution_filter_object(&self) -> Option<ConvolutionFilterObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `GradientBevelFilterObject`, if it exists
-    fn as_gradient_bevel_filter_object(&self) -> Option<GradientBevelFilterObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `GradientGlowFilterObject`, if it exists
-    fn as_gradient_glow_filter_object(&self) -> Option<GradientGlowFilterObject<'gc>> {
-        None
-    }
-
-    /// Get the underlying `BitmapDataObject`, if it exists
-    fn as_bitmap_data_object(&self) -> Option<BitmapDataObject<'gc>> {
-        None
+        match self.native() {
+            NativeObject::Xml(xml) => Some(xml.root()),
+            NativeObject::XmlNode(xml_node) => Some(xml_node),
+            _ => None,
+        }
     }
 
     fn as_ptr(&self) -> *const ObjectPtr;
@@ -717,8 +689,10 @@ pub fn search_prototype<'gc>(
     name: AvmString<'gc>,
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
+    is_slash_path: bool,
 ) -> Result<Option<(Value<'gc>, u8)>, Error<'gc>> {
     let mut depth = 0;
+    let orig_proto = proto;
 
     while let Value::Object(p) = proto {
         if depth == 255 {
@@ -745,8 +719,36 @@ pub fn search_prototype<'gc>(
             }
         }
 
-        if let Some(value) = p.get_local_stored(name, activation) {
+        if let Some(value) = p.get_local_stored(name, activation, is_slash_path) {
             return Ok(Some((value, depth)));
+        }
+
+        proto = p.proto(activation);
+        depth += 1;
+    }
+
+    if let Some(resolve) = find_resolve_method(orig_proto, activation)? {
+        let result = resolve.call("__resolve".into(), activation, this.into(), &[name.into()])?;
+        return Ok(Some((result, 0)));
+    }
+
+    Ok(None)
+}
+
+/// Finds the appropriate `__resolve` method for an object, searching its hierarchy too.
+pub fn find_resolve_method<'gc>(
+    mut proto: Value<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Option<Object<'gc>>, Error<'gc>> {
+    let mut depth = 0;
+
+    while let Value::Object(p) = proto {
+        if depth == 255 {
+            return Err(Error::PrototypeRecursionLimit);
+        }
+
+        if let Some(value) = p.get_local_stored("__resolve", activation, false) {
+            return Ok(Some(value.coerce_to_object(activation)));
         }
 
         proto = p.proto(activation);

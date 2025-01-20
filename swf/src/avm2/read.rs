@@ -46,10 +46,7 @@ impl<'a> Reader<'a> {
         }
 
         let len = self.read_u30()?;
-        let mut metadata = Vec::with_capacity(len as usize);
-        for _ in 0..len {
-            metadata.push(self.read_metadata()?);
-        }
+        let metadata = self.read_metadata(len)?;
 
         let len = self.read_u30()?;
         let mut instances = Vec::with_capacity(len as usize);
@@ -70,8 +67,14 @@ impl<'a> Reader<'a> {
 
         let len = self.read_u30()?;
         let mut method_bodies = Vec::with_capacity(len as usize);
-        for _ in 0..len {
-            method_bodies.push(self.read_method_body()?);
+        for body_idx in 0..len {
+            let body = self.read_method_body()?;
+            if methods[body.method.0 as usize].body.is_some() {
+                // TODO: this should somehow throw error 1121 in FP.
+                return Err(Error::invalid_data("Duplicate method body"));
+            }
+            methods[body.method.0 as usize].body = Some(Index::new(body_idx));
+            method_bodies.push(body);
         }
 
         Ok(AbcFile {
@@ -102,11 +105,11 @@ impl<'a> Reader<'a> {
         Ok(self.read_encoded_u32()? as i32)
     }
 
-    fn read_string(&mut self) -> Result<String> {
+    fn read_string(&mut self) -> Result<Vec<u8>> {
         let len = self.read_u30()?;
         // TODO: Avoid allocating a String.
-        let mut s = String::with_capacity(len as usize);
-        self.read_slice(len as usize)?.read_to_string(&mut s)?;
+        let mut s = Vec::with_capacity(len as usize);
+        self.read_slice(len as usize)?.read_to_end(&mut s)?;
         Ok(s)
     }
 
@@ -282,6 +285,7 @@ impl<'a> Reader<'a> {
             params,
             return_type,
             flags,
+            body: None,
         })
     }
 
@@ -333,17 +337,31 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn read_metadata(&mut self) -> Result<Metadata> {
-        let name = self.read_index()?;
-        let num_items = self.read_u30()?;
-        let mut items = Vec::with_capacity(num_items as usize);
-        for _ in 0..num_items {
-            items.push(MetadataItem {
-                key: self.read_index()?,
-                value: self.read_index()?,
-            })
+    fn read_metadata(&mut self, len: u32) -> Result<Vec<Metadata>> {
+        let mut metadata = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            let name = self.read_index()?;
+            let num_items = self.read_u30()?;
+            let mut key_value_data = Vec::with_capacity(num_items as usize * 2);
+
+            // Data includes the keys and values
+            for _ in 0..num_items * 2 {
+                key_value_data.push(self.read_index()?);
+            }
+
+            // Split them up here
+            let mut items = Vec::with_capacity(num_items as usize);
+            for i in 0..num_items {
+                items.push(MetadataItem {
+                    key: key_value_data[i as usize],
+                    value: key_value_data[(num_items + i) as usize],
+                })
+            }
+
+            metadata.push(Metadata { name, items });
         }
-        Ok(Metadata { name, items })
+
+        Ok(metadata)
     }
 
     fn read_instance(&mut self) -> Result<Instance> {
@@ -533,7 +551,7 @@ impl<'a> Reader<'a> {
                 num_args: self.read_u30()?,
             },
             OpCode::CallMethod => Op::CallMethod {
-                index: self.read_index()?,
+                index: self.read_u30()?,
                 num_args: self.read_u30()?,
             },
             OpCode::CallProperty => Op::CallProperty {
@@ -743,7 +761,7 @@ impl<'a> Reader<'a> {
             OpCode::Li16 => Op::Li16,
             OpCode::Li32 => Op::Li32,
             OpCode::Li8 => Op::Li8,
-            OpCode::LookupSwitch => Op::LookupSwitch {
+            OpCode::LookupSwitch => Op::LookupSwitch(Box::new(LookupSwitch {
                 default_offset: self.read_i24()?,
                 case_offsets: {
                     let num_cases = self.read_u30()? + 1;
@@ -751,9 +769,9 @@ impl<'a> Reader<'a> {
                     for _ in 0..num_cases {
                         case_offsets.push(self.read_i24()?);
                     }
-                    case_offsets
+                    case_offsets.into()
                 },
-            },
+            })),
             OpCode::LShift => Op::LShift,
             OpCode::Modulo => Op::Modulo,
             OpCode::Multiply => Op::Multiply,
@@ -784,9 +802,6 @@ impl<'a> Reader<'a> {
             OpCode::PopScope => Op::PopScope,
             OpCode::PushByte => Op::PushByte {
                 value: self.read_u8()?,
-            },
-            OpCode::PushConstant => Op::PushConstant {
-                value: self.read_u30()?,
             },
             OpCode::PushDouble => Op::PushDouble {
                 value: self.read_index()?,
@@ -879,7 +894,7 @@ pub mod tests {
         let swf_buf = crate::decompress_swf(&data[..]).unwrap();
         let swf = crate::parse_swf(&swf_buf).unwrap();
         for tag in swf.tags {
-            if let Tag::DoAbc(do_abc) = tag {
+            if let Tag::DoAbc2(do_abc) = tag {
                 return do_abc.data.to_vec();
             }
         }

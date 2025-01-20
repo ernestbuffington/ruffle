@@ -1,8 +1,9 @@
 use super::decoders::{self, AdpcmDecoder, Decoder, PcmDecoder, SeekableDecoder};
-use super::{SoundHandle, SoundInstanceHandle, SoundTransform};
+use super::{SoundHandle, SoundInstanceHandle, SoundStreamInfo, SoundTransform};
 use crate::backend::audio::{DecodeError, RegisterError};
+use crate::buffer::Substream;
 use crate::tag_utils::SwfSlice;
-use generational_arena::Arena;
+use slotmap::SlotMap;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex, RwLock};
 use swf::AudioCompression;
@@ -53,10 +54,10 @@ impl CircBuf {
 // all sounds and mix the audio into an output buffer audio stream.
 pub struct AudioMixer {
     /// The currently registered sounds.
-    sounds: Arena<Sound>,
+    sounds: SlotMap<SoundHandle, Sound>,
 
     /// The list of actively playing sound instances.
-    sound_instances: Arc<Mutex<Arena<SoundInstance>>>,
+    sound_instances: Arc<Mutex<SlotMap<SoundInstanceHandle, SoundInstance>>>,
 
     /// The master volume of the audio from [0.0, 1.0].
     volume: Arc<RwLock<f32>>,
@@ -206,11 +207,13 @@ impl SoundInstance {
             left_transform: [1.0, 0.0],
             right_transform: [0.0, 1.0],
             peak: [0.0, 0.0],
-            range: ([std::f32::INFINITY; 2], [std::f32::NEG_INFINITY; 2]),
+            range: ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]),
         }
     }
 
     /// Creates a new `SoundInstance` from a `Stream`, for stream sounds.
+    ///
+    /// Substream-backed sounds also use this.
     fn new_stream(stream: Box<dyn Stream>) -> Self {
         SoundInstance {
             handle: None,
@@ -219,7 +222,7 @@ impl SoundInstance {
             left_transform: [1.0, 0.0],
             right_transform: [0.0, 1.0],
             peak: [0.0, 0.0],
-            range: ([std::f32::INFINITY; 2], [std::f32::NEG_INFINITY; 2]),
+            range: ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]),
         }
     }
 
@@ -228,7 +231,7 @@ impl SoundInstance {
         self.peak[0] = (self.range.1[0] - self.range.0[0]) / 2.0;
         self.peak[1] = (self.range.1[1] - self.range.0[1]) / 2.0;
 
-        self.range = ([std::f32::INFINITY; 2], [std::f32::NEG_INFINITY; 2]);
+        self.range = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
     }
 }
 
@@ -236,8 +239,8 @@ impl AudioMixer {
     /// Creates a new `AudioMixer` with the given number of channels and sample rate.
     pub fn new(num_output_channels: u8, output_sample_rate: u32) -> Self {
         Self {
-            sounds: Arena::new(),
-            sound_instances: Arc::new(Mutex::new(Arena::new())),
+            sounds: SlotMap::with_key(),
+            sound_instances: Arc::new(Mutex::new(SlotMap::with_key())),
             volume: Arc::new(RwLock::new(1.0)),
             num_output_channels,
             output_sample_rate,
@@ -407,11 +410,25 @@ impl AudioMixer {
         Ok(stream)
     }
 
+    fn make_stream_from_buffer_substream(
+        &self,
+        stream_info: &SoundStreamInfo,
+        data_stream: Substream,
+    ) -> Result<Box<dyn Stream>, DecodeError> {
+        // Instantiate a decoder for the compression that the sound data uses.
+        let clip_stream_decoder = decoders::make_substream_decoder(stream_info, data_stream)?;
+
+        // Convert the `Decoder` to a `Stream`, and resample it to the output sample rate.
+        let stream = DecoderStream::new(clip_stream_decoder);
+        let stream = Box::new(self.make_resampler(stream));
+        Ok(stream)
+    }
+
     /// Callback to the audio thread.
     /// Refill the output buffer by stepping through all active sounds
     /// and mixing in their output.
     fn mix_audio<'a, T>(
-        sound_instances: &mut Arena<SoundInstance>,
+        sound_instances: &mut SlotMap<SoundInstanceHandle, SoundInstance>,
         volume: f32,
         num_channels: u8,
         mut output_buffer: &mut [T],
@@ -429,7 +446,8 @@ impl AudioMixer {
         };
         use std::ops::DerefMut;
 
-        let volume = volume.to_sample();
+        // Adapt the volume for logarithmic hearing.
+        let volume = ((10_f32.powf(81_f32.log10() * volume) - 1.0) / 80.0).to_sample();
 
         // For each sample, mix the samples from all active sound instances.
         for buf_frame in output_buffer
@@ -529,15 +547,13 @@ impl AudioMixer {
     }
 
     #[cfg(not(feature = "mp3"))]
-    pub fn register_mp3(&mut self, data: &[u8]) -> Result<SoundHandle, DecodeError> {
+    pub fn register_mp3(&mut self, _data: &[u8]) -> Result<SoundHandle, DecodeError> {
         Err(decoders::Error::UnhandledCompression(AudioCompression::Mp3))
     }
 
     /// Starts a timeline audio stream.
     pub fn start_stream(
         &mut self,
-        _stream_handle: Option<SoundHandle>,
-        _clip_frame: u16,
         clip_data: SwfSlice,
         stream_info: &swf::SoundStreamHead,
     ) -> Result<SoundInstanceHandle, DecodeError> {
@@ -587,6 +603,25 @@ impl AudioMixer {
         Ok(handle)
     }
 
+    /// Starts a `Substream` backed audio stream.
+    pub fn start_substream(
+        &mut self,
+        stream_data: Substream,
+        stream_info: &SoundStreamInfo,
+    ) -> Result<SoundInstanceHandle, DecodeError> {
+        // The audio data for substream sounds is already de-multiplexed by the
+        // caller. The substream tag reader will feed the decoder audio data
+        // from each chunk.
+        let stream = self.make_stream_from_buffer_substream(stream_info, stream_data)?;
+
+        let mut sound_instances = self
+            .sound_instances
+            .lock()
+            .expect("Cannot be called reentrant");
+        let handle = sound_instances.insert(SoundInstance::new_stream(stream));
+        Ok(handle)
+    }
+
     /// Stops a playing sound instance.
     pub fn stop_sound(&mut self, sound: SoundInstanceHandle) {
         let mut sound_instances = self
@@ -601,13 +636,6 @@ impl AudioMixer {
             .sound_instances
             .lock()
             .expect("Cannot be called reentrant");
-        // This is a workaround for a bug in generational-arena:
-        // Arena::clear does not properly bump the generational index, allowing for stale references
-        // to continue to work (this caused #1315). Arena::remove will force a generation bump.
-        // See https://github.com/fitzgen/generational-arena/issues/30
-        if let Some((i, _)) = sound_instances.iter().next() {
-            sound_instances.remove(i);
-        }
         sound_instances.clear();
     }
 
@@ -689,7 +717,7 @@ impl AudioMixer {
 /// to perform audio mixing on a different thread.
 pub struct AudioMixerProxy {
     /// The list of actively playing sound instances.
-    sound_instances: Arc<Mutex<Arena<SoundInstance>>>,
+    sound_instances: Arc<Mutex<SlotMap<SoundInstanceHandle, SoundInstance>>>,
 
     /// The master volume of the audio from [0.0, 1.0].
     volume: Arc<RwLock<f32>>,
@@ -1053,13 +1081,10 @@ macro_rules! impl_audio_mixer_backend {
         #[inline]
         fn start_stream(
             &mut self,
-            stream_handle: Option<SoundHandle>,
-            clip_frame: u16,
             clip_data: $crate::tag_utils::SwfSlice,
             stream_info: &swf::SoundStreamHead,
         ) -> Result<SoundInstanceHandle, DecodeError> {
-            self.$mixer
-                .start_stream(stream_handle, clip_frame, clip_data, stream_info)
+            self.$mixer.start_stream(clip_data, stream_info)
         }
 
         #[inline]
@@ -1069,6 +1094,15 @@ macro_rules! impl_audio_mixer_backend {
             settings: &swf::SoundInfo,
         ) -> Result<SoundInstanceHandle, DecodeError> {
             self.$mixer.start_sound(sound_handle, settings)
+        }
+
+        #[inline]
+        fn start_substream(
+            &mut self,
+            stream_data: ruffle_core::buffer::Substream,
+            stream_info: &SoundStreamInfo,
+        ) -> Result<SoundInstanceHandle, DecodeError> {
+            self.$mixer.start_substream(stream_data, stream_info)
         }
 
         #[inline]

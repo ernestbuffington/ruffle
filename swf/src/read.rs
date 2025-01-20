@@ -8,6 +8,7 @@ use crate::{
 use bitstream_io::BitRead;
 use byteorder::{LittleEndian, ReadBytesExt};
 use simple_asn1::ASN1Block;
+use std::borrow::Cow;
 use std::io::{self, Read};
 
 /// Parse a decompressed SWF.
@@ -73,6 +74,16 @@ pub fn decompress_swf<'a, R: Read + 'a>(mut input: R) -> Result<SwfBuf> {
     let version = input.read_u8()?;
     let uncompressed_len = input.read_u32::<LittleEndian>()?;
 
+    // Check whether the SWF version is 0.
+    // Note that the behavior should actually vary, depending on the player version:
+    // - Flash Player 9 and later bail out (the behavior we implement).
+    // - Flash Player 8 loops through all the frames, without running any AS code.
+    // - Flash Player 7 and older don't fail and use the player version instead: a
+    // function like `getSWFVersion()` in AVM1 will then return the player version.
+    if version == 0 {
+        return Err(Error::invalid_data("Invalid SWF version"));
+    }
+
     // Now the SWF switches to a compressed stream.
     let mut decompress_stream: Box<dyn Read> = match compression {
         Compression::None => Box::new(input),
@@ -125,7 +136,12 @@ pub fn decompress_swf<'a, R: Read + 'a>(mut input: R) -> Result<SwfBuf> {
         frame_rate,
         num_frames,
     };
-    let data = reader.get_ref().to_vec();
+    let offset = reader.as_slice().as_ptr() as usize - data.as_ptr() as usize;
+    // Remove the header.
+    // As an alternative we could return the entire original buffer with header length,
+    // but that's a nontrivial API change, probably not worth the effort.
+    data.drain(..offset);
+    let mut reader = Reader::new(&data, version);
 
     // Parse the first two tags, searching for the FileAttributes and SetBackgroundColor tags.
     // This metadata is useful, so we want to return it along with the header.
@@ -156,7 +172,7 @@ pub fn decompress_swf<'a, R: Read + 'a>(mut input: R) -> Result<SwfBuf> {
             header,
             file_attributes,
             background_color,
-            uncompressed_len,
+            uncompressed_len: uncompressed_len as i32,
         },
         data,
     })
@@ -168,14 +184,7 @@ fn make_zlib_reader<'a, R: Read + 'a>(input: R) -> Result<Box<dyn Read + 'a>> {
     Ok(Box::new(ZlibDecoder::new(input)))
 }
 
-#[cfg(all(feature = "libflate", not(feature = "flate2")))]
-fn make_zlib_reader<'a, R: Read + 'a>(input: R) -> Result<Box<dyn Read + 'a>> {
-    use libflate::zlib::Decoder;
-    let decoder = Decoder::new(input)?;
-    Ok(Box::new(decoder))
-}
-
-#[cfg(not(any(feature = "flate2", feature = "libflate")))]
+#[cfg(not(feature = "flate2"))]
 fn make_zlib_reader<'a, R: Read + 'a>(_input: R) -> Result<Box<dyn Read + 'a>> {
     Err(Error::unsupported(
         "Support for Zlib compressed SWFs is not enabled.",
@@ -204,7 +213,7 @@ fn make_lzma_reader<'a, R: Read + 'a>(
     // Bytes 0..5: LZMA properties
     // Bytes 5..13: Uncompressed length
     //
-    // To deal with the mangled header, use lzma_rs options to anually provide uncompressed length.
+    // To deal with the mangled header, use lzma_rs options to manually provide uncompressed length.
 
     // Read compressed length (ignored)
     let _ = input.read_u32::<LittleEndian>()?;
@@ -445,7 +454,7 @@ impl<'a> Reader<'a> {
             TagCode::DefineShape4 => Tag::DefineShape(tag_reader.read_define_shape(4)?),
             TagCode::DefineSound => Tag::DefineSound(Box::new(tag_reader.read_define_sound()?)),
             TagCode::DefineText => Tag::DefineText(Box::new(tag_reader.read_define_text(1)?)),
-            TagCode::DefineText2 => Tag::DefineText(Box::new(tag_reader.read_define_text(2)?)),
+            TagCode::DefineText2 => Tag::DefineText2(Box::new(tag_reader.read_define_text(2)?)),
             TagCode::DefineVideoStream => {
                 Tag::DefineVideoStream(tag_reader.read_define_video_stream()?)
             }
@@ -459,30 +468,18 @@ impl<'a> Reader<'a> {
                 Tag::EnableTelemetry { password_hash }
             }
             TagCode::ImportAssets => {
-                let url = tag_reader.read_str()?;
-                let num_imports = tag_reader.read_u16()?;
-                let mut imports = Vec::with_capacity(num_imports as usize);
-                for _ in 0..num_imports {
-                    imports.push(ExportedAsset {
-                        id: tag_reader.read_u16()?,
-                        name: tag_reader.read_str()?,
-                    });
+                let import_assets = tag_reader.read_import_assets()?;
+                Tag::ImportAssets {
+                    url: import_assets.0,
+                    imports: import_assets.1,
                 }
-                Tag::ImportAssets { url, imports }
             }
             TagCode::ImportAssets2 => {
-                let url = tag_reader.read_str()?;
-                tag_reader.read_u8()?; // Reserved; must be 1
-                tag_reader.read_u8()?; // Reserved; must be 0
-                let num_imports = tag_reader.read_u16()?;
-                let mut imports = Vec::with_capacity(num_imports as usize);
-                for _ in 0..num_imports {
-                    imports.push(ExportedAsset {
-                        id: tag_reader.read_u16()?,
-                        name: tag_reader.read_str()?,
-                    });
+                let import_assets = tag_reader.read_import_assets_2()?;
+                Tag::ImportAssets {
+                    url: import_assets.0,
+                    imports: import_assets.1,
                 }
-                Tag::ImportAssets { url, imports }
             }
 
             TagCode::JpegTables => {
@@ -529,7 +526,11 @@ impl<'a> Reader<'a> {
                 splitter_rect: tag_reader.read_rectangle()?,
             },
 
-            TagCode::DoAbc => Tag::DoAbc(tag_reader.read_do_abc()?),
+            TagCode::DoAbc => {
+                let data = tag_reader.read_slice_to_end();
+                Tag::DoAbc(data)
+            }
+            TagCode::DoAbc2 => Tag::DoAbc2(tag_reader.read_do_abc_2()?),
 
             TagCode::DoAction => {
                 let action_data = tag_reader.read_slice_to_end();
@@ -742,7 +743,6 @@ impl<'a> Reader<'a> {
             records,
             actions: vec![ButtonAction {
                 conditions: ButtonActionCondition::OVER_DOWN_TO_OVER_UP,
-                key_code: None,
                 action_data,
             }],
         })
@@ -842,7 +842,7 @@ impl<'a> Reader<'a> {
         let color_transform = if version >= 2 {
             self.read_color_transform(true)?
         } else {
-            ColorTransform::new()
+            ColorTransform::IDENTITY
         };
         let mut filters = vec![];
         if (flags & 0b1_0000) != 0 {
@@ -871,9 +871,7 @@ impl<'a> Reader<'a> {
     fn read_button_action(&mut self) -> Result<(ButtonAction<'a>, bool)> {
         let length = self.read_u16()?;
         let flags = self.read_u16()?;
-        let mut conditions = ButtonActionCondition::from_bits_truncate(flags);
-        let key_code = (flags >> 9) as u8;
-        conditions.set(ButtonActionCondition::KEY_PRESS, key_code != 0);
+        let conditions = ButtonActionCondition::from_bits_retain(flags);
         let action_data = if length >= 4 {
             self.read_slice(length as usize - 4)?
         } else if length == 0 {
@@ -888,7 +886,6 @@ impl<'a> Reader<'a> {
         Ok((
             ButtonAction {
                 conditions,
-                key_code: if key_code != 0 { Some(key_code) } else { None },
                 action_data,
             },
             length != 0,
@@ -1159,7 +1156,7 @@ impl<'a> Reader<'a> {
             } else {
                 self.read_u8()?.into()
             },
-            adjustment: Twips::new(self.read_i16()?),
+            adjustment: Twips::new(self.read_i16()?.into()),
         })
     }
 
@@ -1324,8 +1321,8 @@ impl<'a> Reader<'a> {
     }
 
     fn read_morph_line_style(&mut self, shape_version: u8) -> Result<(LineStyle, LineStyle)> {
-        let start_width = Twips::new(self.read_u16()?);
-        let end_width = Twips::new(self.read_u16()?);
+        let start_width = Twips::new(self.read_u16()?.into());
+        let end_width = Twips::new(self.read_u16()?.into());
         if shape_version < 2 {
             let start_color = self.read_rgba()?;
             let end_color = self.read_rgba()?;
@@ -1338,7 +1335,7 @@ impl<'a> Reader<'a> {
             ))
         } else {
             // MorphLineStyle2 in DefineMorphShape2.
-            let mut flags = LineStyleFlag::from_bits_truncate(self.read_u16()?);
+            let mut flags = LineStyleFlag::from_bits_retain(self.read_u16()?);
             // Verify valid cap and join styles.
             if flags.contains(LineStyleFlag::JOIN_STYLE) {
                 log::warn!("Invalid line join style");
@@ -1642,7 +1639,7 @@ impl<'a> Reader<'a> {
     }
 
     fn read_line_style(&mut self, shape_version: u8) -> Result<LineStyle> {
-        let width = Twips::new(self.read_u16()?);
+        let width = Twips::new(self.read_u16()?.into());
         if shape_version < 4 {
             // LineStyle1
             let color = if shape_version >= 3 {
@@ -1653,7 +1650,7 @@ impl<'a> Reader<'a> {
             Ok(LineStyle::new().with_width(width).with_color(color))
         } else {
             // LineStyle2 in DefineShape4
-            let mut flags = LineStyleFlag::from_bits_truncate(self.read_u16()?);
+            let mut flags = LineStyleFlag::from_bits_retain(self.read_u16()?);
             // Verify valid cap and join styles.
             if flags.contains(LineStyleFlag::JOIN_STYLE) {
                 log::warn!("Invalid line join style");
@@ -1740,67 +1737,79 @@ impl<'a> Reader<'a> {
                 let delta_x = if !is_axis_aligned || !is_vertical {
                     bits.read_sbits_twips(num_bits)?
                 } else {
-                    Default::default()
+                    Twips::ZERO
                 };
                 let delta_y = if !is_axis_aligned || is_vertical {
                     bits.read_sbits_twips(num_bits)?
                 } else {
-                    Default::default()
+                    Twips::ZERO
                 };
-                Some(ShapeRecord::StraightEdge { delta_x, delta_y })
+                Some(ShapeRecord::StraightEdge {
+                    delta: PointDelta::new(delta_x, delta_y),
+                })
             } else {
                 // CurvedEdge
+                let control_delta_x = bits.read_sbits_twips(num_bits)?;
+                let control_delta_y = bits.read_sbits_twips(num_bits)?;
+                let anchor_delta_x = bits.read_sbits_twips(num_bits)?;
+                let anchor_delta_y = bits.read_sbits_twips(num_bits)?;
                 Some(ShapeRecord::CurvedEdge {
-                    control_delta_x: bits.read_sbits_twips(num_bits)?,
-                    control_delta_y: bits.read_sbits_twips(num_bits)?,
-                    anchor_delta_x: bits.read_sbits_twips(num_bits)?,
-                    anchor_delta_y: bits.read_sbits_twips(num_bits)?,
+                    control_delta: PointDelta::new(control_delta_x, control_delta_y),
+                    anchor_delta: PointDelta::new(anchor_delta_x, anchor_delta_y),
                 })
             }
         } else {
-            let flags = bits.read_ubits(5)?;
-            if flags != 0 {
+            let flags = ShapeRecordFlag::from_bits_truncate(bits.read_ubits(5)? as u8);
+            if !flags.is_empty() {
                 // StyleChange
                 let num_fill_bits = context.num_fill_bits as u32;
                 let num_line_bits = context.num_line_bits as u32;
-                let mut new_style = StyleChangeData {
-                    move_to: None,
-                    fill_style_0: None,
-                    fill_style_1: None,
-                    line_style: None,
-                    new_styles: None,
-                };
-                if (flags & 0b1) != 0 {
-                    // move
+                let move_to = if flags.contains(ShapeRecordFlag::MOVE_TO) {
                     let num_bits = bits.read_ubits(5)?;
-                    new_style.move_to = Some((
-                        bits.read_sbits_twips(num_bits)?,
-                        bits.read_sbits_twips(num_bits)?,
-                    ));
-                }
-                if (flags & 0b10) != 0 {
-                    new_style.fill_style_0 = Some(bits.read_ubits(num_fill_bits)?);
-                }
-                if (flags & 0b100) != 0 {
-                    new_style.fill_style_1 = Some(bits.read_ubits(num_fill_bits)?);
-                }
-                if (flags & 0b1000) != 0 {
-                    new_style.line_style = Some(bits.read_ubits(num_line_bits)?);
-                }
+                    let move_x = bits.read_sbits_twips(num_bits)?;
+                    let move_y = bits.read_sbits_twips(num_bits)?;
+                    Some(Point::new(move_x, move_y))
+                } else {
+                    None
+                };
+                let fill_style_0 = if flags.contains(ShapeRecordFlag::FILL_STYLE_0) {
+                    Some(bits.read_ubits(num_fill_bits)?)
+                } else {
+                    None
+                };
+                let fill_style_1 = if flags.contains(ShapeRecordFlag::FILL_STYLE_1) {
+                    Some(bits.read_ubits(num_fill_bits)?)
+                } else {
+                    None
+                };
+                let line_style = if flags.contains(ShapeRecordFlag::LINE_STYLE) {
+                    Some(bits.read_ubits(num_line_bits)?)
+                } else {
+                    None
+                };
                 // The spec says that StyleChangeRecord can only occur in DefineShape2+,
                 // but SWFs in the wild exist with them in DefineShape1 (generated by third party tools),
                 // and these run correctly in the Flash Player.
-                if (flags & 0b10000) != 0 {
+                let new_styles = if flags.contains(ShapeRecordFlag::NEW_STYLES) {
                     let mut reader = Reader::new(bits.reader(), context.swf_version);
                     let (new_styles, num_fill_bits, num_line_bits) =
                         reader.read_shape_styles(context.shape_version)?;
+                    *bits.reader() = reader.input;
                     context.num_fill_bits = num_fill_bits;
                     context.num_line_bits = num_line_bits;
-                    new_style.new_styles = Some(new_styles);
-                    *bits.reader() = reader.input;
-                }
-                Some(ShapeRecord::StyleChange(Box::new(new_style)))
+                    Some(new_styles)
+                } else {
+                    None
+                };
+                Some(ShapeRecord::StyleChange(Box::new(StyleChangeData {
+                    move_to,
+                    fill_style_0,
+                    fill_style_1,
+                    line_style,
+                    new_styles,
+                })))
             } else {
+                // EndShapeRecord
                 None
             }
         };
@@ -1830,6 +1839,37 @@ impl<'a> Reader<'a> {
             });
         }
         Ok(exports)
+    }
+
+    pub fn read_import_assets(&mut self) -> Result<(&'a SwfStr, ExportAssets<'a>)> {
+        let url = self.read_str()?;
+        let num_imports = self.read_u16()?;
+        let mut imports = Vec::with_capacity(num_imports as usize);
+        for _ in 0..num_imports {
+            imports.push(ExportedAsset {
+                id: self.read_u16()?,
+                name: self.read_str()?,
+            });
+        }
+
+        Ok((url, imports))
+    }
+
+    pub fn read_import_assets_2(&mut self) -> Result<(&'a SwfStr, ExportAssets<'a>)> {
+        let url = self.read_str()?;
+        self.read_u8()?; // Reserved; must be 1
+        self.read_u8()?; // Reserved; must be 0
+        let num_imports = self.read_u16()?;
+        let mut imports = Vec::with_capacity(num_imports as usize);
+
+        for _ in 0..num_imports {
+            imports.push(ExportedAsset {
+                id: self.read_u16()?,
+                name: self.read_str()?,
+            });
+        }
+
+        Ok((url, imports))
     }
 
     pub fn read_place_object(&mut self) -> Result<PlaceObject<'a>> {
@@ -2053,33 +2093,24 @@ impl<'a> Reader<'a> {
         let bits = if self.version >= 6 {
             self.read_u32().unwrap_or_default()
         } else {
-            // SWF19 pp. 48-50: For SWFv5, the ClipEventFlags only had 2 bytes of flags,
-            // with the 2nd byte reserved (all 0).
-            // This was expanded to 4 bytes in SWFv6.
-            (self.read_u16().unwrap_or_default() as u8).into()
+            // SWF19 pp. 48-50: For SWFv5, ClipEventFlags only had 2 bytes of flags. This was
+            // expanded to 4 bytes in SWFv6.
+            // The 2nd byte is documented to be reserved (all 0), but it's not enforced by Flash.
+            self.read_u16().unwrap_or_default().into()
         };
 
         ClipEventFlag::from_bits_truncate(bits)
     }
 
     fn read_drop_shadow_filter(&mut self) -> Result<DropShadowFilter> {
-        let color = self.read_rgba()?;
-        let blur_x = self.read_fixed16()?;
-        let blur_y = self.read_fixed16()?;
-        let angle = self.read_fixed16()?;
-        let distance = self.read_fixed16()?;
-        let strength = self.read_fixed8()?;
-        let flags = self.read_u8()?;
         Ok(DropShadowFilter {
-            color,
-            blur_x,
-            blur_y,
-            angle,
-            distance,
-            strength,
-            is_inner: flags & 0b1000_0000 != 0,
-            is_knockout: flags & 0b0100_0000 != 0,
-            num_passes: flags & 0b0001_1111,
+            color: self.read_rgba()?,
+            blur_x: self.read_fixed16()?,
+            blur_y: self.read_fixed16()?,
+            angle: self.read_fixed16()?,
+            distance: self.read_fixed16()?,
+            strength: self.read_fixed8()?,
+            flags: DropShadowFilterFlags::from_bits_retain(self.read_u8()?),
         })
     }
 
@@ -2087,48 +2118,31 @@ impl<'a> Reader<'a> {
         Ok(BlurFilter {
             blur_x: self.read_fixed16()?,
             blur_y: self.read_fixed16()?,
-            num_passes: (self.read_u8()? & 0b1111_1000) >> 3,
+            flags: BlurFilterFlags::from_bits_retain(self.read_u8()?),
         })
     }
 
     fn read_glow_filter(&mut self) -> Result<GlowFilter> {
-        let color = self.read_rgba()?;
-        let blur_x = self.read_fixed16()?;
-        let blur_y = self.read_fixed16()?;
-        let strength = self.read_fixed8()?;
-        let flags = self.read_u8()?;
         Ok(GlowFilter {
-            color,
-            blur_x,
-            blur_y,
-            strength,
-            is_inner: flags & 0b1000_0000 != 0,
-            is_knockout: flags & 0b0100_0000 != 0,
-            num_passes: flags & 0b0001_1111,
+            color: self.read_rgba()?,
+            blur_x: self.read_fixed16()?,
+            blur_y: self.read_fixed16()?,
+            strength: self.read_fixed8()?,
+            flags: GlowFilterFlags::from_bits_retain(self.read_u8()?),
         })
     }
 
     fn read_bevel_filter(&mut self) -> Result<BevelFilter> {
-        let shadow_color = self.read_rgba()?;
-        let highlight_color = self.read_rgba()?;
-        let blur_x = self.read_fixed16()?;
-        let blur_y = self.read_fixed16()?;
-        let angle = self.read_fixed16()?;
-        let distance = self.read_fixed16()?;
-        let strength = self.read_fixed8()?;
-        let flags = self.read_u8()?;
         Ok(BevelFilter {
-            shadow_color,
-            highlight_color,
-            blur_x,
-            blur_y,
-            angle,
-            distance,
-            strength,
-            is_inner: flags & 0b1000_0000 != 0,
-            is_knockout: flags & 0b0100_0000 != 0,
-            is_on_top: flags & 0b0001_0000 != 0,
-            num_passes: flags & 0b0000_1111,
+            // Note that the color order is wrong in the spec, it's highlight then shadow.
+            highlight_color: self.read_rgba()?,
+            shadow_color: self.read_rgba()?,
+            blur_x: self.read_fixed16()?,
+            blur_y: self.read_fixed16()?,
+            angle: self.read_fixed16()?,
+            distance: self.read_fixed16()?,
+            strength: self.read_fixed8()?,
+            flags: BevelFilterFlags::from_bits_retain(self.read_u8()?),
         })
     }
 
@@ -2145,54 +2159,42 @@ impl<'a> Reader<'a> {
                 ratio: self.read_u8()?,
             });
         }
-        let blur_x = self.read_fixed16()?;
-        let blur_y = self.read_fixed16()?;
-        let angle = self.read_fixed16()?;
-        let distance = self.read_fixed16()?;
-        let strength = self.read_fixed8()?;
-        let flags = self.read_u8()?;
         Ok(GradientFilter {
             colors: gradient_records,
-            blur_x,
-            blur_y,
-            angle,
-            distance,
-            strength,
-            is_inner: flags & 0b1000_0000 != 0,
-            is_knockout: flags & 0b0100_0000 != 0,
-            is_on_top: flags & 0b0001_0000 != 0,
-            num_passes: flags & 0b0000_1111,
+            blur_x: self.read_fixed16()?,
+            blur_y: self.read_fixed16()?,
+            angle: self.read_fixed16()?,
+            distance: self.read_fixed16()?,
+            strength: self.read_fixed8()?,
+            flags: GradientFilterFlags::from_bits_retain(self.read_u8()?),
         })
     }
 
     fn read_convolution_filter(&mut self) -> Result<ConvolutionFilter> {
         let num_matrix_cols = self.read_u8()?;
         let num_matrix_rows = self.read_u8()?;
-        let divisor = self.read_fixed16()?;
-        let bias = self.read_fixed16()?;
+        let divisor = self.read_f32()?;
+        let bias = self.read_f32()?;
         let num_entries = num_matrix_cols * num_matrix_rows;
         let mut matrix = Vec::with_capacity(num_entries as usize);
         for _ in 0..num_entries {
-            matrix.push(self.read_fixed16()?);
+            matrix.push(self.read_f32()?);
         }
-        let default_color = self.read_rgba()?;
-        let flags = self.read_u8()?;
         Ok(ConvolutionFilter {
             num_matrix_cols,
             num_matrix_rows,
             divisor,
             bias,
             matrix,
-            default_color,
-            is_clamped: (flags & 0b10) != 0,
-            is_preserve_alpha: (flags & 0b1) != 0,
+            default_color: self.read_rgba()?,
+            flags: ConvolutionFilterFlags::from_bits_truncate(self.read_u8()?),
         })
     }
 
     fn read_color_matrix_filter(&mut self) -> Result<ColorMatrixFilter> {
-        let mut matrix = [Fixed16::ZERO; 20];
+        let mut matrix = [0.0; 20];
         for m in &mut matrix {
-            *m = self.read_fixed16()?;
+            *m = self.read_f32()?;
         }
         Ok(ColorMatrixFilter { matrix })
     }
@@ -2336,17 +2338,17 @@ impl<'a> Reader<'a> {
             None
         };
         let x_offset = if flags & 0b1 != 0 {
-            Some(Twips::new(self.read_i16()?))
+            Some(Twips::new(self.read_i16()?.into()))
         } else {
             None
         };
         let y_offset = if flags & 0b10 != 0 {
-            Some(Twips::new(self.read_i16()?))
+            Some(Twips::new(self.read_i16()?.into()))
         } else {
             None
         };
         let height = if flags & 0b1000 != 0 {
-            Some(Twips::new(self.read_u16()?))
+            Some(Twips::new(self.read_u16()?.into()))
         } else {
             None
         };
@@ -2388,7 +2390,7 @@ impl<'a> Reader<'a> {
         let height = if flags.intersects(EditTextFlag::HAS_FONT | EditTextFlag::HAS_FONT_CLASS) {
             // SWF19 errata: The specs say this field is only present if the HasFont flag is set,
             // but it's also present when the HasFontClass flag is set.
-            Twips::new(self.read_u16()?)
+            Twips::new(self.read_u16()?.into())
         } else {
             Twips::ZERO
         };
@@ -2406,10 +2408,12 @@ impl<'a> Reader<'a> {
             TextLayout {
                 align: TextAlign::from_u8(self.read_u8()?)
                     .ok_or_else(|| Error::invalid_data("Invalid edit text alignment"))?,
-                left_margin: Twips::new(self.read_u16()?),
-                right_margin: Twips::new(self.read_u16()?),
-                indent: Twips::new(self.read_u16()?),
-                leading: Twips::new(self.read_i16()?),
+                left_margin: Twips::new(self.read_u16()?.into()),
+                right_margin: Twips::new(self.read_u16()?.into()),
+                // Note: the documentation says that indent is UI16,
+                //       in reality it seems to be SI16.
+                indent: Twips::new(self.read_i16()?.into()),
+                leading: Twips::new(self.read_i16()?.into()),
             }
         } else {
             TextLayout {
@@ -2512,15 +2516,15 @@ impl<'a> Reader<'a> {
             format,
             width,
             height,
-            data,
+            data: Cow::Borrowed(data),
         })
     }
 
-    pub fn read_do_abc(&mut self) -> Result<DoAbc<'a>> {
-        let flags = DoAbcFlag::from_bits_truncate(self.read_u32()?);
+    pub fn read_do_abc_2(&mut self) -> Result<DoAbc2<'a>> {
+        let flags = DoAbc2Flag::from_bits_truncate(self.read_u32()?);
         let name = self.read_str()?;
         let data = self.read_slice_to_end();
-        Ok(DoAbc { flags, name, data })
+        Ok(DoAbc2 { flags, name, data })
     }
 
     pub fn read_product_info(&mut self) -> Result<ProductInfo> {
@@ -2571,9 +2575,7 @@ pub fn read_compression_type<R: Read>(mut input: R) -> Result<Compression> {
 #[allow(clippy::unusual_byte_groupings)]
 pub mod tests {
     use super::*;
-    use crate::tag_code::TagCode;
     use crate::test_data;
-    use std::vec::Vec;
 
     fn reader(data: &[u8]) -> Reader<'_> {
         let default_version = 13;
@@ -2797,7 +2799,15 @@ pub mod tests {
         let buf = [0b00000_000];
         let mut reader = Reader::new(&buf[..], 1);
         let rectangle = reader.read_rectangle().unwrap();
-        assert_eq!(rectangle, Default::default());
+        assert_eq!(
+            rectangle,
+            Rectangle {
+                x_min: Twips::ZERO,
+                y_min: Twips::ZERO,
+                x_max: Twips::ZERO,
+                y_max: Twips::ZERO,
+            }
+        );
     }
 
     #[test]
@@ -2808,10 +2818,10 @@ pub mod tests {
         assert_eq!(
             rectangle,
             Rectangle {
-                x_min: Twips::from_pixels(-1.0),
-                y_min: Twips::from_pixels(-1.0),
-                x_max: Twips::from_pixels(1.0),
-                y_max: Twips::from_pixels(1.0),
+                x_min: -Twips::ONE_PX,
+                y_min: -Twips::ONE_PX,
+                x_max: Twips::ONE_PX,
+                y_max: Twips::ONE_PX,
             }
         );
     }
@@ -2825,8 +2835,8 @@ pub mod tests {
             assert_eq!(
                 matrix,
                 Matrix {
-                    tx: Twips::from_pixels(0.0),
-                    ty: Twips::from_pixels(0.0),
+                    tx: Twips::ZERO,
+                    ty: Twips::ZERO,
                     a: Fixed16::ONE,
                     b: Fixed16::ZERO,
                     c: Fixed16::ZERO,
@@ -2928,7 +2938,7 @@ pub mod tests {
         );
 
         let mut matrix = Matrix::IDENTITY;
-        matrix.tx = Twips::from_pixels(1.0);
+        matrix.tx = Twips::ONE_PX;
         let fill_style = FillStyle::Bitmap {
             id: 33,
             matrix,
@@ -2945,7 +2955,7 @@ pub mod tests {
     fn read_line_style() {
         // DefineShape1 and 2 read RGB colors.
         let line_style = LineStyle::new()
-            .with_width(Twips::from_pixels(0.0))
+            .with_width(Twips::ZERO)
             .with_color(Color::from_rgba(0xffff0000));
         assert_eq!(
             reader(&[0, 0, 255, 0, 0]).read_line_style(2).unwrap(),
@@ -2981,8 +2991,7 @@ pub mod tests {
         };
 
         let shape_record = ShapeRecord::StraightEdge {
-            delta_x: Twips::from_pixels(1.0),
-            delta_y: Twips::from_pixels(1.0),
+            delta: PointDelta::from_pixels(1.0, 1.0),
         };
         assert_eq!(
             read(&[0b11_0100_1_0, 0b1010_0010, 0b100_00000]),
@@ -2990,14 +2999,12 @@ pub mod tests {
         );
 
         let shape_record = ShapeRecord::StraightEdge {
-            delta_x: Twips::from_pixels(0.0),
-            delta_y: Twips::from_pixels(-1.0),
+            delta: PointDelta::from_pixels(0.0, -1.0),
         };
         assert_eq!(read(&[0b11_0100_0_1, 0b101100_00]), shape_record);
 
         let shape_record = ShapeRecord::StraightEdge {
-            delta_x: Twips::from_pixels(-1.5),
-            delta_y: Twips::from_pixels(0.0),
+            delta: PointDelta::from_pixels(-1.5, 0.0),
         };
         assert_eq!(read(&[0b11_0100_0_0, 0b100010_00]), shape_record);
     }
@@ -3059,8 +3066,8 @@ pub mod tests {
                 b: Fixed16::ZERO,
                 c: Fixed16::ZERO,
                 d: Fixed16::ONE,
-                tx: Twips::from_pixels(0.0),
-                ty: Twips::from_pixels(0.0),
+                tx: Twips::ZERO,
+                ty: Twips::ZERO,
             }),
             color_transform: None,
             ratio: None,

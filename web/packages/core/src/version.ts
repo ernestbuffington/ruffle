@@ -2,16 +2,10 @@
  * A representation of a semver 2 compliant version string
  */
 export class Version {
-    private readonly major: number;
-    private readonly minor: number;
-    private readonly patch: number;
-    private readonly prIdent: string[] | null;
-    private readonly buildIdent: string[] | null;
-
     /**
      * Construct a Version from specific components.
      *
-     * If you wish to parse a string into a Version then please use [[fromSemver]].
+     * If you wish to parse a string into a Version then please use {@link fromSemver}.
      *
      * @param major The major version component.
      * @param minor The minor version component.
@@ -20,18 +14,12 @@ export class Version {
      * @param buildIdent A list of build identifiers, if any
      */
     constructor(
-        major: number,
-        minor: number,
-        patch: number,
-        prIdent: string[] | null,
-        buildIdent: string[] | null
-    ) {
-        this.major = major;
-        this.minor = minor;
-        this.patch = patch;
-        this.prIdent = prIdent;
-        this.buildIdent = buildIdent;
-    }
+        private readonly major: number,
+        private readonly minor: number,
+        private readonly patch: number,
+        private readonly prIdent: string[] | null,
+        private readonly buildIdent: string[] | null,
+    ) {}
 
     /**
      * Construct a version from a semver 2 compliant string.
@@ -45,10 +33,10 @@ export class Version {
      */
     static fromSemver(versionString: string): Version {
         const buildSplit = versionString.split("+"),
-            prSplit = buildSplit[0].split("-"),
-            versionSplit = prSplit[0].split(".");
+            prSplit = buildSplit[0]!.split("-"),
+            versionSplit = prSplit[0]!.split(".");
 
-        const major = parseInt(versionSplit[0], 10);
+        const major = parseInt(versionSplit[0]!, 10);
         let minor = 0;
         let patch = 0;
         let prIdent = null;
@@ -135,6 +123,8 @@ export class Version {
 
         if (this.prIdent === null && other.prIdent !== null) {
             return true;
+        } else if (this.prIdent !== null && other.prIdent === null) {
+            return false;
         } else if (this.prIdent !== null && other.prIdent !== null) {
             const isNumeric = /^[0-9]*$/;
             for (
@@ -142,44 +132,72 @@ export class Version {
                 i < this.prIdent.length && i < other.prIdent.length;
                 i += 1
             ) {
-                if (
-                    !isNumeric.test(this.prIdent[i]) &&
-                    isNumeric.test(other.prIdent[i])
-                ) {
+                const numericThis = isNumeric.test(other.prIdent[i]!);
+                const numericOther = isNumeric.test(this.prIdent[i]!);
+                if (!numericOther && numericThis) {
                     return true;
-                } else if (
-                    isNumeric.test(this.prIdent[i]) &&
-                    isNumeric.test(other.prIdent[i])
-                ) {
-                    if (
-                        parseInt(this.prIdent[i], 10) >
-                        parseInt(other.prIdent[i], 10)
-                    ) {
+                } else if (numericOther && numericThis) {
+                    const intThis = parseInt(this.prIdent[i]!, 10);
+                    const intOther = parseInt(other.prIdent[i]!, 10);
+                    if (intThis > intOther) {
                         return true;
-                    } else if (
-                        parseInt(this.prIdent[i], 10) <
-                        parseInt(other.prIdent[i], 10)
-                    ) {
+                    } else if (intThis < intOther) {
                         return false;
                     }
-                } else if (
-                    isNumeric.test(this.prIdent[i]) &&
-                    !isNumeric.test(other.prIdent[i])
-                ) {
+                } else if (numericOther && !numericThis) {
                     return false;
-                } else if (
-                    !isNumeric.test(this.prIdent[i]) &&
-                    !isNumeric.test(other.prIdent[i])
-                ) {
-                    if (this.prIdent[i] > other.prIdent[i]) {
+                } else if (!numericOther && !numericThis) {
+                    if (this.prIdent[i]! > other.prIdent[i]!) {
                         return true;
-                    } else if (this.prIdent[i] < other.prIdent[i]) {
+                    } else if (this.prIdent[i]! < other.prIdent[i]!) {
                         return false;
                     }
                 }
             }
 
-            return this.prIdent.length > other.prIdent.length;
+            if (this.prIdent.length > other.prIdent.length) {
+                return true;
+            } else if (this.prIdent.length < other.prIdent.length) {
+                return false;
+            }
+        }
+
+        // Unlike prerelease, we prefer to have a build ident than to not
+        if (this.buildIdent !== null && other.buildIdent === null) {
+            return true;
+        } else if (this.buildIdent === null && other.buildIdent !== null) {
+            return false;
+        } else if (this.buildIdent !== null && other.buildIdent !== null) {
+            const isNumeric = /^[0-9]*$/;
+            for (
+                let i = 0;
+                i < this.buildIdent.length && i < other.buildIdent.length;
+                i += 1
+            ) {
+                const numricThis = isNumeric.test(this.buildIdent[i]!);
+                const numericOther = isNumeric.test(other.buildIdent[i]!);
+                if (!numricThis && numericOther) {
+                    return true;
+                } else if (numricThis && numericOther) {
+                    const intThis = parseInt(this.buildIdent[i]!, 10);
+                    const intOther = parseInt(other.buildIdent[i]!, 10);
+                    if (intThis > intOther) {
+                        return true;
+                    } else if (intThis < intOther) {
+                        return false;
+                    }
+                } else if (numricThis && !numericOther) {
+                    return false;
+                } else if (!numricThis && !numericOther) {
+                    if (this.buildIdent[i]! > other.buildIdent[i]!) {
+                        return true;
+                    } else if (this.buildIdent[i]! < other.buildIdent[i]!) {
+                        return false;
+                    }
+                }
+            }
+
+            return this.buildIdent.length > other.buildIdent.length;
         }
 
         return false;

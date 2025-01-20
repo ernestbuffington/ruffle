@@ -1,15 +1,16 @@
 //! XML Tree structure
 
-use crate::avm1::Activation;
 use crate::avm1::Attribute;
-use crate::avm1::XmlNodeObject;
-use crate::avm1::{Error, Object, ScriptObject, TObject, Value};
-use crate::string::{AvmString, WStr, WString};
+use crate::avm1::{Activation, NativeObject};
+use crate::avm1::{ArrayObject, Error, Object, ScriptObject, TObject, Value};
+use crate::string::{AvmString, StringContext, WStr, WString};
 use crate::xml;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, GcCell, Mutation};
 use quick_xml::escape::escape;
 use quick_xml::events::BytesStart;
+use regress::Regex;
 use std::fmt;
+use std::sync::OnceLock;
 
 pub const ELEMENT_NODE: u8 = 1;
 pub const TEXT_NODE: u8 = 3;
@@ -45,18 +46,17 @@ pub struct XmlNodeData<'gc> {
     /// Attributes of the element.
     attributes: ScriptObject<'gc>,
 
+    /// The array object used for AS2 `.childNodes`
+    cached_child_nodes: Option<ArrayObject<'gc>>,
+
     /// Child nodes of this element.
     children: Vec<XmlNode<'gc>>,
 }
 
 impl<'gc> XmlNode<'gc> {
     /// Construct a new XML node.
-    pub fn new(
-        mc: MutationContext<'gc, '_>,
-        node_type: u8,
-        node_value: Option<AvmString<'gc>>,
-    ) -> Self {
-        Self(GcCell::allocate(
+    pub fn new(mc: &Mutation<'gc>, node_type: u8, node_value: Option<AvmString<'gc>>) -> Self {
+        Self(GcCell::new(
             mc,
             XmlNodeData {
                 script_object: None,
@@ -66,6 +66,7 @@ impl<'gc> XmlNode<'gc> {
                 node_type,
                 node_value,
                 attributes: ScriptObject::new(mc, None),
+                cached_child_nodes: None,
                 children: Vec::new(),
             },
         ))
@@ -79,30 +80,27 @@ impl<'gc> XmlNode<'gc> {
         activation: &mut Activation<'_, 'gc>,
         bs: BytesStart<'_>,
         id_map: ScriptObject<'gc>,
+        decoder: quick_xml::Decoder,
     ) -> Result<Self, quick_xml::Error> {
-        let name = AvmString::new_utf8_bytes(activation.context.gc_context, bs.name());
-        let mut node = Self::new(activation.context.gc_context, ELEMENT_NODE, Some(name));
+        let name = AvmString::new_utf8_bytes(activation.gc(), bs.name().into_inner());
+        let mut node = Self::new(activation.gc(), ELEMENT_NODE, Some(name));
 
         // Reverse attributes so they appear in the `PropertyMap` in their definition order.
         let attributes: Result<Vec<_>, _> = bs.attributes().collect();
         let attributes = attributes?;
         for attribute in attributes.iter().rev() {
-            let key = AvmString::new_utf8_bytes(activation.context.gc_context, attribute.key);
-            let value_bytes = attribute.unescaped_value()?;
-            let value = AvmString::new_utf8_bytes(activation.context.gc_context, &value_bytes);
+            let key = AvmString::new_utf8_bytes(activation.gc(), attribute.key.into_inner());
+            let value_str = custom_unescape(&attribute.value, decoder)?;
+            let value = AvmString::new_utf8_bytes(activation.gc(), value_str.as_bytes());
 
             // Insert an attribute.
-            node.attributes().define_value(
-                activation.context.gc_context,
-                key,
-                value.into(),
-                Attribute::empty(),
-            );
+            node.attributes()
+                .define_value(activation.gc(), key, value.into(), Attribute::empty());
 
             // Update the ID map.
-            if attribute.key == b"id" {
+            if attribute.key.into_inner() == b"id" {
                 id_map.define_value(
-                    activation.context.gc_context,
+                    activation.gc(),
                     value,
                     node.script_object(activation).into(),
                     Attribute::empty(),
@@ -124,7 +122,7 @@ impl<'gc> XmlNode<'gc> {
     }
 
     /// Set this node's previous sibling.
-    fn set_prev_sibling(&mut self, mc: MutationContext<'gc, '_>, new_prev: Option<XmlNode<'gc>>) {
+    fn set_prev_sibling(&mut self, mc: &Mutation<'gc>, new_prev: Option<XmlNode<'gc>>) {
         self.0.write(mc).prev_sibling = new_prev;
     }
 
@@ -134,7 +132,7 @@ impl<'gc> XmlNode<'gc> {
     }
 
     /// Set this node's next sibling.
-    fn set_next_sibling(&mut self, mc: MutationContext<'gc, '_>, new_next: Option<XmlNode<'gc>>) {
+    fn set_next_sibling(&mut self, mc: &Mutation<'gc>, new_next: Option<XmlNode<'gc>>) {
         self.0.write(mc).next_sibling = new_next;
     }
 
@@ -145,7 +143,7 @@ impl<'gc> XmlNode<'gc> {
     ///
     /// This is the opposite of `adopt_siblings` - the former adds a node to a
     /// new sibling list, and this removes it from the current one.
-    fn disown_siblings(&mut self, mc: MutationContext<'gc, '_>) {
+    fn disown_siblings(&mut self, mc: &Mutation<'gc>) {
         let old_prev = self.prev_sibling();
         let old_next = self.next_sibling();
 
@@ -162,7 +160,7 @@ impl<'gc> XmlNode<'gc> {
     }
 
     /// Unset the parent of this node.
-    fn disown_parent(&mut self, mc: MutationContext<'gc, '_>) {
+    fn disown_parent(&mut self, mc: &Mutation<'gc>) {
         self.0.write(mc).parent = None;
     }
 
@@ -175,7 +173,7 @@ impl<'gc> XmlNode<'gc> {
     /// sibling from its current list, and this adds the sibling to a new one.
     fn adopt_siblings(
         &mut self,
-        mc: MutationContext<'gc, '_>,
+        mc: &Mutation<'gc>,
         new_prev: Option<XmlNode<'gc>>,
         new_next: Option<XmlNode<'gc>>,
     ) {
@@ -194,7 +192,7 @@ impl<'gc> XmlNode<'gc> {
     /// Remove node from this node's child list.
     ///
     /// This function yields Err if this node cannot accept child nodes.
-    fn orphan_child(&mut self, mc: MutationContext<'gc, '_>, child: XmlNode<'gc>) {
+    fn orphan_child(&mut self, mc: &Mutation<'gc>, child: XmlNode<'gc>) {
         if let Some(position) = self.child_position(child) {
             self.0.write(mc).children.remove(position);
         }
@@ -210,12 +208,7 @@ impl<'gc> XmlNode<'gc> {
     /// The `position` parameter is the position of the new child in
     /// this node's children list. This is used to find and link the child's
     /// siblings to each other.
-    pub fn insert_child(
-        &mut self,
-        mc: MutationContext<'gc, '_>,
-        position: usize,
-        mut child: XmlNode<'gc>,
-    ) {
+    pub fn insert_child(&mut self, mc: &Mutation<'gc>, position: usize, mut child: XmlNode<'gc>) {
         let is_cyclic = self
             .ancestors()
             .any(|ancestor| GcCell::ptr_eq(ancestor.0, child.0));
@@ -244,12 +237,12 @@ impl<'gc> XmlNode<'gc> {
     }
 
     /// Append a child element into the end of the child list of an element node.
-    pub fn append_child(&mut self, mc: MutationContext<'gc, '_>, child: XmlNode<'gc>) {
+    pub fn append_child(&mut self, mc: &Mutation<'gc>, child: XmlNode<'gc>) {
         self.insert_child(mc, self.children_len(), child);
     }
 
     /// Remove this node from its parent.
-    pub fn remove_node(&mut self, mc: MutationContext<'gc, '_>) {
+    pub fn remove_node(&mut self, mc: &Mutation<'gc>) {
         if let Some(parent) = self.parent() {
             // This is guaranteed to succeed, as `self` is a child of `parent`.
             let position = parent.child_position(*self).unwrap();
@@ -274,17 +267,17 @@ impl<'gc> XmlNode<'gc> {
         }
     }
 
-    pub fn local_name(self, gc_context: MutationContext<'gc, '_>) -> Option<AvmString<'gc>> {
+    pub fn local_name(self, gc_context: &Mutation<'gc>) -> Option<AvmString<'gc>> {
         self.node_name().map(|name| match name.find(b':') {
             Some(i) if i + 1 < name.len() => AvmString::new(gc_context, &name[i + 1..]),
             _ => name,
         })
     }
 
-    pub fn prefix(self, gc_context: MutationContext<'gc, '_>) -> Option<AvmString<'gc>> {
+    pub fn prefix(self, context: &mut StringContext<'gc>) -> Option<AvmString<'gc>> {
         self.node_name().map(|name| match name.find(b':') {
-            Some(i) if i + 1 < name.len() => AvmString::new(gc_context, &name[..i]),
-            _ => "".into(),
+            Some(i) if i + 1 < name.len() => AvmString::new(context.gc(), &name[..i]),
+            _ => context.empty(),
         })
     }
 
@@ -297,7 +290,7 @@ impl<'gc> XmlNode<'gc> {
         }
     }
 
-    pub fn set_node_value(self, gc_context: MutationContext<'gc, '_>, value: AvmString<'gc>) {
+    pub fn set_node_value(self, gc_context: &Mutation<'gc>, value: AvmString<'gc>) {
         self.0.write(gc_context).node_value = Some(value);
     }
 
@@ -348,11 +341,7 @@ impl<'gc> XmlNode<'gc> {
     /// This internal function *will* overwrite already extant objects, so only
     /// call this if you need to instantiate the script object for the first
     /// time. Attempting to call it a second time will panic.
-    pub fn introduce_script_object(
-        &mut self,
-        gc_context: MutationContext<'gc, '_>,
-        new_object: Object<'gc>,
-    ) {
+    pub fn introduce_script_object(&mut self, gc_context: &Mutation<'gc>, new_object: Object<'gc>) {
         assert!(self.get_script_object().is_none(), "An attempt was made to change the already-established link between script object and XML node. This has been denied and is likely a bug.");
         self.0.write(gc_context).script_object = Some(new_object);
     }
@@ -363,8 +352,15 @@ impl<'gc> XmlNode<'gc> {
         match self.get_script_object() {
             Some(object) => object,
             None => {
-                let proto = activation.context.avm1.prototypes().xml_node;
-                XmlNodeObject::from_xml_node(activation.context.gc_context, *self, proto).into()
+                let xml_node = activation.context.avm1.prototypes().xml_node_constructor;
+                let prototype = xml_node
+                    .get("prototype", activation)
+                    .map(|p| p.coerce_to_object(activation))
+                    .ok();
+                let object = ScriptObject::new(activation.gc(), prototype);
+                self.introduce_script_object(activation.gc(), object.into());
+                object.set_native(activation.gc(), NativeObject::XmlNode(*self));
+                object.into()
             }
         }
     }
@@ -374,16 +370,48 @@ impl<'gc> XmlNode<'gc> {
         self.0.read().attributes
     }
 
+    /// Gets a lazy-created .childNodes array
+    pub fn get_or_init_cached_child_nodes(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<ArrayObject<'gc>, Error<'gc>> {
+        let array = self.0.read().cached_child_nodes;
+        if let Some(array) = array {
+            Ok(array)
+        } else {
+            let array = ArrayObject::empty(activation);
+            self.0.write(activation.gc()).cached_child_nodes = Some(array);
+            self.refresh_cached_child_nodes(activation)?;
+            Ok(array)
+        }
+    }
+
+    /// Refreshes the .childNodes array. Call this after every child list mutation.
+    pub fn refresh_cached_child_nodes(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+    ) -> Result<(), Error<'gc>> {
+        let array = self.0.read().cached_child_nodes;
+        if let Some(array) = array {
+            array.set_length(activation, 0)?;
+            for (i, mut child) in self.children().enumerate() {
+                let value = child.script_object(activation).into();
+                array.set_element(activation, i as i32, value)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Create a duplicate copy of this node.
     ///
     /// If the `deep` flag is set true, then the entire node tree will be cloned.
-    pub fn duplicate(self, gc_context: MutationContext<'gc, '_>, deep: bool) -> Self {
+    pub fn duplicate(self, gc_context: &Mutation<'gc>, deep: bool) -> Self {
         let attributes = ScriptObject::new(gc_context, None);
         for (key, value) in self.attributes().own_properties() {
             attributes.define_value(gc_context, key, value, Attribute::empty());
         }
 
-        let mut clone = Self(GcCell::allocate(
+        let mut clone = Self(GcCell::new(
             gc_context,
             XmlNodeData {
                 script_object: None,
@@ -393,6 +421,7 @@ impl<'gc> XmlNode<'gc> {
                 node_type: self.0.read().node_type,
                 node_value: self.0.read().node_value,
                 attributes,
+                cached_child_nodes: None,
                 children: Vec::new(),
             },
         ));
@@ -452,12 +481,12 @@ impl<'gc> XmlNode<'gc> {
                 for (key, value) in self.attributes().own_properties() {
                     let value = value.coerce_to_string(activation)?;
                     let value = value.to_utf8_lossy();
-                    let value = escape(value.as_bytes());
+                    let value = escape(&value);
 
                     result.push_byte(b' ');
                     result.push_str(&key);
                     result.push_str(WStr::from_units(b"=\""));
-                    result.push_str(WStr::from_units(&*value));
+                    result.push_utf8(&value);
                     result.push_byte(b'"');
                 }
 
@@ -480,15 +509,15 @@ impl<'gc> XmlNode<'gc> {
         } else {
             let value = self.0.read().node_value.unwrap();
             let value = value.to_utf8_lossy();
-            let value = escape(value.as_bytes());
-            result.push_str(WStr::from_units(&*value));
+            let value = escape(&value);
+            result.push_utf8(&value);
         }
 
         Ok(())
     }
 }
 
-impl<'gc> fmt::Debug for XmlNode<'gc> {
+impl fmt::Debug for XmlNode<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("XmlNodeData")
             .field("ptr", &self.0.as_ptr())
@@ -515,4 +544,43 @@ impl<'gc> fmt::Debug for XmlNode<'gc> {
             .field("children", &self.0.read().children)
             .finish()
     }
+}
+
+static ENTITY_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// Handles flash-specific XML unescaping behavior.
+/// We accept all XML entities, and also accept standalone '&' without
+/// a corresponding ';'
+pub fn custom_unescape(
+    data: &[u8],
+    decoder: quick_xml::Decoder,
+) -> Result<String, quick_xml::Error> {
+    let input = decoder.decode(data)?;
+
+    let re = ENTITY_REGEX.get_or_init(|| Regex::new(r"&[^;]*;").unwrap());
+    let mut result = String::new();
+    let mut last_end = 0;
+
+    // Find all entities, and try to unescape them.
+    // Our regular expression will skip over '&' without a matching ';',
+    // which will preserve them as-is in the output
+    for cap in re.find_iter(&input) {
+        let start = cap.start();
+        let end = cap.end();
+        result.push_str(&input[last_end..start]);
+
+        let entity = &input[start..end];
+        // Unfortunately, we need to call this on each entity individually,
+        // since it bails out if *any* entities in the string lack a terminating ';'
+        match quick_xml::escape::unescape(entity) {
+            Ok(decoded) => result.push_str(&decoded),
+            // FIXME - check the actual error once https://github.com/tafia/quick-xml/pull/584 is merged
+            Err(_) => result.push_str(entity),
+        }
+
+        last_end = end;
+    }
+
+    result.push_str(&input[last_end..]);
+    Ok(result)
 }

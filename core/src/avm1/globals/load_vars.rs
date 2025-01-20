@@ -9,8 +9,7 @@ use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
 use crate::avm1_stub;
 use crate::backend::navigator::{NavigationMethod, Request};
-use crate::string::AvmString;
-use gc_arena::MutationContext;
+use crate::string::{AvmString, StringContext};
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
     "load" => method(load; DONT_ENUM | DONT_DELETE);
@@ -37,12 +36,12 @@ pub fn constructor<'gc>(
 }
 
 pub fn create_proto<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
+    let object = ScriptObject::new(context.gc(), Some(proto));
+    define_properties_on(PROTO_DECLS, context, object, fn_proto);
     object.into()
 }
 
@@ -65,8 +64,8 @@ fn decode<'gc>(
     if let Some(data) = args.get(0) {
         let data = data.coerce_to_string(activation)?;
         for (k, v) in url::form_urlencoded::parse(data.to_utf8_lossy().as_bytes()) {
-            let k = AvmString::new_utf8(activation.context.gc_context, k);
-            let v = AvmString::new_utf8(activation.context.gc_context, v);
+            let k = AvmString::new_utf8(activation.gc(), k);
+            let v = AvmString::new_utf8(activation.gc(), v);
             this.set(k, v.into(), activation)?;
         }
     }
@@ -158,12 +157,12 @@ fn send<'gc>(
     };
 
     let window = match args.get(1) {
-        Some(v) => v.coerce_to_string(activation)?.to_string(),
-        None => "".into(),
+        Some(window) => window.coerce_to_string(activation)?,
+        None => activation.strings().empty(),
     };
 
     let method_name = args
-        .get(1)
+        .get(2)
         .unwrap_or(&Value::Undefined)
         .coerce_to_string(activation)?;
     let method = NavigationMethod::from_method_str(&method_name).unwrap_or(NavigationMethod::Post);
@@ -171,7 +170,7 @@ fn send<'gc>(
     use indexmap::IndexMap;
 
     let mut form_values = IndexMap::new();
-    let keys = this.get_keys(activation);
+    let keys = this.get_keys(activation, false);
 
     for k in keys {
         let v = this.get(k, activation);
@@ -187,8 +186,8 @@ fn send<'gc>(
     }
 
     activation.context.navigator.navigate_to_url(
-        url.to_string(),
-        window,
+        &url.to_utf8_lossy(),
+        &window.to_utf8_lossy(),
         Some((method, form_values)),
     );
 
@@ -226,7 +225,7 @@ fn to_string<'gc>(
     use indexmap::IndexMap;
 
     let mut form_values = IndexMap::new();
-    let keys = this.get_keys(activation);
+    let keys = this.get_keys(activation, false);
 
     for k in keys {
         let v = this.get(k, activation);
@@ -246,7 +245,7 @@ fn to_string<'gc>(
         .extend_pairs(form_values.iter())
         .finish();
 
-    Ok(AvmString::new_utf8(activation.context.gc_context, query_string).into())
+    Ok(AvmString::new_utf8(activation.gc(), query_string).into())
 }
 
 fn spawn_load_var_fetch<'gc>(
@@ -273,7 +272,7 @@ fn spawn_load_var_fetch<'gc>(
     // Create hidden properties on object.
     if !loader_object.has_property(activation, "_bytesLoaded".into()) {
         loader_object.define_value(
-            activation.context.gc_context,
+            activation.gc(),
             "_bytesLoaded",
             0.into(),
             Attribute::DONT_DELETE | Attribute::DONT_ENUM,
@@ -284,7 +283,7 @@ fn spawn_load_var_fetch<'gc>(
 
     if !loader_object.has_property(activation, "_bytesTotal".into()) {
         loader_object.define_value(
-            activation.context.gc_context,
+            activation.gc(),
             "_bytesTotal",
             Value::Undefined,
             Attribute::DONT_DELETE | Attribute::DONT_ENUM,
@@ -295,7 +294,7 @@ fn spawn_load_var_fetch<'gc>(
 
     if !loader_object.has_property(activation, "loaded".into()) {
         loader_object.define_value(
-            activation.context.gc_context,
+            activation.gc(),
             "loaded",
             false.into(),
             Attribute::DONT_DELETE | Attribute::DONT_ENUM,

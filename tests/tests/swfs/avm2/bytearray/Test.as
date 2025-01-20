@@ -1,4 +1,4 @@
-package {
+﻿package {
     public class Test {
         public function Test() {}
     }
@@ -41,6 +41,26 @@ ba1.position = 0;
 trace("// ba1.readMultiByte(6, \"shift-jis\")");
 trace(ba1.readMultiByte(6, "shift-jis"));
 ba1.clear();
+
+ba1.writeUTFBytes("abc\x00");
+ba1.writeUTFBytes("def\x00");
+ba1.position = 0;
+var read = ba1.readUTFBytes(8);
+trace("pos", ba1.position);
+trace("bytes available",ba1.bytesAvailable);
+trace("length", read.length);
+ba1.clear();
+
+ba1.writeShort(8);
+ba1.writeUTFBytes("abc\x00");
+ba1.writeUTFBytes("def\x00");
+ba1.position = 0;
+read = ba1.readUTF();
+trace("pos", ba1.position);
+trace("bytes available",ba1.bytesAvailable);
+trace("length", read.length);
+ba1.clear();
+
 ba1.writeFloat(3);
 ba1.writeDouble(5);
 ba1.writeInt(-10);
@@ -86,3 +106,9 @@ trace(ba1.readUnsignedShort());
 trace(ba1.readShort());
 trace(ba1.readUnsignedInt());
 trace(ba1.readInt());
+
+var ba2 = new ByteArray();
+ba2.position = 100;
+trace("ba2.position: " + ba2.position);
+ba2.length = 2;
+trace("ba2.position: " + ba2.position);

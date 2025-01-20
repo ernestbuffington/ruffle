@@ -4,7 +4,7 @@ use crate::avm1::globals::as_broadcaster::BroadcasterFunctions;
 use crate::avm1::object::Object;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{ScriptObject, Value};
-use gc_arena::MutationContext;
+use crate::string::StringContext;
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "ALPHANUMERIC_FULL" => string("ALPHANUMERIC_FULL"; DONT_ENUM | DONT_DELETE | READ_ONLY);
@@ -80,14 +80,14 @@ fn set_enabled<'gc>(
 }
 
 pub fn create<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
     broadcaster_functions: BroadcasterFunctions<'gc>,
     array_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let ime = ScriptObject::new(gc_context, Some(proto));
-    broadcaster_functions.initialize(gc_context, ime.into(), array_proto);
-    define_properties_on(OBJECT_DECLS, gc_context, ime, fn_proto);
+    let ime = ScriptObject::new(context.gc(), Some(proto));
+    broadcaster_functions.initialize(context.gc(), ime.into(), array_proto);
+    define_properties_on(OBJECT_DECLS, context, ime, fn_proto);
     ime.into()
 }

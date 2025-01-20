@@ -12,7 +12,7 @@ pub struct Iter<'a> {
     inner: Units<SliceIter<'a, u8>, SliceIter<'a, u16>>,
 }
 
-impl<'a> Iterator for Iter<'a> {
+impl Iterator for Iter<'_> {
     type Item = u16;
 
     #[inline]
@@ -24,7 +24,7 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
-impl<'a> DoubleEndedIterator for Iter<'a> {
+impl DoubleEndedIterator for Iter<'_> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         match &mut self.inner {
@@ -41,7 +41,7 @@ pub struct CharIndices<'a> {
     start: usize,
 }
 
-impl<'a> Iterator for CharIndices<'a> {
+impl Iterator for CharIndices<'_> {
     type Item = (usize, Result<char, core::char::DecodeUtf16Error>);
 
     #[inline]
@@ -150,8 +150,11 @@ pub fn str_cmp_ignore_case(left: &WStr, right: &WStr) -> core::cmp::Ordering {
 }
 
 pub fn str_hash<H: Hasher>(s: &WStr, state: &mut H) {
+    state.write_u32(s.len() as u32);
     match s.units() {
-        Units::Bytes(us) => state.write(us),
+        // Using `state.write_bytes(us)` would be incorrect here, as `Hash`
+        // doesn't guarantee any equivalence between its various methods.
+        Units::Bytes(us) => us.iter().for_each(|u| state.write_u8(*u)),
         Units::Wide(us) => us.iter().for_each(|u| {
             if *u <= 0xFF {
                 state.write_u8(*u as u8)
@@ -160,7 +163,6 @@ pub fn str_hash<H: Hasher>(s: &WStr, state: &mut H) {
             }
         }),
     }
-    state.write_u8(0xff);
 }
 
 pub fn str_offset_in(s: &WStr, other: &WStr) -> Option<usize> {
@@ -198,6 +200,36 @@ fn map_latin1_chars(s: &WStr, mut map: impl FnMut(u8) -> u8) -> WString {
 
 pub fn str_to_ascii_lowercase(s: &WStr) -> WString {
     map_latin1_chars(s, |c| c.to_ascii_lowercase())
+}
+
+pub fn str_make_ascii_lowercase(s: &mut WStr) {
+    match s.units_mut() {
+        Units::Bytes(us) => us.make_ascii_lowercase(),
+        Units::Wide(us) => {
+            for c in us {
+                if let Ok(b) = u8::try_from(*c) {
+                    *c = b.to_ascii_lowercase().into();
+                }
+            }
+        }
+    }
+}
+
+pub fn str_to_ascii_uppercase(s: &WStr) -> WString {
+    map_latin1_chars(s, |c| c.to_ascii_uppercase())
+}
+
+pub fn str_make_ascii_uppercase(s: &mut WStr) {
+    match s.units_mut() {
+        Units::Bytes(us) => us.make_ascii_uppercase(),
+        Units::Wide(us) => {
+            for c in us {
+                if let Ok(b) = u8::try_from(*c) {
+                    *c = b.to_ascii_uppercase().into();
+                }
+            }
+        }
+    }
 }
 
 pub fn str_is_latin1(s: &WStr) -> bool {
@@ -255,7 +287,7 @@ pub fn str_repeat(s: &WStr, count: usize) -> WString {
     }
 
     let len = s.len().saturating_mul(count);
-    if len > super::MAX_STRING_LEN {
+    if len > WStr::MAX_LEN {
         super::panic_on_invalid_length(len);
     }
 
@@ -310,6 +342,14 @@ pub fn str_split<'a, P: Pattern<'a>>(string: &'a WStr, pattern: P) -> Split<'a, 
         searcher: pattern.into_searcher(string),
         prev_end: 0,
     }
+}
+
+pub fn str_split_once<'a, P: Pattern<'a>>(
+    string: &'a WStr,
+    pattern: P,
+) -> Option<(&'a WStr, &'a WStr)> {
+    let (start, end) = pattern.into_searcher(string).next_match()?;
+    Some((&string[..start], &string[end..]))
 }
 
 pub fn str_rsplit_once<'a, P: Pattern<'a>>(
@@ -437,6 +477,47 @@ impl<'a> WStrToUtf8<'a> {
             write!(out, "{}", self.tail).unwrap();
             Cow::Owned(out)
         }
+    }
+
+    /// Map the given UTF-16 code unit index to its corresponding UTF-8 code unit index.
+    pub fn utf8_index(&self, utf16_index: usize) -> Option<usize> {
+        self.translate_index(utf16_index, false)
+            .map(|(utf8_index, _)| utf8_index)
+    }
+
+    /// Map the given UTF-8 code unit index to its corresponding UTF-16 code unit index.
+    pub fn utf16_index(&self, utf8_index: usize) -> Option<usize> {
+        self.translate_index(utf8_index, true)
+            .map(|(_, utf16_index)| utf16_index)
+    }
+
+    fn translate_index(&self, index: usize, is_utf8: bool) -> Option<(usize, usize)> {
+        let ascii_prefix_len = self.head.len();
+        if index <= ascii_prefix_len {
+            return Some((index, index));
+        }
+
+        if self.tail.is_empty() {
+            return None;
+        }
+
+        let mut utf8_tail_pos = 0;
+        let mut utf16_tail_pos = 0;
+
+        while if is_utf8 {
+            utf8_tail_pos + ascii_prefix_len < index
+        } else {
+            utf16_tail_pos + ascii_prefix_len < index
+        } {
+            let c = self.tail[utf16_tail_pos..].chars().next()?.ok()?;
+            utf8_tail_pos += c.len_utf8();
+            utf16_tail_pos += c.len_utf16();
+        }
+
+        Some((
+            ascii_prefix_len + utf8_tail_pos,
+            ascii_prefix_len + utf16_tail_pos,
+        ))
     }
 
     #[inline]

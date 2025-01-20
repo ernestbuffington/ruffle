@@ -2,13 +2,14 @@
 
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
+use crate::avm1::globals::bitmap_filter;
+use crate::avm1::globals::movie_clip::{new_rectangle, object_to_rectangle};
 use crate::avm1::property_decl::{define_properties_on, Declaration};
+use crate::avm1::ArrayObject;
 use crate::avm1::{globals, Object, ScriptObject, TObject, Value};
-use crate::display_object::{Avm1Button, TDisplayObject};
-use crate::string::AvmString;
-use gc_arena::MutationContext;
-use std::str::FromStr;
-use swf::BlendMode;
+use crate::avm1_stub;
+use crate::display_object::{Avm1Button, TDisplayObject, TInteractiveObject};
+use crate::string::{AvmString, StringContext};
 
 macro_rules! button_getter {
     ($name:ident) => {
@@ -38,19 +39,24 @@ macro_rules! button_setter {
 }
 
 const PROTO_DECLS: &[Declaration] = declare_properties! {
-    "enabled" => property(button_getter!(enabled), button_setter!(set_enabled));
-    "getDepth" => method(globals::get_depth; DONT_ENUM | DONT_DELETE | READ_ONLY | VERSION_6);
-    "useHandCursor" => property(button_getter!(use_hand_cursor), button_setter!(set_use_hand_cursor));
-    "blendMode" => property(button_getter!(blend_mode), button_setter!(set_blend_mode); DONT_DELETE | DONT_ENUM);
+    "enabled" => bool(true);
+    "useHandCursor" => bool(true);
+    "getDepth" => method(globals::get_depth; DONT_DELETE | READ_ONLY | VERSION_6);
+    "blendMode" => property(button_getter!(blend_mode), button_setter!(set_blend_mode); DONT_DELETE | VERSION_8);
+    "scale9Grid" => property(button_getter!(scale_9_grid), button_setter!(set_scale_9_grid); DONT_DELETE | DONT_ENUM | VERSION_8);
+    "filters" => property(button_getter!(filters), button_setter!(set_filters); DONT_DELETE | DONT_ENUM | VERSION_8);
+    "cacheAsBitmap" => property(button_getter!(cache_as_bitmap), button_setter!(set_cache_as_bitmap); DONT_DELETE | DONT_ENUM | VERSION_8);
+    // NOTE: `tabEnabled` is not a built-in property of Button.
+    "tabIndex" => property(button_getter!(tab_index), button_setter!(set_tab_index); VERSION_6);
 };
 
 pub fn create_proto<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
+    let object = ScriptObject::new(context.gc(), Some(proto));
+    define_properties_on(PROTO_DECLS, context, object, fn_proto);
     object.into()
 }
 
@@ -63,45 +69,11 @@ pub fn constructor<'gc>(
     Ok(this.into())
 }
 
-fn enabled<'gc>(
-    this: Avm1Button<'gc>,
-    _activation: &mut Activation<'_, 'gc>,
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(this.enabled().into())
-}
-
-fn set_enabled<'gc>(
-    this: Avm1Button<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-    value: Value<'gc>,
-) -> Result<(), Error<'gc>> {
-    let enabled = value.as_bool(activation.swf_version());
-    this.set_enabled(&mut activation.context, enabled);
-    Ok(())
-}
-
-fn use_hand_cursor<'gc>(
-    this: Avm1Button<'gc>,
-    _activation: &mut Activation<'_, 'gc>,
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(this.use_hand_cursor().into())
-}
-
-fn set_use_hand_cursor<'gc>(
-    this: Avm1Button<'gc>,
-    activation: &mut Activation<'_, 'gc>,
-    value: Value<'gc>,
-) -> Result<(), Error<'gc>> {
-    let use_hand_cursor = value.as_bool(activation.swf_version());
-    this.set_use_hand_cursor(&mut activation.context, use_hand_cursor);
-    Ok(())
-}
-
 fn blend_mode<'gc>(
     this: Avm1Button<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let mode = AvmString::new_utf8(activation.context.gc_context, this.blend_mode().to_string());
+    let mode = AvmString::new_utf8(activation.gc(), this.blend_mode().to_string());
     Ok(mode.into())
 }
 
@@ -110,13 +82,122 @@ fn set_blend_mode<'gc>(
     activation: &mut Activation<'_, 'gc>,
     value: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    // No-op if value is not a string.
-    if let Value::String(mode) = value {
-        if let Ok(mode) = BlendMode::from_str(&mode.to_string()) {
-            this.set_blend_mode(activation.context.gc_context, mode);
-        } else {
-            tracing::error!("Unknown blend mode {}", mode);
+    // No-op if value is not a valid blend mode.
+    if let Some(mode) = value.as_blend_mode() {
+        this.set_blend_mode(activation.gc(), mode.into());
+    } else {
+        tracing::error!("Unknown blend mode {value:?}");
+    }
+    Ok(())
+}
+
+fn filters<'gc>(
+    this: Avm1Button<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    Ok(ArrayObject::new(
+        activation.gc(),
+        activation.context.avm1.prototypes().array,
+        this.filters()
+            .into_iter()
+            .map(|filter| bitmap_filter::filter_to_avm1(activation, filter)),
+    )
+    .into())
+}
+
+fn set_filters<'gc>(
+    this: Avm1Button<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    let mut filters = vec![];
+    if let Value::Object(value) = value {
+        for index in value.get_keys(activation, false).into_iter().rev() {
+            let filter_object = value.get(index, activation)?.coerce_to_object(activation);
+            if let Some(filter) = bitmap_filter::avm1_to_filter(filter_object, activation.context) {
+                filters.push(filter);
+            }
+        }
+    }
+    this.set_filters(activation.gc(), filters);
+    Ok(())
+}
+
+fn cache_as_bitmap<'gc>(
+    this: Avm1Button<'gc>,
+    _activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    // Note that the *getter* returns actual, and *setter* is preference
+    Ok(this.is_bitmap_cached().into())
+}
+
+fn set_cache_as_bitmap<'gc>(
+    this: Avm1Button<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    // Note that the *getter* returns actual, and *setter* is preference
+    this.set_bitmap_cached_preference(activation.gc(), value.as_bool(activation.swf_version()));
+    Ok(())
+}
+
+fn scale_9_grid<'gc>(
+    this: Avm1Button<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    avm1_stub!(activation, "Button", "scale9Grid");
+    let rect = this.scaling_grid();
+    if rect.is_valid() {
+        new_rectangle(activation, rect)
+    } else {
+        Ok(Value::Undefined)
+    }
+}
+
+fn set_scale_9_grid<'gc>(
+    this: Avm1Button<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    avm1_stub!(activation, "Button", "scale9Grid");
+    if let Value::Object(object) = value {
+        if let Some(rectangle) = object_to_rectangle(activation, object)? {
+            this.set_scaling_grid(activation.gc(), rectangle);
+        }
+    } else {
+        this.set_scaling_grid(activation.gc(), Default::default());
+    };
+    Ok(())
+}
+
+fn tab_index<'gc>(
+    this: Avm1Button<'gc>,
+    _activation: &mut Activation<'_, 'gc>,
+) -> Result<Value<'gc>, Error<'gc>> {
+    if let Some(index) = this.as_interactive().and_then(|this| this.tab_index()) {
+        Ok(Value::Number(index as f64))
+    } else {
+        Ok(Value::Undefined)
+    }
+}
+
+fn set_tab_index<'gc>(
+    this: Avm1Button<'gc>,
+    activation: &mut Activation<'_, 'gc>,
+    value: Value<'gc>,
+) -> Result<(), Error<'gc>> {
+    if let Some(this) = this.as_interactive() {
+        let value = match value {
+            Value::Undefined | Value::Null => None,
+            Value::Bool(_) | Value::Number(_) => {
+                // FIXME This coercion is not perfect, as it wraps
+                //       instead of falling back to MIN, as FP does
+                let i32_value = value.coerce_to_i32(activation)?;
+                Some(i32_value)
+            }
+            _ => Some(i32::MIN),
         };
+        this.set_tab_index(activation.context, value);
     }
     Ok(())
 }

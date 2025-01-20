@@ -1,27 +1,34 @@
 use crate::avm2::activation::Activation;
 pub use crate::avm2::object::error_allocator;
-use crate::avm2::object::Object;
+use crate::avm2::string::AvmString;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
+use crate::avm2::TObject;
 
-#[cfg(feature = "avm_debug")]
-pub fn get_stack_trace<'gc>(
+pub fn call_handler<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
+    _this: Value<'gc>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    use crate::avm2::TObject;
-    if let Some(error) = this.and_then(|this| this.as_error_object()) {
-        return Ok(error.display_full(activation)?.into());
-    }
-    Ok(Value::Undefined)
+    activation
+        .avm2()
+        .classes()
+        .error
+        .construct(activation, args)
 }
 
-#[cfg(not(feature = "avm_debug"))]
 pub fn get_stack_trace<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
+    if let Some(error) = this.as_error_object() {
+        let call_stack = error.call_stack();
+        if !call_stack.is_empty() {
+            return Ok(AvmString::new(activation.gc(), error.display_full()?).into());
+        }
+    }
     Ok(Value::Null)
 }

@@ -2,26 +2,42 @@
 
 use crate::avm1;
 use crate::avm2::{
-    Activation as Avm2Activation, ClassObject as Avm2ClassObject, Object as Avm2Object,
-    StageObject as Avm2StageObject, Value as Avm2Value,
+    Activation as Avm2Activation, BitmapDataObject as Avm2BitmapDataObject,
+    ClassObject as Avm2ClassObject, Object as Avm2Object, StageObject as Avm2StageObject, TObject,
+    Value as Avm2Value,
 };
-use crate::bitmap::bitmap_data::BitmapDataWrapper;
+use crate::bitmap::bitmap_data::{BitmapData, BitmapDataWrapper};
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, TDisplayObject};
+use crate::display_object::{DisplayObjectBase, DisplayObjectPtr, DisplayObjectWeak};
 use crate::prelude::*;
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use core::fmt;
-use gc_arena::{Collect, GcCell, MutationContext};
-use ruffle_render::bitmap::BitmapFormat;
+use gc_arena::{Collect, GcCell, GcWeakCell, Mutation};
+use ruffle_render::backend::RenderBackend;
+use ruffle_render::bitmap::{BitmapFormat, PixelSnapping};
 use std::cell::{Ref, RefMut};
 use std::sync::Arc;
+
+#[derive(Clone, Debug, Collect, Copy)]
+#[collect(no_drop)]
+pub struct BitmapWeak<'gc>(GcWeakCell<'gc, BitmapGraphicData<'gc>>);
+
+impl<'gc> BitmapWeak<'gc> {
+    pub fn upgrade(self, mc: &Mutation<'gc>) -> Option<Bitmap<'gc>> {
+        self.0.upgrade(mc).map(Bitmap)
+    }
+
+    pub fn as_ptr(self) -> *const DisplayObjectPtr {
+        self.0.as_ptr() as *const DisplayObjectPtr
+    }
+}
 
 /// The AVM2 class for the Bitmap associated with this object.
 ///
 /// Bitmaps may be associated with either a `Bitmap` or a `BitmapData`
 /// subclass. Its superclass determines how the Bitmap will be constructed.
-#[derive(Clone, Collect, Copy)]
+#[derive(Clone, Collect, Copy, Debug)]
 #[collect(no_drop)]
 pub enum BitmapClass<'gc> {
     /// This Bitmap uses the stock Flash Player classes for itself.
@@ -43,6 +59,22 @@ pub enum BitmapClass<'gc> {
     BitmapData(Avm2ClassObject<'gc>),
 }
 
+impl<'gc> BitmapClass<'gc> {
+    pub fn from_class_object(
+        class: Avm2ClassObject<'gc>,
+        context: &mut UpdateContext<'gc>,
+    ) -> Option<Self> {
+        let class_definition = class.inner_class_definition();
+        if class_definition.has_class_in_chain(context.avm2.class_defs().bitmap) {
+            Some(BitmapClass::Bitmap(class))
+        } else if class_definition.has_class_in_chain(context.avm2.class_defs().bitmapdata) {
+            Some(BitmapClass::BitmapData(class))
+        } else {
+            None
+        }
+    }
+}
+
 /// A Bitmap display object is a raw bitamp on the stage.
 /// This can only be instanitated on the display list in SWFv9 AVM2 files.
 /// In AVM1, this is only a library symbol that is referenced by `Graphic`.
@@ -52,7 +84,7 @@ pub enum BitmapClass<'gc> {
 /// It can also be created in ActionScript using the `Bitmap` class.
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct Bitmap<'gc>(GcCell<'gc, BitmapData<'gc>>);
+pub struct Bitmap<'gc>(GcCell<'gc, BitmapGraphicData<'gc>>);
 
 impl fmt::Debug for Bitmap<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -64,7 +96,7 @@ impl fmt::Debug for Bitmap<'_> {
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
-pub struct BitmapData<'gc> {
+pub struct BitmapGraphicData<'gc> {
     base: DisplayObjectBase<'gc>,
     id: CharacterId,
     movie: Arc<SwfMovie>,
@@ -72,8 +104,18 @@ pub struct BitmapData<'gc> {
     /// The current bitmap data object.
     bitmap_data: BitmapDataWrapper<'gc>,
 
+    /// The width and height values are cached from the BitmapDataWrapper
+    /// when this Bitmap instance is first created,
+    /// and continue to be reported even if the BitmapData is disposed.
+    width: u32,
+    height: u32,
+
     /// Whether or not bitmap smoothing is enabled.
     smoothing: bool,
+
+    /// How to snap this bitmap to the pixel grid
+    #[collect(require_static)]
+    pixel_snapping: PixelSnapping,
 
     /// The AVM2 side of this object.
     ///
@@ -94,67 +136,88 @@ impl<'gc> Bitmap<'gc> {
     /// list. If no data is provided then you are free to add whatever handle
     /// you like.
     pub fn new_with_bitmap_data(
-        context: &mut UpdateContext<'_, 'gc>,
+        mc: &Mutation<'gc>,
         id: CharacterId,
-        bitmap_data: GcCell<'gc, crate::bitmap::bitmap_data::BitmapData<'gc>>,
+        bitmap_data: BitmapDataWrapper<'gc>,
         smoothing: bool,
+        movie: &Arc<SwfMovie>,
     ) -> Self {
-        //NOTE: We do *not* solicit a handle from the `bitmap_data` at this
-        //time due to mutable borrowing issues.
+        // NOTE: We do *not* solicit a handle from the `bitmap_data` at this
+        // time due to mutable borrowing issues.
 
-        Bitmap(GcCell::allocate(
-            context.gc_context,
-            BitmapData {
+        let width = bitmap_data.width();
+        let height = bitmap_data.height();
+
+        let bitmap = Bitmap(GcCell::new(
+            mc,
+            BitmapGraphicData {
                 base: Default::default(),
                 id,
-                bitmap_data: BitmapDataWrapper::new(bitmap_data),
+                bitmap_data,
+                width,
+                height,
                 smoothing,
+                pixel_snapping: PixelSnapping::Auto,
                 avm2_object: None,
                 avm2_bitmap_class: BitmapClass::NoSubclass,
-                movie: context.swf.clone(),
+                movie: movie.clone(),
             },
-        ))
+        ));
+
+        bitmap_data.add_display_object(mc, DisplayObjectWeak::Bitmap(bitmap.downgrade()));
+
+        bitmap
     }
 
     /// Create a `Bitmap` with static bitmap data only.
     pub fn new(
-        context: &mut UpdateContext<'_, 'gc>,
+        mc: &Mutation<'gc>,
         id: CharacterId,
         bitmap: ruffle_render::bitmap::Bitmap,
+        movie: Arc<SwfMovie>,
     ) -> Result<Self, ruffle_render::error::Error> {
         let width = bitmap.width();
         let height = bitmap.height();
+        let transparency = match bitmap.format() {
+            BitmapFormat::Rgba => true,
+            BitmapFormat::Rgb => false,
+            _ => unreachable!(
+                "Bitmap objects can only be constructed from RGB or RGBA source bitmaps"
+            ),
+        };
         let pixels: Vec<_> = bitmap
             .as_colors()
             .map(crate::bitmap::bitmap_data::Color::from)
             .collect();
-        let mut bitmap_data = crate::bitmap::bitmap_data::BitmapData::default();
-        bitmap_data.set_pixels(
-            width,
-            height,
-            match bitmap.format() {
-                BitmapFormat::Rgba => true,
-                BitmapFormat::Rgb => false,
-            },
-            pixels,
-        );
-        let bitmap_data = GcCell::allocate(context.gc_context, bitmap_data);
+        let bitmap_data = BitmapData::new_with_pixels(width, height, transparency, pixels);
 
         let smoothing = true;
         Ok(Self::new_with_bitmap_data(
-            context,
+            mc,
             id,
-            bitmap_data,
+            BitmapDataWrapper::new(GcCell::new(mc, bitmap_data)),
             smoothing,
+            &movie,
         ))
     }
 
+    // Important - we read 'width' and 'height' from the cached
+    // values on this object. See the definition of these fields
+    // for more information
     pub fn width(self) -> u16 {
-        self.0.read().bitmap_data.width() as u16
+        self.0.read().width as u16
     }
 
     pub fn height(self) -> u16 {
-        self.0.read().bitmap_data.height() as u16
+        self.0.read().height as u16
+    }
+
+    pub fn pixel_snapping(self) -> PixelSnapping {
+        self.0.read().pixel_snapping
+    }
+
+    pub fn set_pixel_snapping(self, mc: &Mutation<'gc>, value: PixelSnapping) {
+        self.0.write(mc).pixel_snapping = value;
     }
 
     pub fn bitmap_data_wrapper(self) -> BitmapDataWrapper<'gc> {
@@ -162,8 +225,8 @@ impl<'gc> Bitmap<'gc> {
     }
 
     /// Retrieve the bitmap data associated with this `Bitmap`.
-    pub fn bitmap_data(self) -> GcCell<'gc, crate::bitmap::bitmap_data::BitmapData<'gc>> {
-        self.0.read().bitmap_data.sync()
+    pub fn bitmap_data(self, renderer: &mut dyn RenderBackend) -> GcCell<'gc, BitmapData<'gc>> {
+        self.0.read().bitmap_data.sync(renderer)
     }
 
     /// Associate this `Bitmap` with new `BitmapData`.
@@ -176,10 +239,24 @@ impl<'gc> Bitmap<'gc> {
     /// if that has not already been done.
     pub fn set_bitmap_data(
         self,
-        context: &mut UpdateContext<'_, 'gc>,
-        bitmap_data: GcCell<'gc, crate::bitmap::bitmap_data::BitmapData<'gc>>,
+        context: &mut UpdateContext<'gc>,
+        bitmap_data: BitmapDataWrapper<'gc>,
     ) {
-        self.0.write(context.gc_context).bitmap_data = BitmapDataWrapper::new(bitmap_data);
+        let weak_self = DisplayObjectWeak::Bitmap(self.downgrade());
+        let mut write = self.0.write(context.gc());
+
+        write
+            .bitmap_data
+            .remove_display_object(context.gc(), weak_self);
+
+        // Refresh our cached values, even if we're writing the same BitmapData
+        // that we currently have stored. This will update them to '0' if the
+        // BitmapData has been disposed since it was originally set.
+        write.width = bitmap_data.width();
+        write.height = bitmap_data.height();
+        write.bitmap_data = bitmap_data;
+
+        bitmap_data.add_display_object(context.gc(), weak_self);
     }
 
     pub fn avm2_bitmapdata_class(self) -> Option<Avm2ClassObject<'gc>> {
@@ -196,28 +273,20 @@ impl<'gc> Bitmap<'gc> {
         }
     }
 
-    pub fn set_avm2_bitmapdata_class(
-        self,
-        context: &mut UpdateContext<'_, 'gc>,
-        class: Avm2ClassObject<'gc>,
-    ) {
-        let bitmap_class = if class.has_class_in_chain(context.avm2.classes().bitmap) {
-            BitmapClass::Bitmap(class)
-        } else if class.has_class_in_chain(context.avm2.classes().bitmapdata) {
-            BitmapClass::BitmapData(class)
-        } else {
-            return tracing::error!("Associated class {:?} for symbol {} must extend flash.display.Bitmap or BitmapData, does neither", class.inner_class_definition().read().name(), self.id());
-        };
-
-        self.0.write(context.gc_context).avm2_bitmap_class = bitmap_class;
+    pub fn set_avm2_bitmapdata_class(self, mc: &Mutation<'gc>, class: BitmapClass<'gc>) {
+        self.0.write(mc).avm2_bitmap_class = class;
     }
 
     pub fn smoothing(self) -> bool {
         self.0.read().smoothing
     }
 
-    pub fn set_smoothing(self, mc: MutationContext<'gc, '_>, smoothing: bool) {
+    pub fn set_smoothing(self, mc: &Mutation<'gc>, smoothing: bool) {
         self.0.write(mc).smoothing = smoothing;
+    }
+
+    pub fn downgrade(self) -> BitmapWeak<'gc> {
+        BitmapWeak(GcCell::downgrade(self.0))
     }
 }
 
@@ -226,12 +295,12 @@ impl<'gc> TDisplayObject<'gc> for Bitmap<'gc> {
         Ref::map(self.0.read(), |r| &r.base)
     }
 
-    fn base_mut<'a>(&'a self, mc: MutationContext<'gc, '_>) -> RefMut<'a, DisplayObjectBase<'gc>> {
+    fn base_mut<'a>(&'a self, mc: &Mutation<'gc>) -> RefMut<'a, DisplayObjectBase<'gc>> {
         RefMut::map(self.0.write(mc), |w| &mut w.base)
     }
 
-    fn instantiate(&self, gc_context: MutationContext<'gc, '_>) -> DisplayObject<'gc> {
-        Self(GcCell::allocate(gc_context, self.0.read().clone())).into()
+    fn instantiate(&self, gc_context: &Mutation<'gc>) -> DisplayObject<'gc> {
+        Self(GcCell::new(gc_context, self.0.read().clone())).into()
     }
 
     fn as_ptr(&self) -> *const DisplayObjectPtr {
@@ -242,48 +311,65 @@ impl<'gc> TDisplayObject<'gc> for Bitmap<'gc> {
         self.0.read().id
     }
 
-    fn self_bounds(&self) -> BoundingBox {
-        BoundingBox {
+    fn self_bounds(&self) -> Rectangle<Twips> {
+        Rectangle {
             x_min: Twips::ZERO,
             y_min: Twips::ZERO,
             x_max: Twips::from_pixels(Bitmap::width(*self).into()),
             y_max: Twips::from_pixels(Bitmap::height(*self).into()),
-            valid: true,
         }
     }
 
     fn post_instantiation(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         _init_object: Option<avm1::Object<'gc>>,
-        _instantiated_by: Instantiator,
+        instantiated_by: Instantiator,
         run_frame: bool,
     ) {
-        if context.is_action_script_3() {
-            let mut activation = Avm2Activation::from_nothing(context.reborrow());
-            let bitmap = self
-                .avm2_bitmap_class()
-                .unwrap_or_else(|| activation.context.avm2.classes().bitmap);
-            match Avm2StageObject::for_display_object_childless(
-                &mut activation,
-                (*self).into(),
-                bitmap,
-            ) {
-                Ok(object) => {
-                    self.0.write(activation.context.gc_context).avm2_object = Some(object.into())
-                }
-                Err(e) => tracing::error!("Got error when creating AVM2 side of bitmap: {}", e),
+        if self.movie().is_action_script_3() {
+            let mut activation = Avm2Activation::from_nothing(context);
+            if !instantiated_by.is_avm() {
+                let bitmap_cls = self
+                    .avm2_bitmap_class()
+                    .unwrap_or_else(|| activation.context.avm2.classes().bitmap);
+                let bitmapdata_cls = self
+                    .avm2_bitmapdata_class()
+                    .unwrap_or_else(|| activation.context.avm2.classes().bitmapdata);
+
+                let mc = activation.gc();
+
+                let bitmap = Avm2StageObject::for_display_object_childless(
+                    &mut activation,
+                    (*self).into(),
+                    bitmap_cls,
+                )
+                .expect("can't throw from post_instantiation -_-");
+                self.0.write(mc).avm2_object = Some(bitmap.into());
+
+                // Use a dummy BitmapData when calling the constructor on the user subclass
+                // - the constructor should see an invalid BitmapData before calling 'super',
+                // even if it's linked to an image.
+                let bitmap_data_obj = Avm2BitmapDataObject::from_bitmap_data_internal(
+                    &mut activation,
+                    BitmapDataWrapper::dummy(mc),
+                    bitmapdata_cls,
+                )
+                .expect("can't throw from post_instantiation -_-");
+
+                self.set_bitmap_data(
+                    activation.context,
+                    bitmap_data_obj.as_bitmap_data().unwrap(),
+                );
             }
 
             self.on_construction_complete(context);
         } else {
-            context
-                .avm1
-                .add_to_exec_list(context.gc_context, (*self).into());
-        }
+            context.avm1.add_to_exec_list(context.gc(), (*self).into());
 
-        if run_frame {
-            self.run_frame(context);
+            if run_frame {
+                self.run_frame_avm1(context);
+            }
         }
     }
 
@@ -296,7 +382,7 @@ impl<'gc> TDisplayObject<'gc> for Bitmap<'gc> {
         let bitmap_data = self.0.read();
         bitmap_data
             .bitmap_data
-            .render(bitmap_data.smoothing, context);
+            .render(bitmap_data.smoothing, context, bitmap_data.pixel_snapping);
     }
 
     fn object2(&self) -> Avm2Value<'gc> {
@@ -307,8 +393,8 @@ impl<'gc> TDisplayObject<'gc> for Bitmap<'gc> {
             .unwrap_or(Avm2Value::Null)
     }
 
-    fn set_object2(&mut self, mc: MutationContext<'gc, '_>, to: Avm2Object<'gc>) {
-        self.0.write(mc).avm2_object = Some(to);
+    fn set_object2(&self, context: &mut UpdateContext<'gc>, to: Avm2Object<'gc>) {
+        self.0.write(context.gc()).avm2_object = Some(to);
     }
 
     fn as_bitmap(self) -> Option<Bitmap<'gc>> {

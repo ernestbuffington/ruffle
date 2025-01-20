@@ -7,7 +7,7 @@ use crate::avm1::property_map::{Entry, PropertyMap};
 use crate::avm1::{Object, ObjectPtr, TObject, Value};
 use crate::string::AvmString;
 use core::fmt;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, GcCell, Mutation};
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
@@ -68,8 +68,8 @@ impl fmt::Debug for ScriptObject<'_> {
 }
 
 impl<'gc> ScriptObject<'gc> {
-    pub fn new(gc_context: MutationContext<'gc, '_>, proto: Option<Object<'gc>>) -> Self {
-        let object = Self(GcCell::allocate(
+    pub fn new(gc_context: &Mutation<'gc>, proto: Option<Object<'gc>>) -> Self {
+        let object = Self(GcCell::new(
             gc_context,
             ScriptObjectData {
                 native: NativeObject::None,
@@ -118,7 +118,7 @@ impl<'gc> ScriptObject<'gc> {
         // TODO: Call watchers.
         match self
             .0
-            .write(activation.context.gc_context)
+            .write(activation.gc())
             .properties
             .entry(name, activation.is_case_sensitive())
         {
@@ -155,6 +155,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
         &self,
         name: impl Into<AvmString<'gc>>,
         activation: &mut Activation<'_, 'gc>,
+        _is_slash_path: bool,
     ) -> Option<Value<'gc>> {
         self.0
             .read()
@@ -174,7 +175,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
     ) -> Result<(), Error<'gc>> {
         let setter = match self
             .0
-            .write(activation.context.gc_context)
+            .write(activation.gc())
             .properties
             .entry(name, activation.is_case_sensitive())
         {
@@ -254,7 +255,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         this: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
-        Ok(ScriptObject::new(activation.context.gc_context, Some(this)).into())
+        Ok(ScriptObject::new(activation.gc(), Some(this)).into())
     }
 
     /// Delete a named property from the object.
@@ -263,7 +264,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
     fn delete(&self, activation: &mut Activation<'_, 'gc>, name: AvmString<'gc>) -> bool {
         if let Entry::Occupied(mut entry) = self
             .0
-            .write(activation.context.gc_context)
+            .write(activation.gc())
             .properties
             .entry(name, activation.is_case_sensitive())
         {
@@ -277,7 +278,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
 
     fn add_property(
         &self,
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         name: AvmString<'gc>,
         getter: Object<'gc>,
         setter: Option<Object<'gc>>,
@@ -299,7 +300,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
     ) {
         match self
             .0
-            .write(activation.context.gc_context)
+            .write(activation.gc())
             .properties
             .entry(name, activation.is_case_sensitive())
         {
@@ -344,7 +345,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
         callback: Object<'gc>,
         user_data: Value<'gc>,
     ) {
-        self.0.write(activation.context.gc_context).watchers.insert(
+        self.0.write(activation.gc()).watchers.insert(
             name,
             Watcher::new(callback, user_data),
             activation.is_case_sensitive(),
@@ -353,7 +354,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
 
     fn unwatch(&self, activation: &mut Activation<'_, 'gc>, name: AvmString<'gc>) -> bool {
         self.0
-            .write(activation.context.gc_context)
+            .write(activation.gc())
             .watchers
             .remove(name, activation.is_case_sensitive())
             .is_some()
@@ -361,7 +362,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
 
     fn define_value(
         &self,
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         name: impl Into<AvmString<'gc>>,
         value: Value<'gc>,
         attributes: Attribute,
@@ -375,7 +376,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
 
     fn set_attributes(
         &self,
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         name: Option<AvmString<'gc>>,
         set_attributes: Attribute,
         clear_attributes: Attribute,
@@ -425,7 +426,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
             .read()
             .properties
             .get(name, activation.is_case_sensitive())
-            .map_or(false, |property| {
+            .is_some_and(|property| {
                 property.is_virtual() && property.allow_swf_version(activation.swf_version())
             })
     }
@@ -440,13 +441,17 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
             .read()
             .properties
             .get(name, activation.is_case_sensitive())
-            .map_or(false, |property| property.is_enumerable())
+            .is_some_and(|property| property.is_enumerable())
     }
 
     /// Enumerate the object.
-    fn get_keys(&self, activation: &mut Activation<'_, 'gc>) -> Vec<AvmString<'gc>> {
+    fn get_keys(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        include_hidden: bool,
+    ) -> Vec<AvmString<'gc>> {
         let proto_keys = if let Value::Object(proto) = self.proto(activation) {
-            proto.get_keys(activation)
+            proto.get_keys(activation, include_hidden)
         } else {
             Vec::new()
         };
@@ -461,7 +466,7 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
 
         // Then our own keys.
         out_keys.extend(self.0.read().properties.iter().filter_map(move |(k, p)| {
-            if p.is_enumerable() {
+            if include_hidden || p.is_enumerable() {
                 Some(k)
             } else {
                 None
@@ -475,22 +480,24 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
         self.0.read().interfaces.clone()
     }
 
-    fn set_interfaces(&self, gc_context: MutationContext<'gc, '_>, iface_list: Vec<Object<'gc>>) {
+    fn set_interfaces(&self, gc_context: &Mutation<'gc>, iface_list: Vec<Object<'gc>>) {
         self.0.write(gc_context).interfaces = iface_list;
     }
 
     fn native(&self) -> NativeObject<'gc> {
-        self.0.read().native.clone()
+        self.0.read().native
     }
 
-    fn set_native(&self, gc_context: MutationContext<'gc, '_>, native: NativeObject<'gc>) {
-        // Native object should be introduced at most once.
-        debug_assert!(matches!(self.0.read().native, NativeObject::None));
+    fn set_native(&self, gc_context: &Mutation<'gc>, native: NativeObject<'gc>) {
+        assert!(!matches!(native, NativeObject::None));
 
-        // Native object must not be `None`.
-        debug_assert!(!matches!(native, NativeObject::None));
-
-        self.0.write(gc_context).native = native;
+        let old_native = self.0.read().native;
+        if matches!(old_native, NativeObject::None) {
+            self.0.write(gc_context).native = native;
+        } else {
+            // Trying to construct the same object twice (e.g. with `super()`) does nothing.
+            assert!(std::mem::discriminant(&old_native) == std::mem::discriminant(&native));
+        }
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
@@ -511,12 +518,12 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
     }
 
     fn has_element(&self, activation: &mut Activation<'_, 'gc>, index: i32) -> bool {
-        let index_str = AvmString::new_utf8(activation.context.gc_context, index.to_string());
+        let index_str = AvmString::new_utf8(activation.gc(), index.to_string());
         self.has_own_property(activation, index_str)
     }
 
     fn get_element(&self, activation: &mut Activation<'_, 'gc>, index: i32) -> Value<'gc> {
-        let index_str = AvmString::new_utf8(activation.context.gc_context, index.to_string());
+        let index_str = AvmString::new_utf8(activation.gc(), index.to_string());
         self.get_data(index_str, activation)
     }
 
@@ -526,12 +533,12 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
         index: i32,
         value: Value<'gc>,
     ) -> Result<(), Error<'gc>> {
-        let index_str = AvmString::new_utf8(activation.context.gc_context, index.to_string());
+        let index_str = AvmString::new_utf8(activation.gc(), index.to_string());
         self.set_data(index_str, value, activation)
     }
 
     fn delete_element(&self, activation: &mut Activation<'_, 'gc>, index: i32) -> bool {
-        let index_str = AvmString::new_utf8(activation.context.gc_context, index.to_string());
+        let index_str = AvmString::new_utf8(activation.gc(), index.to_string());
         self.delete(activation, index_str)
     }
 }
@@ -542,7 +549,6 @@ mod tests {
 
     use crate::avm1::function::Executable;
     use crate::avm1::function::FunctionObject;
-    use crate::avm1::property::Attribute;
 
     fn with_object<F>(swf_version: u8, test: F)
     where
@@ -550,7 +556,7 @@ mod tests {
     {
         crate::avm1::test_utils::with_avm(swf_version, |activation, _root| {
             let object = ScriptObject::new(
-                activation.context.gc_context,
+                activation.gc(),
                 Some(activation.context.avm1.prototypes().object),
             )
             .into();
@@ -573,7 +579,7 @@ mod tests {
     fn test_set_get() {
         with_object(0, |activation, object| {
             object.raw_script_object().define_value(
-                activation.context.gc_context,
+                activation.gc(),
                 "forced",
                 "forced".into(),
                 Attribute::empty(),
@@ -589,13 +595,13 @@ mod tests {
     fn test_set_readonly() {
         with_object(0, |activation, object| {
             object.raw_script_object().define_value(
-                activation.context.gc_context,
+                activation.gc(),
                 "normal",
                 "initial".into(),
                 Attribute::empty(),
             );
             object.raw_script_object().define_value(
-                activation.context.gc_context,
+                activation.gc(),
                 "readonly",
                 "initial".into(),
                 Attribute::READ_ONLY,
@@ -618,7 +624,7 @@ mod tests {
     fn test_deletable_not_readonly() {
         with_object(0, |activation, object| {
             object.raw_script_object().define_value(
-                activation.context.gc_context,
+                activation.gc(),
                 "test",
                 "initial".into(),
                 Attribute::DONT_DELETE,
@@ -641,14 +647,14 @@ mod tests {
     fn test_virtual_get() {
         with_object(0, |activation, object| {
             let getter = FunctionObject::function(
-                activation.context.gc_context,
+                activation.gc(),
                 Executable::Native(|_avm, _this, _args| Ok("Virtual!".into())),
                 activation.context.avm1.prototypes().function,
                 activation.context.avm1.prototypes().function,
             );
 
             object.raw_script_object().add_property(
-                activation.context.gc_context,
+                activation.gc(),
                 "test".into(),
                 getter,
                 None,
@@ -667,34 +673,34 @@ mod tests {
     fn test_delete() {
         with_object(0, |activation, object| {
             let getter = FunctionObject::function(
-                activation.context.gc_context,
+                activation.gc(),
                 Executable::Native(|_avm, _this, _args| Ok("Virtual!".into())),
                 activation.context.avm1.prototypes().function,
                 activation.context.avm1.prototypes().function,
             );
 
             object.raw_script_object().add_property(
-                activation.context.gc_context,
+                activation.gc(),
                 "virtual".into(),
                 getter,
                 None,
                 Attribute::empty(),
             );
             object.raw_script_object().add_property(
-                activation.context.gc_context,
+                activation.gc(),
                 "virtual_un".into(),
                 getter,
                 None,
                 Attribute::DONT_DELETE,
             );
             object.raw_script_object().define_value(
-                activation.context.gc_context,
+                activation.gc(),
                 "stored",
                 "Stored!".into(),
                 Attribute::empty(),
             );
             object.raw_script_object().define_value(
-                activation.context.gc_context,
+                activation.gc(),
                 "stored_un",
                 "Stored!".into(),
                 Attribute::DONT_DELETE,
@@ -723,40 +729,40 @@ mod tests {
     fn test_get_keys() {
         with_object(0, |activation, object| {
             let getter = FunctionObject::function(
-                activation.context.gc_context,
+                activation.gc(),
                 Executable::Native(|_avm, _this, _args| Ok(Value::Null)),
                 activation.context.avm1.prototypes().function,
                 activation.context.avm1.prototypes().function,
             );
 
             object.raw_script_object().define_value(
-                activation.context.gc_context,
+                activation.gc(),
                 "stored",
                 Value::Null,
                 Attribute::empty(),
             );
             object.raw_script_object().define_value(
-                activation.context.gc_context,
+                activation.gc(),
                 "stored_hidden",
                 Value::Null,
                 Attribute::DONT_ENUM,
             );
             object.raw_script_object().add_property(
-                activation.context.gc_context,
+                activation.gc(),
                 "virtual".into(),
                 getter,
                 None,
                 Attribute::empty(),
             );
             object.raw_script_object().add_property(
-                activation.context.gc_context,
+                activation.gc(),
                 "virtual_hidden".into(),
                 getter,
                 None,
                 Attribute::DONT_ENUM,
             );
 
-            let keys: Vec<_> = object.get_keys(activation);
+            let keys: Vec<_> = object.get_keys(activation, false);
             assert_eq!(keys.len(), 2);
             assert!(keys.contains(&"stored".into()));
             assert!(!keys.contains(&"stored_hidden".into()));

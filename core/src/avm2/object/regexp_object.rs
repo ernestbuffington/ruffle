@@ -3,26 +3,25 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{ClassObject, Object, ObjectPtr, TObject};
-use crate::avm2::regexp::{RegExp, RegExpFlags};
-use crate::avm2::value::Value;
+use crate::avm2::regexp::RegExp;
 use crate::avm2::Error;
-use crate::string::{AvmString, WString};
 use core::fmt;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::barrier::unlock;
+use gc_arena::{lock::RefLock, Collect, Gc, GcWeak, Mutation};
 use std::cell::{Ref, RefMut};
 
 /// A class instance allocator that allocates RegExp objects.
-pub fn regexp_allocator<'gc>(
+pub fn reg_exp_allocator<'gc>(
     class: ClassObject<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Object<'gc>, Error<'gc>> {
     let base = ScriptObjectData::new(class);
 
-    Ok(RegExpObject(GcCell::allocate(
-        activation.context.gc_context,
+    Ok(RegExpObject(Gc::new(
+        activation.gc(),
         RegExpObjectData {
             base,
-            regexp: RegExp::new(""),
+            regexp: RefLock::new(RegExp::new(activation.strings().empty())),
         },
     ))
     .into())
@@ -30,24 +29,33 @@ pub fn regexp_allocator<'gc>(
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct RegExpObject<'gc>(GcCell<'gc, RegExpObjectData<'gc>>);
+pub struct RegExpObject<'gc>(pub Gc<'gc, RegExpObjectData<'gc>>);
+
+#[derive(Clone, Collect, Copy, Debug)]
+#[collect(no_drop)]
+pub struct RegExpObjectWeak<'gc>(pub GcWeak<'gc, RegExpObjectData<'gc>>);
 
 impl fmt::Debug for RegExpObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RegExpObject")
-            .field("ptr", &self.0.as_ptr())
+            .field("ptr", &Gc::as_ptr(self.0))
             .finish()
     }
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
+#[repr(C, align(8))]
 pub struct RegExpObjectData<'gc> {
     /// Base script object
     base: ScriptObjectData<'gc>,
 
-    regexp: RegExp<'gc>,
+    regexp: RefLock<RegExp<'gc>>,
 }
+
+const _: () = assert!(std::mem::offset_of!(RegExpObjectData, base) == 0);
+const _: () =
+    assert!(std::mem::align_of::<RegExpObjectData>() == std::mem::align_of::<ScriptObjectData>());
 
 impl<'gc> RegExpObject<'gc> {
     pub fn from_regexp(
@@ -57,62 +65,32 @@ impl<'gc> RegExpObject<'gc> {
         let class = activation.avm2().classes().regexp;
         let base = ScriptObjectData::new(class);
 
-        let mut this: Object<'gc> = RegExpObject(GcCell::allocate(
-            activation.context.gc_context,
-            RegExpObjectData { base, regexp },
+        let this: Object<'gc> = RegExpObject(Gc::new(
+            activation.gc(),
+            RegExpObjectData {
+                base,
+                regexp: RefLock::new(regexp),
+            },
         ))
         .into();
-        this.install_instance_slots(activation);
 
-        class.call_native_init(Some(this), &[], activation)?;
+        class.call_init(this.into(), &[], activation)?;
 
         Ok(this)
     }
 }
 
 impl<'gc> TObject<'gc> for RegExpObject<'gc> {
-    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
-        Ref::map(self.0.read(), |read| &read.base)
-    }
+    fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
+        // SAFETY: Object data is repr(C), and a compile-time assert ensures
+        // that the ScriptObjectData stays at offset 0 of the struct- so the
+        // layouts are compatible
 
-    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>> {
-        RefMut::map(self.0.write(mc), |write| &mut write.base)
+        unsafe { Gc::cast(self.0) }
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.as_ptr() as *const ObjectPtr
-    }
-
-    fn to_string(&self, _activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
-    }
-
-    fn value_of(&self, mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error<'gc>> {
-        let read = self.0.read();
-        let mut s = WString::new();
-        s.push_byte(b'/');
-        s.push_str(&read.regexp.source());
-        s.push_byte(b'/');
-
-        let flags = read.regexp.flags();
-
-        if flags.contains(RegExpFlags::GLOBAL) {
-            s.push_byte(b'g');
-        }
-        if flags.contains(RegExpFlags::IGNORE_CASE) {
-            s.push_byte(b'i');
-        }
-        if flags.contains(RegExpFlags::MULTILINE) {
-            s.push_byte(b'm');
-        }
-        if flags.contains(RegExpFlags::DOTALL) {
-            s.push_byte(b's');
-        }
-        if flags.contains(RegExpFlags::EXTENDED) {
-            s.push_byte(b'x');
-        }
-
-        Ok(AvmString::new(mc, s).into())
+        Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
     /// Unwrap this object as a regexp.
@@ -121,10 +99,10 @@ impl<'gc> TObject<'gc> for RegExpObject<'gc> {
     }
 
     fn as_regexp(&self) -> Option<Ref<RegExp<'gc>>> {
-        Some(Ref::map(self.0.read(), |d| &d.regexp))
+        Some(self.0.regexp.borrow())
     }
 
-    fn as_regexp_mut(&self, mc: MutationContext<'gc, '_>) -> Option<RefMut<RegExp<'gc>>> {
-        Some(RefMut::map(self.0.write(mc), |d| &mut d.regexp))
+    fn as_regexp_mut(&self, mc: &Mutation<'gc>) -> Option<RefMut<RegExp<'gc>>> {
+        Some(unlock!(Gc::write(mc, self.0), RegExpObjectData, regexp).borrow_mut())
     }
 }

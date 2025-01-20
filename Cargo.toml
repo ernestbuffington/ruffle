@@ -5,11 +5,14 @@ members = [
     "core/build_playerglobal",
     "desktop",
     "swf",
+    "flv",
     "web",
     "web/packages/extension/safari",
     "wstr",
     "scanner",
     "exporter",
+
+    "frontend-utils",
 
     "render",
     "render/canvas",
@@ -17,12 +20,21 @@ members = [
     "render/wgpu",
     "render/webgl",
 
+    "ruffle_gc_arena",
+
+    "stub-report",
+
     "video",
     "video/software",
+    "video/external",
 
     "tests",
     "tests/input-format",
+    "tests/socket-format",
+    "tests/mocket",
+    "tests/framework",
 ]
+default-members = ["desktop"]
 resolver = "2"
 
 [workspace.package]
@@ -34,7 +46,51 @@ repository = "https://github.com/ruffle-rs/ruffle"
 version = "0.1.0"
 
 [workspace.dependencies]
-gc-arena = { git = "https://github.com/kyren/gc-arena", rev = "318b2ea594dcdadd01f7789025e3b3940be96b2c" }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+naga = { version = "23.1.0", features = ["wgsl-out"] }
+wgpu = "23.0.1"
+egui = "0.30.0"
+clap = { version = "4.5.26", features = ["derive"] }
+cpal = "0.15.3"
+anyhow = "1.0"
+slotmap = "1.0.7"
+async-channel = "2.3.1"
+bitflags = "2.8.0"
+bytemuck = "1.21.0"
+chrono = { version = "0.4.39", default-features = false }
+enum-map = "2.7.3"
+flate2 = "1.0.35"
+futures = "0.3.31"
+image = { version = "0.25.5", default-features = false }
+js-sys = "0.3.77"
+web-sys = "0.3.77"
+log = "0.4"
+num-derive = "0.4.2"
+num-traits = "0.2.19"
+serde = "1.0.217"
+thiserror = "2.0.11"
+url = "2.5.2"
+# Make sure to match wasm-bindgen-cli version to this everywhere.
+wasm-bindgen = "=0.2.100"
+walkdir = "2.5.0"
+tokio = "1.43.0"
+# Switching from the `async-std` to the `tokio` runtime, which we depend on anyway.
+rfd = { version = "0.15.2", default-features = false, features = ["tokio", "xdg-portal"] }
+
+[workspace.lints.rust]
+# Clippy nightly often adds new/buggy lints that we want to ignore.
+# Don't warn about these new lints on stable.
+renamed_and_removed_lints = "allow"
+unknown_lints = "allow"
+
+[workspace.lints.clippy]
+# LONG-TERM: These lints are unhelpful.
+manual_map = "allow"             # Less readable: Suggests `opt.map(..)` instead of `if let Some(opt) { .. }`
+manual_range_contains = "allow"  # Less readable: Suggests `(a..b).contains(n)` instead of `n >= a && n < b`
+assigning_clones = "allow"       # Sometimes useful, but more often than not it doesn't do anything as
+                                 # we overwrite an empty item. And sometimes it can even be a footgun
+                                 # by keeping big allocations alive.
 
 # Don't optimize build scripts and macros.
 [profile.release.build-override]
@@ -61,15 +117,25 @@ opt-level = 3
 [profile.dev.package.nihav_duck]
 opt-level = 3
 
-# TODO: Set rustflags here instead of in web/core/package.json, when that
+# TODO: Set rustflags here instead of in tools/build_wasm.ts, when that
 # feature becomes stable. See: https://github.com/rust-lang/cargo/issues/10271
 # Until then, these custom profiles let cargo keep the build cache alive
 # across "dual-wasm" builds, separating it for the two .wasm modules.
-[profile.web-vanilla-wasm]
+[profile.web-wasm-mvp]
 inherits = "release"
 
 [profile.web-wasm-extensions]
 inherits = "release"
 
-[patch.crates-io]
-naga = { git = "https://github.com/gfx-rs/naga", rev = "1be8024" }
+[profile.ci]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+# "Not too slow to compile, fast enough to run."
+opt-level = 2
+# Takes too long, especially on Windows, with marginal benefit otherwise.
+lto = "off"
+# This is also set with higher authority in `test_rust.yml`.
+incremental = true
+# Right between the defaults of 16 and 256, for crate fragment caching.
+codegen-units = 64

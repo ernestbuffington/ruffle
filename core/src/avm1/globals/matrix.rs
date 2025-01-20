@@ -6,8 +6,8 @@ use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::globals::point::{point_to_object, value_to_point};
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Object, ScriptObject, TObject, Value};
-use crate::string::AvmString;
-use gc_arena::MutationContext;
+use crate::string::{AvmString, StringContext};
+
 use ruffle_render::matrix::Matrix;
 use swf::Twips;
 
@@ -84,7 +84,8 @@ pub fn gradient_object_to_matrix<'gc>(
             Twips::from_pixels(ty),
         ))
     } else {
-        // TODO: You can apparently pass a 3x3 matrix here. Did anybody actually? How does it work?
+        // TODO: You can also pass a 3x3 matrix here. How does it work?
+        // For instance: {a:200, b:0, c:0, d:0, e:200, f:0, g:200, h:200, i:1}
         object_to_matrix(object, activation)
     }
 }
@@ -105,45 +106,34 @@ pub fn object_to_matrix<'gc>(
 
 /// Returns a `Matrix` with the properties from `object`.
 ///
-/// Returns the identity matrix if any of the `a`, `b`, `c`, `d`, or `tx` properties do not exist.
+/// Returns the identity matrix if any of the `a`, `b`, `c`, `d`, `tx` or `ty` properties do not exist.
 pub fn object_to_matrix_or_default<'gc>(
     object: Object<'gc>,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Matrix, Error<'gc>> {
-    // These lookups do not search the prototype chain and ignore virtual properties.
-    let a = object
-        .get_local_stored("a", activation)
-        .unwrap_or(Value::Undefined)
-        .coerce_to_f64(activation)? as f32;
-    let b = object
-        .get_local_stored("b", activation)
-        .unwrap_or(Value::Undefined)
-        .coerce_to_f64(activation)? as f32;
-    let c = object
-        .get_local_stored("c", activation)
-        .unwrap_or(Value::Undefined)
-        .coerce_to_f64(activation)? as f32;
-    let d = object
-        .get_local_stored("d", activation)
-        .unwrap_or(Value::Undefined)
-        .coerce_to_f64(activation)? as f32;
-    let tx = Twips::from_pixels(
-        object
-            .get_local_stored("tx", activation)
-            .unwrap_or(Value::Undefined)
-            .coerce_to_f64(activation)?,
-    );
-    let ty = Twips::from_pixels(
-        object
-            .get_local_stored("ty", activation)
-            .unwrap_or(Value::Undefined)
-            .coerce_to_f64(activation)?,
-    );
-    Ok(Matrix { a, b, c, d, tx, ty })
+    if let (Some(a), Some(b), Some(c), Some(d), Some(tx), Some(ty)) = (
+        // These lookups do not search the prototype chain and ignore virtual properties.
+        object.get_local_stored("a", activation, false),
+        object.get_local_stored("b", activation, false),
+        object.get_local_stored("c", activation, false),
+        object.get_local_stored("d", activation, false),
+        object.get_local_stored("tx", activation, false),
+        object.get_local_stored("ty", activation, false),
+    ) {
+        let a = a.coerce_to_f64(activation)? as f32;
+        let b = b.coerce_to_f64(activation)? as f32;
+        let c = c.coerce_to_f64(activation)? as f32;
+        let d = d.coerce_to_f64(activation)? as f32;
+        let tx = Twips::from_pixels(tx.coerce_to_f64(activation)?);
+        let ty = Twips::from_pixels(ty.coerce_to_f64(activation)?);
+        Ok(Matrix { a, b, c, d, tx, ty })
+    } else {
+        Ok(Matrix::IDENTITY)
+    }
 }
 
-pub fn matrix_to_object<'gc>(
-    matrix: Matrix,
+pub fn matrix_to_value<'gc>(
+    matrix: &Matrix,
     activation: &mut Activation<'_, 'gc>,
 ) -> Result<Value<'gc>, Error<'gc>> {
     let args = [
@@ -308,8 +298,13 @@ fn invert<'gc>(
     this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let mut matrix = object_to_matrix(this, activation)?;
-    matrix.invert();
+    // FIXME:
+    // 1) `invert` and other Matrix methods need to operate on `f64`, not with `ruffle_render::Matrix`.
+    // 2) If non-invertible, we are always setting to an identity matrix. But Flash only return identity
+    //    if `c != 0 && b != 0`? Otherwise it results in a matrix with infinities.
+    let matrix = object_to_matrix(this, activation)?
+        .inverse()
+        .unwrap_or_default();
     apply_matrix_to_object(matrix, this, activation)?;
 
     Ok(Value::Undefined)
@@ -344,7 +339,7 @@ fn create_box<'gc>(
         0.0
     };
 
-    let matrix = Matrix::create_box(
+    let matrix = Matrix::create_box_with_rotation(
         scale_x as f32,
         scale_y as f32,
         rotation as f32,
@@ -444,7 +439,7 @@ fn to_string<'gc>(
     let ty = this.get("ty", activation)?;
 
     Ok(AvmString::new_utf8(
-        activation.context.gc_context,
+        activation.gc(),
         format!(
             "(a={}, b={}, c={}, d={}, tx={}, ty={})",
             a.coerce_to_string(activation)?,
@@ -459,12 +454,12 @@ fn to_string<'gc>(
 }
 
 pub fn create_matrix_object<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     matrix_proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
     FunctionObject::constructor(
-        gc_context,
+        context.gc(),
         Executable::Native(constructor),
         constructor_to_fn!(constructor),
         fn_proto,
@@ -473,11 +468,11 @@ pub fn create_matrix_object<'gc>(
 }
 
 pub fn create_proto<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
+    let object = ScriptObject::new(context.gc(), Some(proto));
+    define_properties_on(PROTO_DECLS, context, object, fn_proto);
     object.into()
 }

@@ -19,6 +19,34 @@ pub enum MouseButton {
     Right,
 }
 
+/// Control inputs to a text field
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextControlCode {
+    MoveLeft,
+    MoveLeftWord,
+    MoveLeftLine,
+    MoveLeftDocument,
+    MoveRight,
+    MoveRightWord,
+    MoveRightLine,
+    MoveRightDocument,
+    SelectLeft,
+    SelectLeftWord,
+    SelectLeftLine,
+    SelectLeftDocument,
+    SelectRight,
+    SelectRightWord,
+    SelectRightLine,
+    SelectRightDocument,
+    SelectAll,
+    Copy,
+    Paste,
+    Cut,
+    Backspace,
+    Enter,
+    Delete,
+}
+
 /// All automated event types supported by FlashTAS.
 ///
 /// A FlashTAS input file consists of a string of `AutomatedEvent`s which are
@@ -37,6 +65,8 @@ pub enum AutomatedEvent {
     MouseDown {
         pos: MousePosition,
         btn: MouseButton,
+        index: Option<usize>,
+        assert_handled: Option<EventHandledAssertion>,
     },
 
     /// Release a mouse button.
@@ -44,4 +74,37 @@ pub enum AutomatedEvent {
         pos: MousePosition,
         btn: MouseButton,
     },
+
+    /// Mouse scroll.
+    MouseWheel {
+        lines: Option<f64>,
+        pixels: Option<f64>,
+    },
+
+    /// Press a key
+    KeyDown { key_code: u32 },
+
+    /// Release a key
+    KeyUp { key_code: u32 },
+
+    /// Input a character code
+    TextInput { codepoint: char },
+
+    /// Input a control character code
+    TextControl { code: TextControlCode },
+
+    /// Populate clipboard with the given text
+    SetClipboardText { text: String },
+
+    /// Inform the player that the focus has been gained (i.e. the window has been focused).
+    FocusGained,
+
+    /// Inform the player that the focus has been lost (i.e. the user focused another window).
+    FocusLost,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EventHandledAssertion {
+    pub value: bool,
+    pub message: String,
 }

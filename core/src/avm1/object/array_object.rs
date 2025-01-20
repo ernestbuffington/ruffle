@@ -2,7 +2,7 @@ use crate::avm1::property::Attribute;
 use crate::avm1::{Activation, Error, Object, ObjectPtr, ScriptObject, TObject, Value};
 use crate::ecma_conversions::f64_to_wrapping_i32;
 use crate::string::AvmString;
-use gc_arena::{Collect, MutationContext};
+use gc_arena::{Collect, Mutation};
 use std::fmt;
 
 #[derive(Clone, Copy, Collect)]
@@ -20,18 +20,18 @@ impl fmt::Debug for ArrayObject<'_> {
 impl<'gc> ArrayObject<'gc> {
     pub fn empty(activation: &Activation<'_, 'gc>) -> Self {
         Self::new(
-            activation.context.gc_context,
+            activation.gc(),
             activation.context.avm1.prototypes().array,
             [],
         )
     }
 
-    pub fn empty_with_proto(gc_context: MutationContext<'gc, '_>, proto: Object<'gc>) -> Self {
+    pub fn empty_with_proto(gc_context: &Mutation<'gc>, proto: Object<'gc>) -> Self {
         Self::new_internal(gc_context, proto, [])
     }
 
     pub fn new(
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         array_proto: Object<'gc>,
         elements: impl IntoIterator<Item = Value<'gc>>,
     ) -> Self {
@@ -39,7 +39,7 @@ impl<'gc> ArrayObject<'gc> {
     }
 
     fn new_internal(
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         proto: Object<'gc>,
         elements: impl IntoIterator<Item = Value<'gc>>,
     ) -> Self {
@@ -75,7 +75,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.as_ptr() as *const ObjectPtr
+        self.0.as_ptr()
     }
 
     fn set_local(
@@ -103,7 +103,7 @@ impl<'gc> TObject<'gc> for ArrayObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         this: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
-        Ok(Self::empty_with_proto(activation.context.gc_context, this).into())
+        Ok(Self::empty_with_proto(activation.gc(), this).into())
     }
 
     fn as_array_object(&self) -> Option<ArrayObject<'gc>> {

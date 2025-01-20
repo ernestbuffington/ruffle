@@ -1,11 +1,12 @@
-import { RuffleObject } from "./ruffle-object";
-import { RuffleEmbed } from "./ruffle-embed";
+import { RuffleObjectElement } from "./internal/player/ruffle-object-element";
+import { RuffleEmbedElement } from "./internal/player/ruffle-embed-element";
 import { installPlugin, FLASH_PLUGIN } from "./plugin-polyfill";
 import { publicPath } from "./public-path";
-import type { Config } from "./config";
+import type { DataLoadOptions, URLLoadOptions } from "./public/config";
+import { isExtension } from "./current-script";
 
-let isExtension: boolean;
-const globalConfig: Config = window.RufflePlayer?.config ?? {};
+const globalConfig: DataLoadOptions | URLLoadOptions | object =
+    window.RufflePlayer?.config ?? {};
 const jsScriptUrl = publicPath(globalConfig) + "ruffle.js";
 
 /**
@@ -18,6 +19,24 @@ const jsScriptUrl = publicPath(globalConfig) + "ruffle.js";
  */
 let objects: HTMLCollectionOf<HTMLObjectElement>;
 let embeds: HTMLCollectionOf<HTMLEmbedElement>;
+
+/**
+ * Check if this browser has pre-existing Flash support.
+ *
+ * @returns Whether this browser has a plugin indicating pre-existing Flash support.
+ */
+function isFlashEnabledBrowser(): boolean {
+    // If the user sets a configuration value not to favor Flash, pretend the browser does not support Flash so Ruffle takes effect.
+    if ("favorFlash" in globalConfig && globalConfig["favorFlash"] === false) {
+        return false;
+    }
+    // Otherwise, check for pre-existing Flash support.
+    return (
+        (navigator.plugins.namedItem("Shockwave Flash")?.filename ??
+            "ruffle.js") !== "ruffle.js"
+    );
+}
+
 /**
  *
  */
@@ -29,22 +48,22 @@ function polyfillFlashInstances(): void {
 
         // Replace <object> first, because <object> often wraps <embed>.
         for (const elem of Array.from(objects)) {
-            if (RuffleObject.isInterdictable(elem)) {
-                const ruffleObject = RuffleObject.fromNativeObjectElement(elem);
-                ruffleObject.setIsExtension(isExtension);
+            if (RuffleObjectElement.isInterdictable(elem)) {
+                const ruffleObject =
+                    RuffleObjectElement.fromNativeObjectElement(elem);
                 elem.replaceWith(ruffleObject);
             }
         }
         for (const elem of Array.from(embeds)) {
-            if (RuffleEmbed.isInterdictable(elem)) {
-                const ruffleEmbed = RuffleEmbed.fromNativeEmbedElement(elem);
-                ruffleEmbed.setIsExtension(isExtension);
+            if (RuffleEmbedElement.isInterdictable(elem)) {
+                const ruffleEmbed =
+                    RuffleEmbedElement.fromNativeEmbedElement(elem);
                 elem.replaceWith(ruffleEmbed);
             }
         }
     } catch (err) {
         console.error(
-            `Serious error encountered when polyfilling native Flash elements: ${err}`
+            `Serious error encountered when polyfilling native Flash elements: ${err}`,
         );
     }
 }
@@ -60,6 +79,7 @@ function polyfillFlashInstances(): void {
  */
 let iframes: HTMLCollectionOf<HTMLIFrameElement>;
 let frames: HTMLCollectionOf<HTMLFrameElement>;
+
 /**
  *
  */
@@ -68,14 +88,13 @@ function polyfillFrames(): void {
     iframes = iframes ?? document.getElementsByTagName("iframe");
     frames = frames ?? document.getElementsByTagName("frame");
 
-    [iframes, frames].forEach((elementsList) => {
-        for (let i = 0; i < elementsList.length; i++) {
-            const element = elementsList[i];
-            if (element.dataset.rufflePolyfilled !== undefined) {
+    [iframes, frames].forEach((elements) => {
+        for (const element of elements) {
+            if (element.dataset["rufflePolyfilled"] !== undefined) {
                 // Don't re-polyfill elements with the "data-ruffle-polyfilled" attribute.
                 continue;
             }
-            element.dataset.rufflePolyfilled = "";
+            element.dataset["rufflePolyfilled"] = "";
 
             const elementWindow = element.contentWindow;
 
@@ -100,7 +119,7 @@ function polyfillFrames(): void {
                 () => {
                     injectRuffle(elementWindow!, errorMessage);
                 },
-                false
+                false,
             );
         }
     });
@@ -112,7 +131,7 @@ function polyfillFrames(): void {
  */
 async function injectRuffle(
     elementWindow: Window,
-    errorMessage: string
+    errorMessage: string,
 ): Promise<void> {
     // The document is supposed to be completely loaded when this function is run.
     // As Chrome may be unable to access the document properties, we have to delay the execution a little bit.
@@ -138,7 +157,7 @@ async function injectRuffle(
 
     if (
         !isExtension &&
-        elementDocument.documentElement.dataset.ruffleOptout !== undefined
+        elementDocument.documentElement.dataset["ruffleOptout"] !== undefined
     ) {
         // Don't polyfill elements with the "data-ruffle-optout" attribute.
         return;
@@ -169,15 +188,20 @@ async function injectRuffle(
 
 /**
  * Listen for changes to the DOM.
- *
  */
 function initMutationObserver(): void {
     const observer = new MutationObserver(function (mutationsList) {
-        // If any nodes were added, re-run the polyfill to detect any new instances.
-        const nodesAdded = mutationsList.some(
-            (mutation) => mutation.addedNodes.length > 0
+        // If any embed or object nodes were added, re-run the polyfill to detect any new instances.
+        const embedOrObjectAdded = mutationsList.some((mutation) =>
+            Array.from(mutation.addedNodes).some(
+                (node) =>
+                    ["EMBED", "OBJECT"].includes(node.nodeName) ||
+                    (node instanceof Element &&
+                        (node as Element).querySelector("embed, object") !==
+                            null),
+            ),
         );
-        if (nodesAdded) {
+        if (embedOrObjectAdded) {
             polyfillFlashInstances();
             polyfillFrames();
         }
@@ -194,12 +218,11 @@ export function pluginPolyfill(): void {
 
 /**
  * Polyfills legacy Flash content on the page.
- *
- * @param isExt Whether or not Ruffle is running as a browser's extension.
  */
-export function polyfill(isExt: boolean): void {
-    isExtension = isExt;
-    polyfillFlashInstances();
-    polyfillFrames();
-    initMutationObserver();
+export function polyfill(): void {
+    if (!isFlashEnabledBrowser()) {
+        polyfillFlashInstances();
+        polyfillFrames();
+        initMutationObserver();
+    }
 }
