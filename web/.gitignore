@@ -1,5 +1,6 @@
 node_modules/
 dist/
+*.tsbuildinfo
 
 _cacache/
 _logs/
@@ -11,3 +12,6 @@ anonymous-cli-metrics.json
 # but it's still generated when doing `npm install` inside
 # of them.
 /packages/**/package-lock.json
+
+# Jetbrains tools (CLion, IntelliJ, etc)
+/.idea

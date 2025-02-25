@@ -1,28 +1,29 @@
-#![allow(clippy::bool_to_int_with_if)]
 #![deny(clippy::unwrap_used)]
+// Remove this when we start using `Rc` when compiling for wasm
+#![allow(clippy::arc_with_non_send_sync)]
 
 use bytemuck::{Pod, Zeroable};
-use std::borrow::Cow;
-
-use gc_arena::MutationContext;
-use ruffle_render::backend::null::NullBitmapSource;
 use ruffle_render::backend::{
-    Context3D, Context3DCommand, RenderBackend, ShapeHandle, ViewportDimensions,
+    BitmapCacheEntry, Context3D, Context3DProfile, PixelBenderOutput, PixelBenderTarget,
+    RenderBackend, ShapeHandle, ShapeHandleImpl, ViewportDimensions,
 };
 use ruffle_render::bitmap::{
-    Bitmap, BitmapFormat, BitmapHandle, BitmapHandleImpl, BitmapSource, SyncHandle,
+    Bitmap, BitmapFormat, BitmapHandle, BitmapHandleImpl, BitmapSource, PixelRegion, PixelSnapping,
+    RgbaBufRead, SyncHandle,
 };
-use ruffle_render::commands::{CommandHandler, CommandList};
+use ruffle_render::commands::{CommandHandler, CommandList, RenderBlendMode};
 use ruffle_render::error::Error as BitmapError;
+use ruffle_render::matrix::Matrix;
 use ruffle_render::quality::StageQuality;
-use ruffle_render::shape_utils::DistilledShape;
+use ruffle_render::shape_utils::{DistilledShape, GradientType};
 use ruffle_render::tessellator::{
-    Gradient as TessGradient, GradientType, ShapeTessellator, Vertex as TessVertex,
+    Gradient as TessGradient, ShapeTessellator, Vertex as TessVertex,
 };
 use ruffle_render::transform::Transform;
 use ruffle_web_common::{JsError, JsResult};
+use std::borrow::Cow;
 use std::sync::Arc;
-use swf::{BlendMode, Color};
+use swf::{BlendMode, Color, Twips};
 use thiserror::Error;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{
@@ -129,10 +130,8 @@ pub struct WebGlRenderBackend {
 
     shape_tessellator: ShapeTessellator,
 
-    meshes: Vec<Mesh>,
-
-    color_quad_shape: ShapeHandle,
-    bitmap_quad_shape: ShapeHandle,
+    color_quad_draws: Vec<Draw>,
+    bitmap_quad_draws: Vec<Draw>,
 
     mask_state: MaskState,
     num_masks: u32,
@@ -140,7 +139,7 @@ pub struct WebGlRenderBackend {
     is_transparent: bool,
 
     active_program: *const ShaderProgram,
-    blend_modes: Vec<BlendMode>,
+    blend_modes: Vec<RenderBlendMode>,
     mult_color: Option<[f32; 4]>,
     add_color: Option<[f32; 4]>,
 
@@ -156,7 +155,8 @@ pub struct WebGlRenderBackend {
 #[derive(Debug)]
 struct RegistryData {
     gl: Gl,
-    bitmap: Bitmap,
+    width: u32,
+    height: u32,
     texture: WebGlTexture,
 }
 
@@ -176,26 +176,23 @@ fn as_registry_data(handle: &BitmapHandle) -> &RegistryData {
 const MAX_GRADIENT_COLORS: usize = 15;
 
 impl WebGlRenderBackend {
-    pub fn new(canvas: &HtmlCanvasElement, is_transparent: bool) -> Result<Self, Error> {
+    pub fn new(
+        canvas: &HtmlCanvasElement,
+        is_transparent: bool,
+        quality: StageQuality,
+    ) -> Result<Self, Error> {
         // Create WebGL context.
         let options = [
             ("stencil", JsValue::TRUE),
-            (
-                "alpha",
-                if is_transparent {
-                    JsValue::TRUE
-                } else {
-                    JsValue::FALSE
-                },
-            ),
+            ("alpha", JsValue::from_bool(is_transparent)),
             ("antialias", JsValue::FALSE),
             ("depth", JsValue::FALSE),
             ("failIfMajorPerformanceCaveat", JsValue::TRUE), // fail if no GPU available
             ("premultipliedAlpha", JsValue::TRUE),
         ];
         let context_options = js_sys::Object::new();
-        for (name, value) in options.iter() {
-            js_sys::Reflect::set(&context_options, &JsValue::from(*name), value).warn_on_error();
+        for (name, value) in options.into_iter() {
+            js_sys::Reflect::set(&context_options, &JsValue::from(name), &value).warn_on_error();
         }
 
         // Attempt to create a WebGL2 context, but fall back to WebGL1 if unavailable.
@@ -208,13 +205,7 @@ impl WebGlRenderBackend {
                 .map_err(|_| Error::CantCreateGLContext)?;
 
             // Determine MSAA sample count.
-            // Default to 4x MSAA on desktop, 2x on mobile/tablets.
-            let mut msaa_sample_count = if ruffle_web_common::is_mobile_or_tablet() {
-                log::info!("Running on a mobile device; defaulting to 2x MSAA");
-                2
-            } else {
-                4
-            };
+            let mut msaa_sample_count = quality.sample_count().min(4);
 
             // Ensure that we don't exceed the max MSAA of this device.
             if let Ok(max_samples) = gl2.get_parameter(Gl2::MAX_SAMPLES) {
@@ -308,9 +299,8 @@ impl WebGlRenderBackend {
 
             shape_tessellator: ShapeTessellator::new(),
 
-            meshes: vec![],
-            color_quad_shape: ShapeHandle(0),
-            bitmap_quad_shape: ShapeHandle(1),
+            color_quad_draws: vec![],
+            bitmap_quad_draws: vec![],
             renderbuffer_width: 1,
             renderbuffer_height: 1,
             view_matrix: [[0.0; 4]; 4],
@@ -328,12 +318,13 @@ impl WebGlRenderBackend {
             viewport_scale_factor: 1.0,
         };
 
-        renderer.push_blend_mode(BlendMode::Normal);
+        renderer.push_blend_mode(RenderBlendMode::Builtin(BlendMode::Normal));
 
-        let color_quad_mesh = renderer.build_quad_mesh(&renderer.color_program)?;
-        renderer.meshes.push(color_quad_mesh);
-        let bitmap_quad_mesh = renderer.build_quad_mesh(&renderer.bitmap_program)?;
-        renderer.meshes.push(bitmap_quad_mesh);
+        let mut color_quad_mesh = renderer.build_quad_mesh(&renderer.color_program)?;
+        let mut bitmap_quad_mesh = renderer.build_quad_mesh(&renderer.bitmap_program)?;
+        renderer.color_quad_draws.append(&mut color_quad_mesh);
+        renderer.bitmap_quad_draws.append(&mut bitmap_quad_mesh);
+
         renderer.set_viewport_dimensions(ViewportDimensions {
             width: 1,
             height: 1,
@@ -343,7 +334,7 @@ impl WebGlRenderBackend {
         Ok(renderer)
     }
 
-    fn build_quad_mesh(&self, program: &ShaderProgram) -> Result<Mesh, Error> {
+    fn build_quad_mesh(&self, program: &ShaderProgram) -> Result<Vec<Draw>, Error> {
         let vao = self.create_vertex_array()?;
 
         let vertex_buffer = self.gl.create_buffer().ok_or(Error::UnableToCreateBuffer)?;
@@ -376,7 +367,7 @@ impl WebGlRenderBackend {
             .bind_buffer(Gl::ELEMENT_ARRAY_BUFFER, Some(&index_buffer));
         self.gl.buffer_data_with_u8_array(
             Gl::ELEMENT_ARRAY_BUFFER,
-            bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
+            bytemuck::cast_slice(&[0u32, 1, 2, 3]),
             Gl::STATIC_DRAW,
         );
 
@@ -410,32 +401,31 @@ impl WebGlRenderBackend {
             self.gl.disable_vertex_attrib_array(i);
         }
 
-        let quad_mesh = Mesh {
-            draws: vec![Draw {
-                draw_type: if program.program == self.bitmap_program.program {
-                    DrawType::Bitmap(BitmapDraw {
-                        matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                        handle: None,
-                        is_smoothed: true,
-                        is_repeating: false,
-                    })
-                } else {
-                    DrawType::Color
-                },
-                vao,
-                vertex_buffer: Buffer {
-                    gl: self.gl.clone(),
-                    buffer: vertex_buffer,
-                },
-                index_buffer: Buffer {
-                    gl: self.gl.clone(),
-                    buffer: index_buffer,
-                },
-                num_indices: 6,
-                num_mask_indices: 6,
-            }],
-        };
-        Ok(quad_mesh)
+        let mut draws = vec![];
+        draws.push(Draw {
+            draw_type: if program.program == self.bitmap_program.program {
+                DrawType::Bitmap(BitmapDraw {
+                    matrix: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    handle: None,
+                    is_smoothed: true,
+                    is_repeating: false,
+                })
+            } else {
+                DrawType::Color
+            },
+            vao,
+            vertex_buffer: Buffer {
+                gl: self.gl.clone(),
+                buffer: vertex_buffer,
+            },
+            index_buffer: Buffer {
+                gl: self.gl.clone(),
+                buffer: index_buffer,
+            },
+            num_indices: 4,
+            num_mask_indices: 4,
+        });
+        Ok(draws)
     }
 
     fn compile_shader(gl: &Gl, shader_type: u32, glsl_src: &str) -> Result<WebGlShader, Error> {
@@ -576,15 +566,15 @@ impl WebGlRenderBackend {
         &mut self,
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
-    ) -> Result<Mesh, Error> {
+    ) -> Result<Vec<Draw>, Error> {
         use ruffle_render::tessellator::DrawType as TessDrawType;
 
         let lyon_mesh = self
             .shape_tessellator
             .tessellate_shape(shape, bitmap_source);
 
-        let mut draws = Vec::with_capacity(lyon_mesh.len());
-        for draw in lyon_mesh {
+        let mut draws = Vec::with_capacity(lyon_mesh.draws.len());
+        for draw in lyon_mesh.draws {
             let num_indices = draw.indices.len() as i32;
             let num_mask_indices = draw.mask_index_count as i32;
 
@@ -610,7 +600,7 @@ impl WebGlRenderBackend {
 
             let program = match draw.draw_type {
                 TessDrawType::Color => &self.color_program,
-                TessDrawType::Gradient(_) => &self.gradient_program,
+                TessDrawType::Gradient { .. } => &self.gradient_program,
                 TessDrawType::Bitmap(_) => &self.bitmap_program,
             };
 
@@ -661,8 +651,11 @@ impl WebGlRenderBackend {
                     num_indices,
                     num_mask_indices,
                 },
-                TessDrawType::Gradient(gradient) => Draw {
-                    draw_type: DrawType::Gradient(Box::new(Gradient::from(gradient))),
+                TessDrawType::Gradient { matrix, gradient } => Draw {
+                    draw_type: DrawType::Gradient(Box::new(Gradient::new(
+                        lyon_mesh.gradients[gradient].clone(), // TODO: Gradient deduplication
+                        matrix,
+                    ))),
                     vao,
                     vertex_buffer: Buffer {
                         gl: self.gl.clone(),
@@ -704,7 +697,7 @@ impl WebGlRenderBackend {
             }
         }
 
-        Ok(Mesh { draws })
+        Ok(draws)
     }
 
     /// Creates and binds a new VAO.
@@ -731,18 +724,6 @@ impl WebGlRenderBackend {
         } else {
             self.vao_ext.bind_vertex_array_oes(vao);
         };
-    }
-
-    fn delete_mesh(&self, mesh: &Mesh) {
-        if let Some(gl2) = &self.gl2 {
-            for draw in &mesh.draws {
-                gl2.delete_vertex_array(Some(&draw.vao));
-            }
-        } else {
-            for draw in &mesh.draws {
-                self.vao_ext.delete_vertex_array_oes(Some(&draw.vao));
-            }
-        }
     }
 
     fn set_stencil_state(&mut self) {
@@ -776,17 +757,17 @@ impl WebGlRenderBackend {
         }
     }
 
-    fn apply_blend_mode(&mut self, mode: BlendMode) {
+    fn apply_blend_mode(&mut self, mode: RenderBlendMode) {
         let (blend_op, src_rgb, dst_rgb) = match mode {
-            BlendMode::Normal => {
+            RenderBlendMode::Builtin(BlendMode::Normal) => {
                 // src + (1-a)
                 (Gl::FUNC_ADD, Gl::ONE, Gl::ONE_MINUS_SRC_ALPHA)
             }
-            BlendMode::Add => {
+            RenderBlendMode::Builtin(BlendMode::Add) => {
                 // src + dst
                 (Gl::FUNC_ADD, Gl::ONE, Gl::ONE)
             }
-            BlendMode::Subtract => {
+            RenderBlendMode::Builtin(BlendMode::Subtract) => {
                 // dst - src
                 (Gl::FUNC_REVERSE_SUBTRACT, Gl::ONE, Gl::ONE)
             }
@@ -909,31 +890,103 @@ impl WebGlRenderBackend {
             program.uniform1i(&self.gl, ShaderUniform::BitmapTexture, 0);
 
             // Render the quad.
-            let quad = &self.meshes[self.bitmap_quad_shape.0];
-            self.bind_vertex_array(Some(&quad.draws[0].vao));
+            let quad = &self.bitmap_quad_draws;
+            self.bind_vertex_array(Some(&quad[0].vao));
             self.gl.draw_elements_with_i32(
-                Gl::TRIANGLES,
-                quad.draws[0].num_indices,
+                Gl::TRIANGLE_FAN,
+                quad[0].num_indices,
                 Gl::UNSIGNED_INT,
                 0,
             );
         }
     }
 
-    fn push_blend_mode(&mut self, blend: BlendMode) {
-        if self.blend_modes.last() != Some(&blend) {
-            self.apply_blend_mode(blend);
+    fn push_blend_mode(&mut self, blend: RenderBlendMode) {
+        if !same_blend_mode(self.blend_modes.last(), &blend) {
+            self.apply_blend_mode(blend.clone());
         }
         self.blend_modes.push(blend);
     }
-
     fn pop_blend_mode(&mut self) {
         let old = self.blend_modes.pop();
         // We never pop our base 'BlendMode::Normal'
-        let current = *self.blend_modes.last().unwrap_or(&BlendMode::Normal);
-        if old != Some(current) {
-            self.apply_blend_mode(current);
+        let current = self
+            .blend_modes
+            .last()
+            .unwrap_or(&RenderBlendMode::Builtin(BlendMode::Normal));
+        if !same_blend_mode(old.as_ref(), current) {
+            self.apply_blend_mode(current.clone());
         }
+    }
+
+    fn draw_quad<const MODE: u32, const COUNT: i32>(&mut self, color: Color, matrix: Matrix) {
+        let world_matrix = [
+            [matrix.a, matrix.b, 0.0, 0.0],
+            [matrix.c, matrix.d, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [
+                matrix.tx.to_pixels() as f32,
+                matrix.ty.to_pixels() as f32,
+                0.0,
+                1.0,
+            ],
+        ];
+
+        let mult_color = [
+            color.r as f32 * 255.0,
+            color.g as f32 * 255.0,
+            color.b as f32 * 255.0,
+            color.a as f32 * 255.0,
+        ];
+        let add_color = [0.0; 4];
+
+        self.set_stencil_state();
+
+        let program = &self.color_program;
+
+        // Set common render state, while minimizing unnecessary state changes.
+        // TODO: Using designated layout specifiers in WebGL2/OpenGL ES 3, we could guarantee that uniforms
+        // are in the same location between shaders, and avoid changing them unless necessary.
+        if program as *const ShaderProgram != self.active_program {
+            self.gl.use_program(Some(&program.program));
+            self.active_program = program as *const ShaderProgram;
+
+            program.uniform_matrix4fv(&self.gl, ShaderUniform::ViewMatrix, &self.view_matrix);
+
+            self.mult_color = None;
+            self.add_color = None;
+        };
+
+        self.color_program
+            .uniform_matrix4fv(&self.gl, ShaderUniform::WorldMatrix, &world_matrix);
+        if Some(mult_color) != self.mult_color {
+            self.color_program
+                .uniform4fv(&self.gl, ShaderUniform::MultColor, &mult_color);
+            self.mult_color = Some(mult_color);
+        }
+        if Some(add_color) != self.add_color {
+            self.color_program
+                .uniform4fv(&self.gl, ShaderUniform::AddColor, &add_color);
+            self.add_color = Some(add_color);
+        }
+
+        let quad = &self.color_quad_draws;
+        self.bind_vertex_array(Some(&quad[0].vao));
+
+        let count = if COUNT < 0 {
+            quad[0].num_indices
+        } else {
+            COUNT
+        };
+        self.gl
+            .draw_elements_with_i32(MODE, count, Gl::UNSIGNED_INT, 0);
+    }
+}
+
+fn same_blend_mode(first: Option<&RenderBlendMode>, second: &RenderBlendMode) -> bool {
+    match (first, second) {
+        (Some(RenderBlendMode::Builtin(old)), RenderBlendMode::Builtin(new)) => old == new,
+        _ => false,
     }
 }
 
@@ -941,9 +994,9 @@ impl RenderBackend for WebGlRenderBackend {
     fn render_offscreen(
         &mut self,
         _handle: BitmapHandle,
-        _width: u32,
-        _height: u32,
         _commands: CommandList,
+        _quality: StageQuality,
+        _bounds: PixelRegion,
     ) -> Option<Box<dyn SyncHandle>> {
         None
     }
@@ -986,55 +1039,48 @@ impl RenderBackend for WebGlRenderBackend {
         shape: DistilledShape,
         bitmap_source: &dyn BitmapSource,
     ) -> ShapeHandle {
-        let handle = ShapeHandle(self.meshes.len());
-        match self.register_shape_internal(shape, bitmap_source) {
-            Ok(mesh) => self.meshes.push(mesh),
-            Err(e) => log::error!("Couldn't register shape: {:?}", e),
-        }
-        handle
+        let mesh = match self.register_shape_internal(shape, bitmap_source) {
+            Ok(draws) => Mesh {
+                draws,
+                gl2: self.gl2.clone(),
+                vao_ext: self.vao_ext.clone(),
+            },
+            Err(e) => {
+                log::error!("Couldn't register shape: {:?}", e);
+                Mesh {
+                    draws: vec![],
+                    gl2: self.gl2.clone(),
+                    vao_ext: self.vao_ext.clone(),
+                }
+            }
+        };
+        ShapeHandle(Arc::new(mesh))
     }
 
-    fn replace_shape(
+    fn submit_frame(
         &mut self,
-        shape: DistilledShape,
-        bitmap_source: &dyn BitmapSource,
-        handle: ShapeHandle,
+        clear: Color,
+        commands: CommandList,
+        cache_entries: Vec<BitmapCacheEntry>,
     ) {
-        self.delete_mesh(&self.meshes[handle.0]);
-        match self.register_shape_internal(shape, bitmap_source) {
-            Ok(mesh) => self.meshes[handle.0] = mesh,
-            Err(e) => log::error!("Couldn't replace shape: {:?}", e),
+        if !cache_entries.is_empty() {
+            panic!("Bitmap caching is unavailable on the webgl backend");
         }
-    }
-
-    fn register_glyph_shape(&mut self, glyph: &swf::Glyph) -> ShapeHandle {
-        let shape = ruffle_render::shape_utils::swf_glyph_to_shape(glyph);
-        let handle = ShapeHandle(self.meshes.len());
-        match self.register_shape_internal((&shape).into(), &NullBitmapSource) {
-            Ok(mesh) => self.meshes.push(mesh),
-            Err(e) => log::error!("Couldn't register glyph shape: {:?}", e),
-        }
-        handle
-    }
-
-    fn submit_frame(&mut self, clear: Color, commands: CommandList) {
         self.begin_frame(clear);
         commands.execute(self);
         self.end_frame();
     }
 
     fn register_bitmap(&mut self, bitmap: Bitmap) -> Result<BitmapHandle, BitmapError> {
-        let format = match bitmap.format() {
-            BitmapFormat::Rgb => Gl::RGB,
-            BitmapFormat::Rgba => Gl::RGBA,
+        let (format, bitmap) = match bitmap.format() {
+            BitmapFormat::Rgb | BitmapFormat::Yuv420p => (Gl::RGB, bitmap.to_rgb()),
+            BitmapFormat::Rgba | BitmapFormat::Yuva420p => (Gl::RGBA, bitmap.to_rgba()),
         };
 
         let texture = self
             .gl
             .create_texture()
-            .ok_or(BitmapError::JavascriptError(
-                "Unable to create texture".into(),
-            ))?;
+            .ok_or_else(|| BitmapError::JavascriptError("Unable to create texture".into()))?;
         self.gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
         self.gl
             .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
@@ -1063,7 +1109,8 @@ impl RenderBackend for WebGlRenderBackend {
 
         Ok(BitmapHandle(Arc::new(RegistryData {
             gl: self.gl.clone(),
-            bitmap,
+            width: bitmap.width(),
+            height: bitmap.height(),
             texture,
         })))
     }
@@ -1071,25 +1118,29 @@ impl RenderBackend for WebGlRenderBackend {
     fn update_texture(
         &mut self,
         handle: &BitmapHandle,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
+        bitmap: Bitmap,
+        _region: PixelRegion,
     ) -> Result<(), BitmapError> {
         let texture = &as_registry_data(handle).texture;
 
-        self.gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
+        self.gl.bind_texture(Gl::TEXTURE_2D, Some(texture));
+
+        let (format, bitmap) = match bitmap.format() {
+            BitmapFormat::Rgb | BitmapFormat::Yuv420p => (Gl::RGB, bitmap.to_rgb()),
+            BitmapFormat::Rgba | BitmapFormat::Yuva420p => (Gl::RGBA, bitmap.to_rgba()),
+        };
 
         self.gl
             .tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
                 Gl::TEXTURE_2D,
                 0,
-                Gl::RGBA as i32,
-                width as i32,
-                height as i32,
+                format as i32,
+                bitmap.width() as i32,
+                bitmap.height() as i32,
                 0,
-                Gl::RGBA,
+                format,
                 Gl::UNSIGNED_BYTE,
-                Some(&rgba),
+                Some(bitmap.data()),
             )
             .into_js_result()
             .map_err(|e| BitmapError::JavascriptError(e.into()))?;
@@ -1097,16 +1148,14 @@ impl RenderBackend for WebGlRenderBackend {
         Ok(())
     }
 
-    fn create_context3d(&mut self) -> Result<Box<dyn Context3D>, BitmapError> {
-        Err(BitmapError::Unimplemented)
-    }
-    fn context3d_present<'gc>(
+    fn create_context3d(
         &mut self,
-        _context: &mut dyn Context3D,
-        _commands: Vec<Context3DCommand<'gc>>,
-        _mc: MutationContext<'gc, '_>,
-    ) -> Result<(), BitmapError> {
-        Err(BitmapError::Unimplemented)
+        _profile: Context3DProfile,
+    ) -> Result<Box<dyn Context3D>, BitmapError> {
+        Err(BitmapError::Unimplemented("createContext3D".into()))
+    }
+    fn context3d_present(&mut self, _context: &mut dyn Context3D) -> Result<(), BitmapError> {
+        Err(BitmapError::Unimplemented("Context3D.present".into()))
     }
 
     fn debug_info(&self) -> Cow<'static, str> {
@@ -1137,19 +1186,86 @@ impl RenderBackend for WebGlRenderBackend {
             self.renderbuffer_width, self.renderbuffer_height
         ));
 
-        return Cow::Owned(result.join("\n"));
+        Cow::Owned(result.join("\n"))
+    }
+
+    fn name(&self) -> &'static str {
+        "webgl"
     }
 
     fn set_quality(&mut self, _quality: StageQuality) {}
+
+    fn compile_pixelbender_shader(
+        &mut self,
+        _shader: ruffle_render::pixel_bender::PixelBenderShader,
+    ) -> Result<ruffle_render::pixel_bender::PixelBenderShaderHandle, BitmapError> {
+        Err(BitmapError::Unimplemented(
+            "compile_pixelbender_shader".into(),
+        ))
+    }
+
+    fn resolve_sync_handle(
+        &mut self,
+        _handle: Box<dyn SyncHandle>,
+        _with_rgba: RgbaBufRead,
+    ) -> Result<(), ruffle_render::error::Error> {
+        Err(ruffle_render::error::Error::Unimplemented(
+            "Sync handle resolution".into(),
+        ))
+    }
+
+    fn run_pixelbender_shader(
+        &mut self,
+        _handle: ruffle_render::pixel_bender::PixelBenderShaderHandle,
+        _arguments: &[ruffle_render::pixel_bender::PixelBenderShaderArgument],
+        _target: &PixelBenderTarget,
+    ) -> Result<PixelBenderOutput, BitmapError> {
+        Err(BitmapError::Unimplemented("run_pixelbender_shader".into()))
+    }
+
+    fn create_empty_texture(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<BitmapHandle, BitmapError> {
+        let texture = self
+            .gl
+            .create_texture()
+            .ok_or_else(|| BitmapError::JavascriptError("Unable to create texture".into()))?;
+        self.gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
+
+        // You must set the texture parameters for non-power-of-2 textures to function in WebGL1.
+        self.gl
+            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_S, Gl::CLAMP_TO_EDGE as i32);
+        self.gl
+            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_WRAP_T, Gl::CLAMP_TO_EDGE as i32);
+        self.gl
+            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, Gl::LINEAR as i32);
+        self.gl
+            .tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, Gl::LINEAR as i32);
+
+        Ok(BitmapHandle(Arc::new(RegistryData {
+            gl: self.gl.clone(),
+            width,
+            height,
+            texture,
+        })))
+    }
 }
 
 impl CommandHandler for WebGlRenderBackend {
-    fn render_bitmap(&mut self, bitmap: BitmapHandle, transform: Transform, smoothing: bool) {
+    fn render_bitmap(
+        &mut self,
+        bitmap: BitmapHandle,
+        transform: Transform,
+        smoothing: bool,
+        pixel_snapping: PixelSnapping,
+    ) {
         self.set_stencil_state();
         let entry = as_registry_data(&bitmap);
         // Adjust the quad draw to use the target bitmap.
-        let mesh = &self.meshes[self.bitmap_quad_shape.0];
-        let draw = &mesh.draws[0];
+        let quad = &self.bitmap_quad_draws;
+        let draw = &quad[0];
         let bitmap_matrix = if let DrawType::Bitmap(BitmapDraw { matrix, .. }) = &draw.draw_type {
             matrix
         } else {
@@ -1157,11 +1273,9 @@ impl CommandHandler for WebGlRenderBackend {
         };
 
         // Scale the quad to the bitmap's dimensions.
-        let matrix = transform.matrix
-            * ruffle_render::matrix::Matrix::scale(
-                entry.bitmap.width() as f32,
-                entry.bitmap.height() as f32,
-            );
+        let mut matrix = transform.matrix;
+        pixel_snapping.apply(&mut matrix);
+        matrix *= Matrix::scale(entry.width as f32, entry.height as f32);
 
         let world_matrix = [
             [matrix.a, matrix.b, 0.0, 0.0],
@@ -1231,7 +1345,7 @@ impl CommandHandler for WebGlRenderBackend {
 
         // Draw the triangles.
         self.gl
-            .draw_elements_with_i32(Gl::TRIANGLES, draw.num_indices, Gl::UNSIGNED_INT, 0);
+            .draw_elements_with_i32(Gl::TRIANGLE_FAN, draw.num_indices, Gl::UNSIGNED_INT, 0);
     }
 
     fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {
@@ -1252,7 +1366,7 @@ impl CommandHandler for WebGlRenderBackend {
 
         self.set_stencil_state();
 
-        let mesh = &self.meshes[shape.0];
+        let mesh = as_mesh(&shape);
         for draw in &mesh.draws {
             // Ignore strokes when drawing a mask stencil.
             let num_indices = if self.mask_state != MaskState::DrawMaskStencil
@@ -1335,7 +1449,7 @@ impl CommandHandler for WebGlRenderBackend {
                 }
                 DrawType::Bitmap(bitmap) => {
                     let texture = match &bitmap.handle {
-                        Some(handle) => &as_registry_data(&handle).texture,
+                        Some(handle) => &as_registry_data(handle).texture,
                         None => {
                             log::warn!("Tried to render a handleless bitmap");
                             continue;
@@ -1350,7 +1464,7 @@ impl CommandHandler for WebGlRenderBackend {
 
                     // Bind texture.
                     self.gl.active_texture(Gl::TEXTURE0);
-                    self.gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
+                    self.gl.bind_texture(Gl::TEXTURE_2D, Some(texture));
                     program.uniform1i(&self.gl, ShaderUniform::BitmapTexture, 0);
 
                     // Set texture parameters.
@@ -1382,66 +1496,24 @@ impl CommandHandler for WebGlRenderBackend {
         }
     }
 
-    fn draw_rect(&mut self, color: Color, matrix: ruffle_render::matrix::Matrix) {
-        let world_matrix = [
-            [matrix.a, matrix.b, 0.0, 0.0],
-            [matrix.c, matrix.d, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [
-                matrix.tx.to_pixels() as f32,
-                matrix.ty.to_pixels() as f32,
-                0.0,
-                1.0,
-            ],
-        ];
+    fn render_stage3d(&mut self, _bitmap: BitmapHandle, _transform: Transform) {
+        panic!("Stage3D should not have been created on WebGL backend")
+    }
 
-        let mult_color = [
-            color.r as f32 * 255.0,
-            color.g as f32 * 255.0,
-            color.b as f32 * 255.0,
-            color.a as f32 * 255.0,
-        ];
-        let add_color = [0.0; 4];
+    fn draw_rect(&mut self, color: Color, matrix: Matrix) {
+        self.draw_quad::<{ Gl::TRIANGLE_FAN }, -1>(color, matrix)
+    }
 
-        self.set_stencil_state();
+    fn draw_line(&mut self, color: Color, mut matrix: Matrix) {
+        matrix.tx += Twips::HALF_PX;
+        matrix.ty += Twips::HALF_PX;
+        self.draw_quad::<{ Gl::LINE_STRIP }, 2>(color, matrix)
+    }
 
-        let program = &self.color_program;
-
-        // Set common render state, while minimizing unnecessary state changes.
-        // TODO: Using designated layout specifiers in WebGL2/OpenGL ES 3, we could guarantee that uniforms
-        // are in the same location between shaders, and avoid changing them unless necessary.
-        if program as *const ShaderProgram != self.active_program {
-            self.gl.use_program(Some(&program.program));
-            self.active_program = program as *const ShaderProgram;
-
-            program.uniform_matrix4fv(&self.gl, ShaderUniform::ViewMatrix, &self.view_matrix);
-
-            self.mult_color = None;
-            self.add_color = None;
-        };
-
-        self.color_program
-            .uniform_matrix4fv(&self.gl, ShaderUniform::WorldMatrix, &world_matrix);
-        if Some(mult_color) != self.mult_color {
-            self.color_program
-                .uniform4fv(&self.gl, ShaderUniform::MultColor, &mult_color);
-            self.mult_color = Some(mult_color);
-        }
-        if Some(add_color) != self.add_color {
-            self.color_program
-                .uniform4fv(&self.gl, ShaderUniform::AddColor, &add_color);
-            self.add_color = Some(add_color);
-        }
-
-        let quad = &self.meshes[self.color_quad_shape.0];
-        self.bind_vertex_array(Some(&quad.draws[0].vao));
-
-        self.gl.draw_elements_with_i32(
-            Gl::TRIANGLES,
-            quad.draws[0].num_indices,
-            Gl::UNSIGNED_INT,
-            0,
-        );
+    fn draw_line_rect(&mut self, color: Color, mut matrix: Matrix) {
+        matrix.tx += Twips::HALF_PX;
+        matrix.ty += Twips::HALF_PX;
+        self.draw_quad::<{ Gl::LINE_LOOP }, -1>(color, matrix)
     }
 
     fn push_mask(&mut self) {
@@ -1476,7 +1548,7 @@ impl CommandHandler for WebGlRenderBackend {
         self.mask_state_dirty = true;
     }
 
-    fn blend(&mut self, commands: CommandList, blend: BlendMode) {
+    fn blend(&mut self, commands: CommandList, blend: RenderBlendMode) {
         self.push_blend_mode(blend);
         commands.execute(self);
         self.pop_blend_mode();
@@ -1494,20 +1566,37 @@ struct Gradient {
     interpolation: swf::GradientInterpolation,
 }
 
-impl From<TessGradient> for Gradient {
-    fn from(gradient: TessGradient) -> Self {
+impl Gradient {
+    fn new(gradient: TessGradient, matrix: [[f32; 3]; 3]) -> Self {
+        // TODO: Support more than MAX_GRADIENT_COLORS.
+        let num_colors = gradient.records.len().min(MAX_GRADIENT_COLORS);
         let mut ratios = [0.0; MAX_GRADIENT_COLORS];
         let mut colors = [[0.0; 4]; MAX_GRADIENT_COLORS];
-        ratios[..gradient.num_colors].copy_from_slice(&gradient.ratios[..gradient.num_colors]);
-        colors[..gradient.num_colors].copy_from_slice(&gradient.colors[..gradient.num_colors]);
+        for i in 0..num_colors {
+            let record = &gradient.records[i];
+            let mut color = [
+                f32::from(record.color.r) / 255.0,
+                f32::from(record.color.g) / 255.0,
+                f32::from(record.color.b) / 255.0,
+                f32::from(record.color.a) / 255.0,
+            ];
+            // Convert to linear color space if this is a linear-interpolated gradient.
+            match gradient.interpolation {
+                swf::GradientInterpolation::Rgb => {}
+                swf::GradientInterpolation::LinearRgb => srgb_to_linear(&mut color),
+            }
 
-        for i in gradient.num_colors..MAX_GRADIENT_COLORS {
+            colors[i] = color;
+            ratios[i] = f32::from(record.ratio) / 255.0;
+        }
+
+        for i in num_colors..MAX_GRADIENT_COLORS {
             ratios[i] = ratios[i - 1];
             colors[i] = colors[i - 1];
         }
 
         Self {
-            matrix: gradient.matrix,
+            matrix,
             gradient_type: match gradient.gradient_type {
                 GradientType::Linear => 0,
                 GradientType::Radial => 1,
@@ -1520,7 +1609,7 @@ impl From<TessGradient> for Gradient {
                 swf::GradientSpread::Repeat => 1,
                 swf::GradientSpread::Reflect => 2,
             },
-            focal_point: gradient.focal_point.to_f32(),
+            focal_point: gradient.focal_point.to_f32().clamp(-0.98, 0.98),
             interpolation: gradient.interpolation,
         }
     }
@@ -1534,10 +1623,34 @@ struct BitmapDraw {
     is_smoothed: bool,
 }
 
+#[derive(Debug)]
 struct Mesh {
+    gl2: Option<Gl2>,
+    vao_ext: OesVertexArrayObject,
     draws: Vec<Draw>,
 }
 
+impl Drop for Mesh {
+    fn drop(&mut self) {
+        if let Some(gl2) = &self.gl2 {
+            for draw in &self.draws {
+                gl2.delete_vertex_array(Some(&draw.vao));
+            }
+        } else {
+            for draw in &self.draws {
+                self.vao_ext.delete_vertex_array_oes(Some(&draw.vao));
+            }
+        }
+    }
+}
+
+impl ShapeHandleImpl for Mesh {}
+
+fn as_mesh(handle: &ShapeHandle) -> &Mesh {
+    <dyn ShapeHandleImpl>::downcast_ref(&*handle.0).expect("Shape handle must be a WebGL ShapeData")
+}
+
+#[derive(Debug)]
 struct Buffer {
     gl: Gl,
     buffer: WebGlBuffer,
@@ -1550,6 +1663,7 @@ impl Drop for Buffer {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 struct Draw {
     draw_type: DrawType,
     vertex_buffer: Buffer,
@@ -1559,6 +1673,7 @@ struct Draw {
     num_mask_indices: i32,
 }
 
+#[derive(Debug)]
 enum DrawType {
     Color,
     Gradient(Box<Gradient>),
@@ -1700,8 +1815,6 @@ impl ShaderProgram {
     }
 }
 
-impl WebGlRenderBackend {}
-
 trait GlExt {
     fn check_error(&self, error_msg: &'static str) -> Result<(), Error>;
 }
@@ -1723,5 +1836,16 @@ impl GlExt for Gl2 {
             Self::NO_ERROR => Ok(()),
             error => Err(Error::GLError(error_msg, error)),
         }
+    }
+}
+
+/// Converts an RGBA color from sRGB space to linear color space.
+fn srgb_to_linear(color: &mut [f32; 4]) {
+    for n in &mut color[..3] {
+        *n = if *n <= 0.04045 {
+            *n / 12.92
+        } else {
+            f32::powf((*n + 0.055) / 1.055, 2.4)
+        };
     }
 }

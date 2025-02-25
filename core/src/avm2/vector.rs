@@ -1,13 +1,13 @@
 //! Storage for AS3 Vectors
 
 use crate::avm2::activation::Activation;
-use crate::avm2::error::range_error;
-use crate::avm2::object::{ClassObject, Object};
+use crate::avm2::class::Class;
+use crate::avm2::error::{make_error_1125, range_error};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use gc_arena::Collect;
 use std::cmp::{max, min};
-use std::ops::{Index, RangeBounds};
+use std::ops::RangeBounds;
 use std::slice::SliceIndex;
 
 /// The vector storage portion of a vector object.
@@ -19,7 +19,7 @@ use std::slice::SliceIndex;
 ///
 /// A vector may also be configured to have a fixed size; when this is enabled,
 /// attempts to modify the length fail.
-#[derive(Collect, Clone)]
+#[derive(Collect, Clone, Debug)]
 #[collect(no_drop)]
 pub struct VectorStorage<'gc> {
     /// The storage for vector values.
@@ -29,21 +29,21 @@ pub struct VectorStorage<'gc> {
     is_fixed: bool,
 
     /// The allowed type of the contents of the vector, in the form of a class
-    /// object.
+    /// None represents a Vector.<*>.
     ///
     /// Vector typing is enforced by one of two ways: either by generating
     /// exceptions on values that are not of the given type, or by coercing
     /// incorrectly typed values to the given type if possible. Values that do
     /// not coerce are replaced with the default value for the given value
     /// type.
-    value_type: ClassObject<'gc>,
+    value_type: Option<Class<'gc>>,
 }
 
 impl<'gc> VectorStorage<'gc> {
     pub fn new(
         length: usize,
         is_fixed: bool,
-        value_type: ClassObject<'gc>,
+        value_type: Option<Class<'gc>>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Self {
         let storage = Vec::new();
@@ -61,7 +61,7 @@ impl<'gc> VectorStorage<'gc> {
         self_vec
     }
 
-    fn check_fixed(&self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
+    pub fn check_fixed(&self, activation: &mut Activation<'_, 'gc>) -> Result<(), Error<'gc>> {
         if self.is_fixed {
             return Err(Error::AvmError(range_error(
                 activation,
@@ -79,7 +79,7 @@ impl<'gc> VectorStorage<'gc> {
     pub fn from_values(
         storage: Vec<Value<'gc>>,
         is_fixed: bool,
-        value_type: ClassObject<'gc>,
+        value_type: Option<Class<'gc>>,
     ) -> Self {
         VectorStorage {
             storage,
@@ -117,20 +117,30 @@ impl<'gc> VectorStorage<'gc> {
 
     /// Get the default value for this vector.
     pub fn default(&self, activation: &mut Activation<'_, 'gc>) -> Value<'gc> {
-        if Object::ptr_eq(self.value_type, activation.avm2().classes().int)
-            || Object::ptr_eq(self.value_type, activation.avm2().classes().uint)
-        {
-            Value::Integer(0)
-        } else if Object::ptr_eq(self.value_type, activation.avm2().classes().number) {
-            Value::Number(0.0)
+        if let Some(value_type) = self.value_type {
+            if value_type == activation.avm2().class_defs().int
+                || value_type == activation.avm2().class_defs().uint
+            {
+                Value::Integer(0)
+            } else if value_type == activation.avm2().class_defs().number {
+                Value::Number(0.0)
+            } else {
+                Value::Null
+            }
         } else {
             Value::Null
         }
     }
 
-    /// Get the value type this vector coerces things to.
-    pub fn value_type(&self) -> ClassObject<'gc> {
+    /// Get the value type stored in this vector (same as the class <T> type).
+    pub fn value_type(&self) -> Option<Class<'gc>> {
         self.value_type
+    }
+
+    /// Get the value type this vector coerces things to.
+    pub fn value_type_for_coercion(&self, activation: &mut Activation<'_, 'gc>) -> Class<'gc> {
+        self.value_type
+            .unwrap_or_else(|| activation.avm2().class_defs().object)
     }
 
     /// Check if a vector index is in bounds.
@@ -140,8 +150,8 @@ impl<'gc> VectorStorage<'gc> {
 
     /// Change an arbitrary i32 into a positive parameter index.
     ///
-    /// This converts negative indicies into positive indicies indexed from the
-    /// end of the array. Negative indicies that point before the start of the
+    /// This converts negative indices into positive indices indexed from the
+    /// end of the array. Negative indices that point before the start of the
     /// array are clamped to zero.
     pub fn clamp_parameter_index(&self, pos: i32) -> usize {
         if pos < 0 {
@@ -157,15 +167,16 @@ impl<'gc> VectorStorage<'gc> {
         pos: usize,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
-        if let Some(val) = self.storage.get(pos).cloned() {
+        if let Some(val) = self.get_optional(pos) {
             Ok(val)
         } else {
-            Err(Error::AvmError(range_error(
-                activation,
-                &format!("{pos} is outside the range of the vector"),
-                0,
-            )?))
+            Err(make_error_1125(activation, pos, self.length()))
         }
+    }
+
+    /// Retrieve a value from the vector or `None` for out-of-bounds.
+    pub fn get_optional(&self, index: usize) -> Option<Value<'gc>> {
+        self.storage.get(index).cloned()
     }
 
     /// Store a value into the vector.
@@ -191,11 +202,7 @@ impl<'gc> VectorStorage<'gc> {
             *v = value;
             Ok(())
         } else {
-            Err(Error::AvmError(range_error(
-                activation,
-                &format!("{pos} is outside the range of the vector"),
-                0,
-            )?))
+            Err(make_error_1125(activation, pos, self.length()))
         }
     }
 
@@ -224,15 +231,20 @@ impl<'gc> VectorStorage<'gc> {
     pub fn pop(&mut self, activation: &mut Activation<'_, 'gc>) -> Result<Value<'gc>, Error<'gc>> {
         self.check_fixed(activation)?;
 
-        match self.storage.pop() {
-            Some(v) => Ok(v),
-            None if Object::ptr_eq(self.value_type(), activation.avm2().classes().uint) => {
+        if let Some(v) = self.storage.pop() {
+            Ok(v)
+        } else if let Some(value_type) = self.value_type() {
+            if value_type == activation.avm2().class_defs().uint
+                || value_type == activation.avm2().class_defs().int
+            {
                 Ok(Value::Integer(0))
+            } else if value_type == activation.avm2().class_defs().number {
+                Ok(Value::Number(0.0))
+            } else {
+                Ok(Value::Undefined)
             }
-            None if Object::ptr_eq(self.value_type(), activation.avm2().classes().int) => {
-                Ok(Value::Integer(0))
-            }
-            None => Ok(Value::Undefined),
+        } else {
+            Ok(Value::Undefined)
         }
     }
 
@@ -265,21 +277,20 @@ impl<'gc> VectorStorage<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         self.check_fixed(activation)?;
 
-        let unshifted = if self.storage.is_empty() {
-            None
+        if !self.storage.is_empty() {
+            Ok(self.storage.remove(0))
+        } else if let Some(value_type) = self.value_type() {
+            if value_type == activation.avm2().class_defs().uint
+                || value_type == activation.avm2().class_defs().int
+            {
+                Ok(Value::Integer(0))
+            } else if value_type == activation.avm2().class_defs().number {
+                Ok(Value::Number(0.0))
+            } else {
+                Ok(Value::Undefined)
+            }
         } else {
-            Some(self.storage.remove(0))
-        };
-
-        match unshifted {
-            Some(v) => Ok(v),
-            None if Object::ptr_eq(self.value_type(), activation.avm2().classes().uint) => {
-                Ok(Value::Integer(0))
-            }
-            None if Object::ptr_eq(self.value_type(), activation.avm2().classes().int) => {
-                Ok(Value::Integer(0))
-            }
-            None => Ok(Value::Undefined),
+            Ok(Value::Undefined)
         }
     }
 
@@ -334,7 +345,7 @@ impl<'gc> VectorStorage<'gc> {
         };
 
         if position >= self.storage.len() {
-            Err(format!("RangeError: Index {position} extends beyond the end of the vector").into())
+            Err(make_error_1125(activation, position, self.length()))
         } else {
             Ok(self.storage.remove(position))
         }
@@ -366,10 +377,7 @@ impl<'gc> VectorStorage<'gc> {
     where
         R: Clone + SliceIndex<[Value<'gc>], Output = [Value<'gc>]> + RangeBounds<usize>,
     {
-        if self.is_fixed && self.storage.index(range.clone()).len() != replace_with.len() {
-            return Err("RangeError: Vector is fixed".into());
-        }
-
+        // NOTE: no fixed check here for bug compatibility
         Ok(self.storage.splice(range, replace_with).collect())
     }
 }

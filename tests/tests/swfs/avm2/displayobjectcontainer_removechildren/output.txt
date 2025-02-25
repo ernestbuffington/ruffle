@@ -6,7 +6,18 @@
 true
 //this.numChildren
 1
+//this.removeChildren(1)
+//this.numChildren
+1
+//this.removeChildren(100)
+//this.numChildren
+1
 //this.removeChildren(0,0x7fffffff)
+//this.numChildren
+0
+//this.removeChildren()
+//this.removeChildren(0, 0)
+RangeError 2006
 //this.numChildren
 0
 //var chx = this.getChildAt(0)

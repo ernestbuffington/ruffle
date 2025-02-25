@@ -119,7 +119,7 @@ impl<'a> VariableDumper<'a> {
         object: &Object<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) {
-        let keys = object.get_keys(activation);
+        let keys = object.get_keys(activation, false);
         if keys.is_empty() {
             self.output.push_str(" {}");
         } else {
@@ -152,6 +152,10 @@ impl<'a> VariableDumper<'a> {
             Value::Object(object) => {
                 self.print_object(object, activation);
             }
+            Value::MovieClip(_) => {
+                let obj = value.coerce_to_object(activation);
+                self.print_object(&obj, activation);
+            }
         }
     }
 
@@ -162,7 +166,7 @@ impl<'a> VariableDumper<'a> {
         object: &Object<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) {
-        let keys = object.get_keys(activation);
+        let keys = object.get_keys(activation, false);
         if keys.is_empty() {
             return;
         }
@@ -258,7 +262,7 @@ mod tests {
     #[test]
     fn dump_empty_object() {
         with_avm(19, |activation, _root| -> Result<(), Error> {
-            let object = ScriptObject::new(activation.context.gc_context, None);
+            let object = ScriptObject::new(activation.gc(), None);
             assert_eq!(
                 VariableDumper::dump(&object.into(), " ", activation),
                 "[object #0] {}"
@@ -270,8 +274,8 @@ mod tests {
     #[test]
     fn dump_object() {
         with_avm(19, |activation, _root| -> Result<(), Error> {
-            let object = ScriptObject::new(activation.context.gc_context, None);
-            let child = ScriptObject::new(activation.context.gc_context, None);
+            let object = ScriptObject::new(activation.gc(), None);
+            let child = ScriptObject::new(activation.gc(), None);
             object.set("self", object.into(), activation)?;
             object.set("test", "value".into(), activation)?;
             object.set("child", child.into(), activation)?;
@@ -288,8 +292,8 @@ mod tests {
     #[test]
     fn dump_variables() {
         with_avm(19, |activation, _root| -> Result<(), Error> {
-            let object = ScriptObject::new(activation.context.gc_context, None);
-            let child = ScriptObject::new(activation.context.gc_context, None);
+            let object = ScriptObject::new(activation.gc(), None);
+            let child = ScriptObject::new(activation.gc(), None);
             object.set("self", object.into(), activation)?;
             object.set("test", "value".into(), activation)?;
             object.set("child", child.into(), activation)?;

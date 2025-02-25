@@ -1,24 +1,17 @@
+use crate::avm1::clamp::Clamp;
 use crate::avm1::function::{Executable, FunctionObject};
 use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Activation, Error, Object, ScriptObject, TObject, Value};
 use crate::locale::{get_current_date_time, get_timezone};
-use crate::string::AvmString;
-use gc_arena::{Collect, GcCell, MutationContext};
+use crate::string::{AvmString, StringContext};
+use gc_arena::Gc;
+use std::cell::Cell;
 use std::fmt;
-
-fn clamp_to_i32(value: f64) -> i32 {
-    // Values outside of `i32` range get clamped to `i32::MIN`.
-    if value.is_finite() && value >= i32::MIN.into() && value <= i32::MAX.into() {
-        value as i32
-    } else {
-        i32::MIN
-    }
-}
 
 #[inline]
 fn rem_euclid_i32(lhs: f64, rhs: i32) -> i32 {
-    let result = clamp_to_i32(lhs % f64::from(rhs));
+    let result = (lhs % f64::from(rhs)).clamp_to_i32();
     if result < 0 {
         result + rhs
     } else {
@@ -27,8 +20,7 @@ fn rem_euclid_i32(lhs: f64, rhs: i32) -> i32 {
 }
 
 /// Date and time, represented by milliseconds since epoch.
-#[derive(Clone, PartialEq, PartialOrd, Debug, Collect)]
-#[collect(require_static)]
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
 #[repr(transparent)]
 pub struct Date(f64);
 
@@ -113,11 +105,11 @@ impl Date {
         let day = self.day();
         // Perform binary search to find the largest `year: i32` such that `Self::from_year(year) <= *self`.
         let mut low =
-            clamp_to_i32((day / if *self < Self::EPOCH { 365.0 } else { 366.0 }).floor()) + 1970;
+            ((day / if *self < Self::EPOCH { 365.0 } else { 366.0 }).floor()).clamp_to_i32() + 1970;
         let mut high =
-            clamp_to_i32((day / if *self < Self::EPOCH { 366.0 } else { 365.0 }).ceil()) + 1970;
+            ((day / if *self < Self::EPOCH { 366.0 } else { 365.0 }).ceil()).clamp_to_i32() + 1970;
         while low < high {
-            let pivot = clamp_to_i32((f64::from(low) + f64::from(high)) / 2.0);
+            let pivot = ((f64::from(low) + f64::from(high)) / 2.0).clamp_to_i32();
             if Self::from_year(pivot) <= *self {
                 if Self::from_year(pivot + 1) > *self {
                     return pivot;
@@ -155,7 +147,7 @@ impl Date {
 
     /// ECMA-262 DayWithinYear - Get days within year (0-365).
     fn day_within_year(&self) -> i32 {
-        clamp_to_i32(self.day() - Self::day_from_year(self.year().into()))
+        (self.day() - Self::day_from_year(self.year().into())).clamp_to_i32()
     }
 
     /// ECMA-262 DateFromTime - Get days within month (1-31).
@@ -188,7 +180,7 @@ impl Date {
 
     /// Get timezone offset in minutes.
     fn timezone_offset(&self) -> f64 {
-        (self.0 - self.clone().local().0) / f64::from(Self::MS_PER_MINUTE)
+        (self.0 - self.local().0) / f64::from(Self::MS_PER_MINUTE)
     }
 
     /// ECMA-262 HourFromTime - Get hours (0-23).
@@ -234,8 +226,8 @@ impl Date {
     }
 
     fn day_from_month(year: f64, month: f64) -> f64 {
-        let year = clamp_to_i32(year);
-        let month = clamp_to_i32(month.floor());
+        let year = year.clamp_to_i32();
+        let month = month.floor().clamp_to_i32();
         if !(0..12).contains(&month) {
             return f64::NAN;
         }
@@ -283,7 +275,7 @@ impl fmt::Display for Date {
             "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
 
-        let timezone_offset = clamp_to_i32(-self.timezone_offset());
+        let timezone_offset = (-self.timezone_offset()).clamp_to_i32();
         write!(
             f,
             "{} {} {} {:02}:{:02}:{:02} GMT{}{:02}{:02} {}",
@@ -378,8 +370,8 @@ fn constructor<'gc>(
         }
     };
     this.set_native(
-        activation.context.gc_context,
-        NativeObject::Date(GcCell::allocate(activation.context.gc_context, date)),
+        activation.gc(),
+        NativeObject::Date(Gc::new(activation.gc(), Cell::new(date))),
     );
     Ok(this.into())
 }
@@ -390,11 +382,7 @@ fn function<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(AvmString::new_utf8(
-        activation.context.gc_context,
-        Date::now().local().to_string(),
-    )
-    .into())
+    Ok(AvmString::new_utf8(activation.gc(), Date::now().local().to_string()).into())
 }
 
 /// ECMA-262 Date.UTC
@@ -458,20 +446,21 @@ fn method<'gc>(
         _ => {}
     }
 
-    let date = match this.native() {
+    let date_ref = match this.native() {
         NativeObject::Date(date) => date,
         _ => return Ok(Value::Undefined),
     };
-    let mut date_ref = date.write(activation.context.gc_context);
+    let date = date_ref.get();
 
     match index {
-        GET_TIME => return Ok(date_ref.time().into()),
+        GET_TIME => return Ok(date.time().into()),
         SET_TIME => {
             let timestamp = args.first().copied().unwrap_or(f64::NAN);
-            *date_ref = Date(timestamp).clip();
-            return Ok(date_ref.time().into());
+            let new_date = Date(timestamp).clip();
+            date_ref.set(new_date);
+            return Ok(new_date.time().into());
         }
-        GET_TIMEZONE_OFFSET => return Ok(date_ref.timezone_offset().into()),
+        GET_TIMEZONE_OFFSET => return Ok(date.timezone_offset().into()),
         _ => {}
     }
 
@@ -486,7 +475,7 @@ fn method<'gc>(
         index,
         GET_FULL_YEAR..=GET_MILLISECONDS | GET_TIME | GET_TIMEZONE_OFFSET
     );
-    if is_get && date_ref.time().is_nan() {
+    if is_get && date.time().is_nan() {
         return Ok(f64::NAN.into());
     }
 
@@ -503,19 +492,16 @@ fn method<'gc>(
             .or_else(|| (i == index).then_some(f64::NAN))
     };
 
-    let date = if is_utc {
-        date_ref.clone()
-    } else {
-        date_ref.clone().local()
-    };
+    let date = if is_utc { date } else { date.local() };
 
-    let mut set_date = |day: f64, time: f64| {
+    let set_date = |day: f64, time: f64| {
         let mut date = Date::make_date(day, time);
         if !is_utc {
             date = date.utc();
         }
-        *date_ref = date.clip();
-        date_ref.time()
+        date = date.clip();
+        date_ref.set(date);
+        date.time()
     };
 
     Ok(match index {
@@ -564,9 +550,9 @@ fn method<'gc>(
                 arg(SET_MILLISECONDS).unwrap_or_else(|| date.milliseconds().into());
             if index == SET_MINUTES {
                 // `setMinutes()` special case.
-                minutes = clamp_to_i32(minutes).into();
-                seconds = clamp_to_i32(seconds).into();
-                milliseconds = clamp_to_i32(milliseconds).into();
+                minutes = minutes.clamp_to_i32().into();
+                seconds = seconds.clamp_to_i32().into();
+                milliseconds = milliseconds.clamp_to_i32().into();
             }
             set_date(
                 date.day(),
@@ -574,28 +560,28 @@ fn method<'gc>(
             )
             .into()
         }
-        TO_STRING => AvmString::new_utf8(activation.context.gc_context, date.to_string()).into(),
+        TO_STRING => AvmString::new_utf8(activation.gc(), date.to_string()).into(),
         GET_TIME..=GET_TIMEZONE_OFFSET | SET_YEAR.. => unreachable!(), // Handled above.
     })
 }
 
 pub fn create_constructor<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let date_proto = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(PROTO_DECLS, gc_context, date_proto, fn_proto);
+    let date_proto = ScriptObject::new(context.gc(), Some(proto));
+    define_properties_on(PROTO_DECLS, context, date_proto, fn_proto);
 
     let date_constructor = FunctionObject::constructor(
-        gc_context,
+        context.gc(),
         Executable::Native(date_method!(256)),
         Executable::Native(function),
         fn_proto,
         date_proto.into(),
     );
     let object = date_constructor.raw_script_object();
-    define_properties_on(OBJECT_DECLS, gc_context, object, fn_proto);
+    define_properties_on(OBJECT_DECLS, context, object, fn_proto);
 
     date_constructor
 }

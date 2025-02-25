@@ -2,11 +2,50 @@
     "settings_ruffle_enable": {
         "message": "Flash-Inhalte in Ruffle abspielen"
     },
-    "settings_page_ignore_optout": {
-        "message": "Flash-Inhalte abspielen, auch wenn die Seite Ruffle abgeschaltet hat"
-    },
     "settings_ignore_optout": {
-        "message": "Ignoriere Kompatibilitätswarnungen von Websites"
+        "message": "Flash-Inhalte auch auf Seiten abspielen, die Ruffle nicht zulassen"
+    },
+    "settings_show_swf_download": {
+        "message": "SWF-Download im Kontextmenü anzeigen"
+    },
+    "settings_autostart": {
+        "message": "Automatisch ohne Splash-Screen abspielen (zum Entstummen klicken)"
+    },
+    "settings_swf_takeover": {
+        "message": "SWF-Dateien im Browser abspielen, anstatt sie herunterzuladen"
+    },
+    "settings_log_level": {
+        "message": "Protokoll-Stufe"
+    },
+    "settings_log_level_error": {
+        "message": "Fehler"
+    },
+    "settings_log_level_warn": {
+        "message": "Warnungen"
+    },
+    "settings_log_level_info": {
+        "message": "Information"
+    },
+    "settings_max_execution_duration": {
+        "message": "Maximal zulässige ActionScript Ausführungsdauer (in Sekunden)"
+    },
+    "settings_player_version": {
+        "message": "Flash-Player-Versionsnummer für Emulation (Bereich 1-32)"
+    },
+    "settings_preferred_renderer": {
+        "message": "Bevorzugter Renderer"
+    },
+    "settings_preferred_renderer_auto": {
+        "message": "Automatisch"
+    },
+    "settings_advanced_options": {
+        "message": "Erweiterte Einstellungen"
+    },
+    "settings_reset": {
+        "message": "Einstellungen zurücksetzen"
+    },
+    "settings_reset_confirm": {
+        "message": "Bist du sicher, dass du alle DNS-Einträge auf ihre ursprünglichen Werte zurücksetzen möchten?"
     },
     "status_init": {
         "message": "Prüfe den aktuellen Tab…"
@@ -21,6 +60,9 @@
         "message": "Prüfe Status von Ruffle im aktuellen Tab…"
     },
     "status_result_running": {
+        "message": "Ruffle wurde geladen und spielt den Flashinhalt im aktuellen Tab ab."
+    },
+    "status_result_running_protected": {
         "message": "Ruffle wurde geladen und spielt den Flashinhalt im aktuellen Tab ab."
     },
     "status_result_optout": {
@@ -38,6 +80,9 @@
     "action_reload": {
         "message": "Laden Sie den Tab neu um die Änderungen zu übernehmen."
     },
+    "open_player_page": {
+        "message": "SWF-Player öffnen"
+    },
     "open_settings_page": {
         "message": "Einstellungsseite öffnen"
     },
@@ -52,5 +97,23 @@
     },
     "settings_saved": {
         "message": "Einstellungen wurden gespeichert"
+    },
+    "onboarding_page": {
+        "message": "Einführungsseite"
+    },
+    "permissions_grant": {
+        "message": "Erteile Ruffle die Berechtigung, auf meine Daten auf allen Websites zuzugreifen"
+    },
+    "permissions_not_granted": {
+        "message": "Sie müssen auf das Ruffle-Symbol auf jeder Website klicken, auf der Sie Ruffle verwenden möchten"
+    },
+    "grant_single_site_permission": {
+        "message": "Permanent auf dieser Seite aktivieren"
+    },
+    "permissions_explanation": {
+        "message": "Die Ruffle-Erweiterung funktioniert am besten, wenn sie Zugriff auf Daten aller Websites hat. Dadurch kann sie direkt beim Laden einer Website aktiv werden und Websites, die Flash Player erkennen, überzeugen, Flash-Inhalte sofort auszuführen. Sie ermöglicht es außerdem das Laden von SWF-Dateien aus anderen Quellen im Web in die interne Player-Seite und das automatische öffnen direkter SWF-Links in dieser Seite. Wenn Sie diese Berechtigung nicht erteilen, müssen Sie Ruffle auf jeder Website, auf der Sie es verwenden möchten, manuell aktivieren, indem Sie auf das Symbol der Erweiterung klicken und sie für die jeweilige Website freischalten."
+    },
+    "swf_player_permissions": {
+        "message": "Sie müssen diesem URL-Ursprung die Berechtigung erteilen, SWFs von ihm zu laden."
     }
 }

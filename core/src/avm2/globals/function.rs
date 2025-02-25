@@ -1,212 +1,193 @@
 //! Function builtin and prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::Class;
+use crate::avm2::error::{eval_error, type_error};
 use crate::avm2::globals::array::resolve_array_hole;
-use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{function_allocator, FunctionObject, Object, TObject};
+use crate::avm2::method::{Method, NativeMethod};
+use crate::avm2::object::{FunctionObject, TObject};
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::avm2::Multiname;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
-use gc_arena::{GcCell, MutationContext};
 
-/// Implements `Function`'s instance initializer.
-pub fn instance_init<'gc>(
+use gc_arena::{Gc, GcCell};
+
+/// Implements `Function`'s custom constructor.
+/// This is used when ActionScript manually calls 'new Function()',
+/// which produces a dummy function that just returns `Value::Undefined`
+/// when called.
+pub fn function_constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this {
-        activation.super_init(this, &[])?;
+    if !args.is_empty() {
+        return Err(Error::AvmError(eval_error(
+            activation,
+            "Error #1066: The form function('function body') is not supported.",
+            1066,
+        )?));
     }
 
-    Ok(Value::Undefined)
+    let mc = activation.gc();
+
+    let dummy = Gc::new(
+        mc,
+        NativeMethod {
+            method: |_, _, _| Ok(Value::Undefined),
+            name: "<Empty Function>",
+            signature: vec![],
+            resolved_signature: GcCell::new(mc, None),
+            return_type: None,
+            is_variadic: true,
+        },
+    );
+
+    let function_object = FunctionObject::from_method(
+        activation,
+        Method::Native(dummy),
+        activation.create_scopechain(),
+        None,
+        None,
+        None,
+    );
+
+    Ok(function_object.into())
 }
 
-/// Implements `Function`'s class initializer.
-pub fn class_init<'gc>(
+pub fn call_handler<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    _this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    activation
+        .avm2()
+        .classes()
+        .function
+        .construct(activation, args)
+}
+
+pub fn _init_function_class<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this {
-        let scope = activation.create_scopechain();
-        let this_class = this.as_class_object().unwrap();
-        let function_proto = this_class.prototype();
+    // Set Function's prototype, register it in SystemClasses, and initialize
+    // Object's prototype. This method is called from AS during builtins
+    // initialization.
+    let function_class_object = this.as_object().unwrap().as_class_object().unwrap();
 
-        function_proto.set_property_local(
-            &Multiname::public("call"),
-            FunctionObject::from_method(
-                activation,
-                Method::from_builtin(call, "call", activation.context.gc_context),
-                scope,
-                None,
-                Some(this_class),
-            )
-            .into(),
-            activation,
-        )?;
-        function_proto.set_property_local(
-            &Multiname::public("apply"),
-            FunctionObject::from_method(
-                activation,
-                Method::from_builtin(apply, "apply", activation.context.gc_context),
-                scope,
-                None,
-                Some(this_class),
-            )
-            .into(),
-            activation,
-        )?;
-        function_proto.set_local_property_is_enumerable(
-            activation.context.gc_context,
-            "call".into(),
-            false,
-        );
-        function_proto.set_local_property_is_enumerable(
-            activation.context.gc_context,
-            "apply".into(),
-            false,
-        );
-    }
+    activation.avm2().system_classes.as_mut().unwrap().function = function_class_object;
+
+    let function_proto = function_class_object
+        .construct(activation, &[])?
+        .as_object()
+        .unwrap();
+    function_class_object.link_prototype(activation, function_proto);
+
+    crate::avm2::globals::object::init_object_prototype(activation)?;
+
     Ok(Value::Undefined)
 }
 
 /// Implements `Function.prototype.call`
-fn call<'gc>(
+pub fn call<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    func: Option<Object<'gc>>,
+    func: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this = args
-        .get(0)
-        .and_then(|v| v.coerce_to_object(activation).ok())
-        .or_else(|| activation.global_scope());
+    let func = func.as_object().unwrap().as_function_object().unwrap();
 
-    if let Some(func) = func {
-        if args.len() > 1 {
-            Ok(func.call(this, &args[1..], activation)?)
-        } else {
-            Ok(func.call(this, &[], activation)?)
-        }
+    let this = args.get_value(0);
+
+    if args.len() > 1 {
+        Ok(func.call(activation, this, &args[1..])?)
     } else {
-        Err("Not a callable function".into())
+        Ok(func.call(activation, this, &[])?)
     }
 }
 
 /// Implements `Function.prototype.apply`
-fn apply<'gc>(
+pub fn apply<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    func: Option<Object<'gc>>,
+    func: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let this = args
-        .get(0)
-        .and_then(|v| v.coerce_to_object(activation).ok())
-        .or_else(|| activation.global_scope());
+    let func = func.as_object().unwrap().as_function_object().unwrap();
 
-    if let Some(func) = func {
-        let arg_array = args.get(1).cloned().unwrap_or(Value::Undefined).as_object();
-        let resolved_args = if let Some(arg_array) = arg_array {
-            let arg_storage: Vec<Option<Value<'gc>>> = arg_array
+    let this = args.get_value(0);
+
+    let arg_array = args.get_value(1);
+    let resolved_args = if !matches!(arg_array, Value::Undefined | Value::Null) {
+        if let Some(array_object) = arg_array.as_object().and_then(|o| o.as_array_object()) {
+            let arg_storage = array_object
                 .as_array_storage()
-                .map(|a| a.iter().collect())
-                .ok_or_else(|| {
-                    Error::from("Second parameter of apply must be an array or undefined")
-                })?;
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>();
 
             let mut resolved_args = Vec::with_capacity(arg_storage.len());
             for (i, v) in arg_storage.iter().enumerate() {
-                resolved_args.push(resolve_array_hole(activation, arg_array, i, *v)?);
+                resolved_args.push(resolve_array_hole(activation, array_object.into(), i, *v)?);
             }
 
             resolved_args
         } else {
-            Vec::new()
-        };
-
-        Ok(func.call(this, &resolved_args, activation)?)
+            return Err(Error::AvmError(type_error(
+                activation,
+                "Error #1116: second argument to Function.prototype.apply must be an array.",
+                1116,
+            )?));
+        }
     } else {
-        Err("Not a callable function".into())
-    }
+        // Passing null or undefined results in the function being called with no arguments passed
+        Vec::new()
+    };
+
+    func.call(activation, this, &resolved_args)
 }
 
-fn length<'gc>(
+pub fn get_length<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this.and_then(|this| this.as_function_object()) {
-        return Ok(this.num_parameters().into());
+    let this = this.as_object().unwrap();
+
+    if let Some(this) = this.as_function_object() {
+        return Ok(this.executable().num_parameters().into());
     }
 
     Ok(Value::Undefined)
 }
 
-fn prototype<'gc>(
+pub fn get_prototype<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this {
-        if let Some(function) = this.as_function_object() {
-            if let Some(proto) = function.prototype() {
-                return Ok(proto.into());
-            } else {
-                return Ok(Value::Undefined);
-            }
+    let this = this.as_object().unwrap();
+
+    if let Some(function) = this.as_function_object() {
+        if let Some(proto) = function.prototype() {
+            return Ok(proto.into());
+        } else {
+            return Ok(Value::Undefined);
         }
     }
+
     Ok(Value::Undefined)
 }
 
-fn set_prototype<'gc>(
+pub fn set_prototype<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this {
-        if let Some(function) = this.as_function_object() {
-            let new_proto = args
-                .get(0)
-                .unwrap_or(&Value::Undefined)
-                .as_object()
-                .ok_or("Cannot set prototype of class to null or undefined")?;
-            function.set_prototype(new_proto, activation.context.gc_context);
-        }
+    let this = this.as_object().unwrap();
+
+    if let Some(function) = this.as_function_object() {
+        let new_proto = args.get_value(0).as_object();
+        function.set_prototype(new_proto, activation.gc());
     }
+
     Ok(Value::Undefined)
-}
-
-/// Construct `Function`'s class.
-pub fn create_class<'gc>(gc_context: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
-    let function_class = Class::new(
-        QName::new(Namespace::public(), "Function"),
-        Some(Multiname::public("Object")),
-        Method::from_builtin(instance_init, "<Function instance initializer>", gc_context),
-        Method::from_builtin(class_init, "<Function class initializer>", gc_context),
-        gc_context,
-    );
-
-    let mut write = function_class.write(gc_context);
-
-    // Fixed traits (in AS3 namespace)
-    const AS3_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[("call", call), ("apply", apply)];
-    write.define_as3_builtin_instance_methods(gc_context, AS3_INSTANCE_METHODS);
-
-    const PUBLIC_INSTANCE_PROPERTIES: &[(
-        &str,
-        Option<NativeMethodImpl>,
-        Option<NativeMethodImpl>,
-    )] = &[
-        ("prototype", Some(prototype), Some(set_prototype)),
-        ("length", Some(length), None),
-    ];
-    write.define_public_builtin_instance_properties(gc_context, PUBLIC_INSTANCE_PROPERTIES);
-
-    write.set_instance_allocator(function_allocator);
-
-    function_class
 }

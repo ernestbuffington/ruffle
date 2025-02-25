@@ -1,0 +1,119 @@
+{
+    "settings_ruffle_enable": {
+        "message": "Odtwarzaj zawartość Flash w Ruffle"
+    },
+    "settings_ignore_optout": {
+        "message": "Odtwarzaj zawartość Flash nawet na stronach uniemożliwiających Ruffle"
+    },
+    "settings_show_swf_download": {
+        "message": "Pokaż pobieranie SWF w menu kontekstowym"
+    },
+    "settings_autostart": {
+        "message": "Odtwarzaj zawartość Flash automatycznie (kliknij, aby wyłączyć wyciszenie)"
+    },
+    "settings_swf_takeover": {
+        "message": "Odtwarzaj pliki SWF w przeglądarce zamiast je pobierać"
+    },
+    "settings_log_level": {
+        "message": "Poziom logowania"
+    },
+    "settings_log_level_error": {
+        "message": "Błędy"
+    },
+    "settings_log_level_warn": {
+        "message": "Ostrzeżenia"
+    },
+    "settings_log_level_info": {
+        "message": "Info"
+    },
+    "settings_max_execution_duration": {
+        "message": "Maksymalny dozwolony czas wykonania kodu ActionScript (w sekundach)"
+    },
+    "settings_player_version": {
+        "message": "Numer wersji Flash odtwarzacza do emulowania (zakres 1-32)"
+    },
+    "settings_preferred_renderer": {
+        "message": "Preferowany renderer"
+    },
+    "settings_preferred_renderer_auto": {
+        "message": "Automatyczny"
+    },
+    "settings_advanced_options": {
+        "message": "Opcje zaawansowane"
+    },
+    "settings_reset": {
+        "message": "Resetuj ustawienia"
+    },
+    "settings_reset_confirm": {
+        "message": "Czy na pewno chcesz przywrócić ustawienia Ruffle do wartości domyślnych?"
+    },
+    "status_init": {
+        "message": "Czytanie bieżącej karty…"
+    },
+    "status_no_tabs": {
+        "message": "Brak aktywnej karty."
+    },
+    "status_tabs_error": {
+        "message": "Wystąpił błąd podczas wyszukiwania bieżącej karty."
+    },
+    "status_message_init": {
+        "message": "Sprawdzanie statusu Ruffle na bieżącej karcie…"
+    },
+    "status_result_running": {
+        "message": "Ruffle jest gotowy do uruchomienia zawartości Flash w bieżącej karcie."
+    },
+    "status_result_running_protected": {
+        "message": "Ruffle jest gotowy do uruchomienia żądanej zawartości Flash."
+    },
+    "status_result_optout": {
+        "message": "Ruffle nie jest załadowany, ponieważ bieżąca strona oznaczyła się jako niekompatybilna."
+    },
+    "status_result_disabled": {
+        "message": "Ruffle jest wyłączony."
+    },
+    "status_result_error": {
+        "message": "Wystąpił błąd podczas zapytania bieżącej karty o Ruffle."
+    },
+    "status_result_protected": {
+        "message": "Ruffle nie może załadować się na chronionych stronach przeglądarki."
+    },
+    "action_reload": {
+        "message": "Odśwież kartę, aby zastosować zmiany"
+    },
+    "open_player_page": {
+        "message": "Otwórz Odtwarzacz SWF"
+    },
+    "open_settings_page": {
+        "message": "Otwórz stronę ustawień"
+    },
+    "settings_page": {
+        "message": "Strona ustawień"
+    },
+    "description": {
+        "message": "Przywraca Flasha do sieci, gdzie jest jego miejsce."
+    },
+    "save_settings": {
+        "message": "Zapisz ustawienia"
+    },
+    "settings_saved": {
+        "message": "Zapisano ustawienia"
+    },
+    "onboarding_page": {
+        "message": "Strona powitalna"
+    },
+    "permissions_grant": {
+        "message": "Udziel Ruffle pozwolenia na dostęp do moich danych na wszystkich stronach"
+    },
+    "permissions_not_granted": {
+        "message": "Będziesz musiał kliknąć ikonę Ruffle na każdej stronie, na której chcesz używać Ruffle"
+    },
+    "grant_single_site_permission": {
+        "message": "Włącz na stałe dla tej strony"
+    },
+    "permissions_explanation": {
+        "message": "Rozszerzenie Ruffle działa najlepiej z możliwością dostępu do danych na wszystkich stronach internetowych. Pozwala to na uruchomienie go przy pierwszym załadowaniu dowolnej strony internetowej, dzięki czemu strony, które wykrywają oprogramowanie Flash Player przy ładowaniu, uruchomią zawartość Flash. Daje mu to również możliwość ładowania plików SWF w jego wewnętrznym odtwarzaczu z innych lokalizacji w sieci oraz pozwala mu na automatyczne ładowanie do odtwarzacza linków do plików SWF. Jeśli nie udzielisz tego pozwolenia, będziesz musiał ręcznie włączyć Ruffle na każdej stronie internetowej, na której chcesz go używać, klikając ikonę rozszerzenia i włączając je dla tej witryny."
+    },
+    "swf_player_permissions": {
+        "message": "Musisz udzielić temu adresowi URL pozwolenia na wczytanie z niego plików SWF."
+    }
+}

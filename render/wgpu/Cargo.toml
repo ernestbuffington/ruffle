@@ -7,37 +7,42 @@ license.workspace = true
 repository.workspace = true
 version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
-wgpu = { git = "https://github.com/gfx-rs/wgpu", rev = "c5851275c59b1d5d949b142d6aa973d0bb638181", features = ["naga"] }
-tracing = "0.1.37"
-ruffle_render = { path = "..", features = ["tessellator"] }
-bytemuck = { version = "1.13.0", features = ["derive"] }
-raw-window-handle = "0.5"
-clap = { version = "4.1.4", features = ["derive"], optional = true }
-enum-map = "2.4.2"
+wgpu = { workspace = true, features = ["naga-ir"] }
+tracing = { workspace = true }
+ruffle_render = { path = "..", features = ["tessellator", "wgpu"] }
+bytemuck = { workspace = true, features = ["derive"] }
+clap = { workspace = true, optional = true }
+enum-map = { workspace = true }
 fnv = "1.0.7"
 swf = { path = "../../swf" }
-image = { version = "0.24.5", default-features = false }
-naga_oil = { git = "https://github.com/Aaron1011/naga_oil", rev = "f4474b53285a85fe67cc35372c9d7ff4517cb556", features = ["override_any"] }
-ouroboros = "0.15.5"
-typed-arena = "2.0.2"
-once_cell = "1.17.0"
-gc-arena = { workspace = true }
+image = { workspace = true }
 naga-agal = { path = "../naga-agal" }
-downcast-rs = "1.2.0"
+naga-pixelbender = { path = "../naga-pixelbender" }
 profiling = { version = "1.0", default-features = false, optional = true }
+lru = "0.13.0"
+naga = { workspace = true }
+indexmap = "2.7.1"
 
 # desktop
 [target.'cfg(not(target_family = "wasm"))'.dependencies.futures]
-version = "0.3.26"
+workspace = true
 
 # wasm
 [target.'cfg(target_family = "wasm")'.dependencies.web-sys]
-version = "0.3.60"
+workspace = true
 features = ["HtmlCanvasElement"]
 
 [features]
 render_debug_labels = []
-render_trace = ["wgpu/trace"]
 webgl = ["wgpu/webgl"]
 profile-with-tracy = ["profiling", "profiling/profile-with-tracy"]
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Not used directly, declared only to enable its `profile-with-tracy` feature.
+    "profiling"
+]

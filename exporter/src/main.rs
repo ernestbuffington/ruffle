@@ -6,12 +6,13 @@ use rayon::prelude::*;
 use ruffle_core::limits::ExecutionLimit;
 use ruffle_core::tag_utils::SwfMovie;
 use ruffle_core::PlayerBuilder;
-use ruffle_render_wgpu::backend::WgpuRenderBackend;
+use ruffle_render_wgpu::backend::{request_adapter_and_device, WgpuRenderBackend};
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
 use ruffle_render_wgpu::descriptors::Descriptors;
 use ruffle_render_wgpu::target::TextureTarget;
 use ruffle_render_wgpu::wgpu;
 use std::fs::create_dir_all;
+use std::io::{self, Write};
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -72,11 +73,6 @@ struct Opt {
     #[clap(long, short, default_value = "high")]
     power: PowerPreference,
 
-    /// Location to store a wgpu trace output
-    #[clap(long)]
-    #[cfg(feature = "render_trace")]
-    trace_path: Option<PathBuf>,
-
     /// Skip unsupported movie types (currently AVM 2)
     #[clap(long, action)]
     skip_unsupported: bool,
@@ -92,7 +88,7 @@ fn take_screenshot(
     size: SizeOpt,
     skip_unsupported: bool,
 ) -> Result<Vec<RgbaImage>> {
-    let movie = SwfMovie::from_path(&swf_path, None).map_err(|e| anyhow!(e.to_string()))?;
+    let movie = SwfMovie::from_path(swf_path, None).map_err(|e| anyhow!(e.to_string()))?;
 
     if movie.is_action_script_3() && skip_unsupported {
         return Err(anyhow!("Skipping unsupported movie"));
@@ -136,16 +132,16 @@ fn take_screenshot(
 
         player.lock().unwrap().run_frame();
         if i >= skipframes {
-            match catch_unwind(|| {
+            let image = || {
                 player.lock().unwrap().render();
                 let mut player = player.lock().unwrap();
                 let renderer = player
                     .renderer_mut()
                     .downcast_mut::<WgpuRenderBackend<TextureTarget>>()
                     .unwrap();
-                // Use straight alpha
-                renderer.capture_frame(false)
-            }) {
+                renderer.capture_frame()
+            };
+            match catch_unwind(image) {
                 Ok(Some(image)) => result.push(image),
                 Ok(None) => return Err(anyhow!("Unable to capture frame {} of {:?}", i, swf_path)),
                 Err(e) => {
@@ -239,7 +235,18 @@ fn capture_single_swf(descriptors: Arc<Descriptors>, opt: &Opt) -> Result<()> {
     }
 
     if frames.len() == 1 {
-        frames.get(0).unwrap().save(&output)?;
+        let image = frames.first().unwrap();
+        if opt.output_path == Some(PathBuf::from("-")) {
+            let mut bytes: Vec<u8> = Vec::new();
+            image
+                .write_to(&mut io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .expect("Encoding failed");
+            io::stdout()
+                .write_all(bytes.as_slice())
+                .expect("Writing to stdout failed");
+        } else {
+            image.save(&output)?;
+        }
     } else {
         for (frame, image) in frames.iter().enumerate() {
             let mut path: PathBuf = (&output).into();
@@ -249,24 +256,30 @@ fn capture_single_swf(descriptors: Arc<Descriptors>, opt: &Opt) -> Result<()> {
     }
 
     let message = if frames.len() == 1 {
-        format!(
-            "Saved first frame of {} to {}",
-            opt.swf.to_string_lossy(),
-            output.to_string_lossy()
-        )
+        if !opt.silent {
+            Some(format!(
+                "Saved first frame of {} to {}",
+                opt.swf.to_string_lossy(),
+                output.to_string_lossy()
+            ))
+        } else {
+            None
+        }
     } else {
-        format!(
+        Some(format!(
             "Saved first {} frames of {} to {}",
             frames.len(),
             opt.swf.to_string_lossy(),
             output.to_string_lossy()
-        )
+        ))
     };
 
-    if let Some(progress) = progress {
-        progress.finish_with_message(message);
-    } else {
-        println!("{message}");
+    if let Some(message) = message {
+        if let Some(progress) = progress {
+            progress.finish_with_message(message);
+        } else {
+            println!("{message}");
+        }
     }
 
     Ok(())
@@ -323,7 +336,7 @@ fn capture_multiple_swfs(descriptors: Arc<Descriptors>, opt: &Opt) -> Result<()>
                 if let Some(parent) = destination.parent() {
                     let _ = create_dir_all(parent);
                 }
-                frames.get(0).unwrap().save(&destination)?;
+                frames.first().unwrap().save(&destination)?;
             } else {
                 let mut parent: PathBuf = (&output).into();
                 relative_path.set_extension("");
@@ -364,41 +377,31 @@ fn capture_multiple_swfs(descriptors: Arc<Descriptors>, opt: &Opt) -> Result<()>
     Ok(())
 }
 
-#[cfg(feature = "render_trace")]
-fn trace_path(opt: &Opt) -> Option<&Path> {
-    if let Some(path) = &opt.trace_path {
-        let _ = std::fs::create_dir_all(path);
-        Some(path)
-    } else {
-        None
-    }
-}
-
-#[cfg(not(feature = "render_trace"))]
 fn trace_path(_opt: &Opt) -> Option<&Path> {
     None
 }
 
 fn main() -> Result<()> {
     let opt: Opt = Opt::parse();
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: opt.graphics.into(),
-        dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+        ..Default::default()
     });
-    let (adapter, device, queue) =
-        futures::executor::block_on(WgpuRenderBackend::<TextureTarget>::request_device(
-            opt.graphics.into(),
-            instance,
-            None,
-            opt.power.into(),
-            trace_path(&opt),
-        ))
-        .map_err(|e| anyhow!(e.to_string()))?;
+    let (adapter, device, queue) = futures::executor::block_on(request_adapter_and_device(
+        opt.graphics.into(),
+        &instance,
+        None,
+        opt.power.into(),
+        trace_path(&opt),
+    ))
+    .map_err(|e| anyhow!(e.to_string()))?;
 
-    let descriptors = Arc::new(Descriptors::new(adapter, device, queue));
+    let descriptors = Arc::new(Descriptors::new(instance, adapter, device, queue));
 
     if opt.swf.is_file() {
         capture_single_swf(descriptors, &opt)?;
+    } else if !opt.swf.is_dir() {
+        return Err(anyhow!("Given path is not a file or directory."));
     } else if opt.output_path.is_some() {
         capture_multiple_swfs(descriptors, &opt)?;
     } else {

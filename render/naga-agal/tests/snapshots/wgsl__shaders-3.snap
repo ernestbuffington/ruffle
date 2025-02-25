@@ -1,6 +1,5 @@
 ---
-source: tests/wgsl.rs
-assertion_line: 70
+source: render/naga-agal/tests/wgsl.rs
 expression: output
 ---
 struct FragmentOutput {
@@ -8,7 +7,7 @@ struct FragmentOutput {
 }
 
 @group(0) @binding(1) 
-var<uniform> constant_registers: array<vec4<f32>,28u>;
+var<uniform> constant_registers: array<vec4<f32>, 28>;
 
 @fragment 
 fn main(@location(0) param: vec4<f32>) -> FragmentOutput {

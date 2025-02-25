@@ -5,7 +5,10 @@ package flash.net {
 
     public native function navigateToURL(request:URLRequest, window:String = null):void;
 
-    public function registerClassAlias(a:String, b:Object):void {
-        stub_method("flash.net", "registerClassAlias");
+    public native function registerClassAlias(name:String, object:Class):void;
+    public native function getClassByAlias(name:String):Class;
+
+    public function sendToURL(request:URLRequest):void {
+        stub_method("flash.net", "sendToURL");
     }
 }

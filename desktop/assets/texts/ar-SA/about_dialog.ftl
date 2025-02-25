@@ -1,0 +1,11 @@
+about-ruffle = عن رَفل
+about-ruffle-version = الإصدار
+about-ruffle-channel = القناة
+about-ruffle-build-time = وقت التحديث
+about-ruffle-build-features = ميزات التحديث
+about-ruffle-commit-ref = الإسم المستعار
+about-ruffle-commit-time = توقيت الإسم المستعار
+about-ruffle-visit-website = الموقع الإلكتروني
+about-ruffle-visit-github = GitHub
+about-ruffle-visit-discord = سيرفرنا في Discord
+about-ruffle-visit-sponsor = الراعي

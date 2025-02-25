@@ -1,5 +1,6 @@
 package {
 	[Ruffle(InstanceAllocator)]
+	[Ruffle(CallHandler)]
 	public dynamic class Error {
 		Error.prototype.name = "Error"
 
@@ -17,5 +18,12 @@ package {
 		}
 
 		public native function getStackTrace():String;
+
+		public static const length:int = 1;
+
+		prototype.toString = function():String {
+			var self:Error = this;
+			return self.message !== "" ? self.name + ": " + self.message : self.name;
+		};
 	}
 }
