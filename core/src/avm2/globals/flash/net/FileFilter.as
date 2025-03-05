@@ -1,7 +1,12 @@
 package flash.net {
     public final class FileFilter {
+        [Ruffle(NativeAccessible)]
         private var _description:String;
+
+        [Ruffle(NativeAccessible)]
         private var _extension:String;
+
+        [Ruffle(NativeAccessible)]
         private var _macType:String;
         
         public function FileFilter(description:String, extension:String, macType:String = null) {
@@ -11,7 +16,7 @@ package flash.net {
         }
 
         public function get description(): String {
-            return this._description + " (" + this._extension + ")";
+            return this._description;
         }
 
         public function set description(val: String): void {

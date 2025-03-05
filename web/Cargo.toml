@@ -9,28 +9,34 @@ repository.workspace = true
 version.workspace = true
 publish = false # This crate is useless alone, people should use the npm package
 
+[lints]
+workspace = true
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["canvas", "console_error_panic_hook", "webgl", "wgpu-webgl"]
+default = ["canvas", "console_error_panic_hook", "webgl", "wgpu-webgl", "webgpu"]
 
 # core features
 avm_debug = ["ruffle_core/avm_debug"]
 lzma = ["ruffle_core/lzma"]
+jpegxr = ["ruffle_core/jpegxr"]
 
 # web features
 canvas = ["ruffle_render_canvas"]
 webgl = ["ruffle_render_webgl"]
 webgpu = ["ruffle_render_wgpu"]
 wgpu-webgl = ["ruffle_render_wgpu", "ruffle_render_wgpu/webgl"]
+profiling = []
 
 [dependencies]
 console_error_panic_hook = { version = "0.1.7", optional = true }
-generational-arena = "0.2.8"
-js-sys = "0.3.60"
-tracing = { version = "0.1.37", features = ["log"] }
-tracing-subscriber = { version = "0.3.16", default-features = false, features = ["registry"] }
+slotmap = { workspace = true }
+js-sys = { workspace = true }
+tracing = { workspace = true, features = ["log"] }
+tracing-subscriber = { version = "0.3.19", default-features = false, features = ["registry"] }
+tracing-log = "0.2.0"
 tracing-wasm = "0.2.1"
 ruffle_render_canvas = { path = "../render/canvas", optional = true }
 ruffle_web_common = { path = "common" }
@@ -38,27 +44,41 @@ ruffle_render = { path = "../render" }
 ruffle_render_webgl = { path = "../render/webgl", optional = true }
 ruffle_render_wgpu = { path = "../render/wgpu", optional = true }
 ruffle_video_software = { path = "../video/software" }
-url = "2.3.1"
-wasm-bindgen = "=0.2.83"
-wasm-bindgen-futures = "0.4.33"
-serde-wasm-bindgen = "0.4.5"
-chrono = { version = "0.4", default-features = false, features = ["wasmbind", "clock"] }
+url = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = "0.4.50"
+serde-wasm-bindgen = "0.6.5"
+chrono = { workspace = true, features = ["wasmbind", "clock"] }
 getrandom = { version = "0.2", features = ["js"] }
-serde = { version = "1.0.152", features = ["derive"] }
-thiserror = "1.0"
-base64 = "0.21.0"
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+base64 = "0.22.0"
+async-channel = { workspace = true }
+futures-util = { version = "0.3.30", features = ["sink"] }
+gloo-net =  { version = "0.6.0", default-features = false, features = ["websocket"] }
+rfd = { workspace = true, features = ["file-handle-inner"] }
+wasm-streams = "0.4.2"
+futures = { workspace = true }
+zip = { version = "2.2.3", default-features = false}
 
 [dependencies.ruffle_core]
 path = "../core"
-default-features = false
-features = ["audio", "mp3", "nellymoser", "wasm-bindgen"]
+features = ["audio", "mp3", "aac", "nellymoser", "default_compatibility_rules", "default_font", "serde"]
 
 [dependencies.web-sys]
-version = "0.3.60"
+workspace = true
 features = [
-    "AddEventListenerOptions", "AudioBuffer", "AudioBufferSourceNode", "AudioContext", "AudioDestinationNode",
-    "AudioNode", "AudioParam", "Blob", "BlobPropertyBag", "ChannelMergerNode",
-    "ChannelSplitterNode", "Element", "Event", "EventTarget", "GainNode", "HtmlCanvasElement",
-    "HtmlElement", "HtmlFormElement", "KeyboardEvent", "Location", "PointerEvent", "Request", "RequestInit", "Response",
-    "Storage", "WheelEvent", "Window",
+    "AddEventListenerOptions", "AudioBuffer", "AudioBufferSourceNode", "AudioContext",
+    "AudioDestinationNode", "AudioNode", "AudioParam", "Blob", "BlobPropertyBag",
+    "ChannelMergerNode", "ChannelSplitterNode", "ClipboardEvent", "DataTransfer", "Element", "Event",
+    "EventTarget", "GainNode", "Headers", "HtmlCanvasElement", "HtmlDocument", "HtmlElement", "HtmlFormElement",
+    "HtmlInputElement", "HtmlTextAreaElement", "KeyboardEvent", "Location", "PointerEvent",
+    "Request", "RequestInit", "Response", "Storage", "WheelEvent", "Window", "ReadableStream", "RequestCredentials",
+    "Url", "Clipboard", "FocusEvent", "ShadowRoot", "Gamepad", "GamepadButton"
+]
+
+[package.metadata.cargo-machete]
+ignored = [
+    # Not used directly, declared only to enable its `js` feature.
+    "getrandom"
 ]

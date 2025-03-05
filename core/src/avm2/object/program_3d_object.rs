@@ -3,18 +3,21 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::object::script_object::ScriptObjectData;
 use crate::avm2::object::{Object, ObjectPtr, TObject};
-use crate::avm2::value::Value;
 use crate::avm2::Error;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, Gc, GcWeak};
 use ruffle_render::backend::ShaderModule;
-use std::cell::{Ref, RefMut};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::Context3DObject;
 
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct Program3DObject<'gc>(GcCell<'gc, Program3DObjectData<'gc>>);
+pub struct Program3DObject<'gc>(pub Gc<'gc, Program3DObjectData<'gc>>);
+
+#[derive(Clone, Collect, Copy, Debug)]
+#[collect(no_drop)]
+pub struct Program3DObjectWeak<'gc>(pub GcWeak<'gc, Program3DObjectData<'gc>>);
 
 impl<'gc> Program3DObject<'gc> {
     pub fn from_context(
@@ -24,64 +27,58 @@ impl<'gc> Program3DObject<'gc> {
         let class = activation.avm2().classes().program3d;
         let base = ScriptObjectData::new(class);
 
-        let mut this: Object<'gc> = Program3DObject(GcCell::allocate(
-            activation.context.gc_context,
+        let this: Object<'gc> = Program3DObject(Gc::new(
+            activation.gc(),
             Program3DObjectData {
                 base,
                 context3d,
-                vertex_shader_handle: GcCell::allocate(activation.context.gc_context, None),
-                fragment_shader_handle: GcCell::allocate(activation.context.gc_context, None),
+                shader_module_handle: RefCell::new(None),
             },
         ))
         .into();
-        this.install_instance_slots(activation);
 
-        class.call_native_init(Some(this), &[], activation)?;
+        class.call_init(this.into(), &[], activation)?;
 
         Ok(this)
     }
 
-    pub fn vertex_shader_handle(&self) -> GcCell<'gc, Option<Rc<dyn ShaderModule>>> {
-        self.0.read().vertex_shader_handle
-    }
-
-    pub fn fragment_shader_handle(&self) -> GcCell<'gc, Option<Rc<dyn ShaderModule>>> {
-        self.0.read().fragment_shader_handle
+    pub fn shader_module_handle(&self) -> &RefCell<Option<Rc<dyn ShaderModule>>> {
+        &self.0.shader_module_handle
     }
 
     pub fn context3d(&self) -> Context3DObject<'gc> {
-        self.0.read().context3d
+        self.0.context3d
     }
 }
 
 #[derive(Collect)]
 #[collect(no_drop)]
+#[repr(C, align(8))]
 pub struct Program3DObjectData<'gc> {
     /// Base script object
     base: ScriptObjectData<'gc>,
 
     context3d: Context3DObject<'gc>,
 
-    vertex_shader_handle: GcCell<'gc, Option<Rc<dyn ShaderModule>>>,
-
-    fragment_shader_handle: GcCell<'gc, Option<Rc<dyn ShaderModule>>>,
+    shader_module_handle: RefCell<Option<Rc<dyn ShaderModule>>>,
 }
 
-impl<'gc> TObject<'gc> for Program3DObject<'gc> {
-    fn base(&self) -> Ref<ScriptObjectData<'gc>> {
-        Ref::map(self.0.read(), |read| &read.base)
-    }
+const _: () = assert!(std::mem::offset_of!(Program3DObjectData, base) == 0);
+const _: () = assert!(
+    std::mem::align_of::<Program3DObjectData>() == std::mem::align_of::<ScriptObjectData>()
+);
 
-    fn base_mut(&self, mc: MutationContext<'gc, '_>) -> RefMut<ScriptObjectData<'gc>> {
-        RefMut::map(self.0.write(mc), |write| &mut write.base)
+impl<'gc> TObject<'gc> for Program3DObject<'gc> {
+    fn gc_base(&self) -> Gc<'gc, ScriptObjectData<'gc>> {
+        // SAFETY: Object data is repr(C), and a compile-time assert ensures
+        // that the ScriptObjectData stays at offset 0 of the struct- so the
+        // layouts are compatible
+
+        unsafe { Gc::cast(self.0) }
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.as_ptr() as *const ObjectPtr
-    }
-
-    fn value_of(&self, _mc: MutationContext<'gc, '_>) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Object(Object::from(*self)))
+        Gc::as_ptr(self.0) as *const ObjectPtr
     }
 
     fn as_program_3d(&self) -> Option<Program3DObject<'gc>> {

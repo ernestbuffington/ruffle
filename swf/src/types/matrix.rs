@@ -1,4 +1,4 @@
-use crate::{Fixed16, Twips};
+use crate::{Fixed16, Point, Twips};
 use std::ops;
 
 /// The transformation matrix used by Flash display objects.
@@ -15,7 +15,7 @@ use std::ops;
 /// This means that objects in Flash can only move in units of twips, or 1/20 pixels.
 ///
 /// [SWF19 pp.22-24](https://web.archive.org/web/20220205011833if_/https://www.adobe.com/content/dam/acom/en/devnet/pdf/swf-file-format-spec.pdf#page=22)
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Matrix {
     /// The matrix element at `[0, 0]`. Labeled `ScaleX` in SWF19.
     pub a: Fixed16,
@@ -135,22 +135,28 @@ impl ops::Mul for Matrix {
     }
 }
 
-impl ops::Mul<(Twips, Twips)> for Matrix {
-    type Output = (Twips, Twips);
+impl ops::Mul<Point<Twips>> for Matrix {
+    type Output = Point<Twips>;
+
     #[inline]
-    fn mul(self, (x, y): (Twips, Twips)) -> (Twips, Twips) {
-        let (x, y) = (x.get(), y.get());
-        let out_x = (self
-            .a
-            .wrapping_mul_int(x)
-            .wrapping_add(self.c.wrapping_mul_int(y)))
-        .wrapping_add(self.tx.get());
-        let out_y = (self
-            .b
-            .wrapping_mul_int(x)
-            .wrapping_add(self.d.wrapping_mul_int(y)))
-        .wrapping_add(self.ty.get());
-        (Twips::new(out_x), Twips::new(out_y))
+    fn mul(self, point: Point<Twips>) -> Point<Twips> {
+        let x = point.x.get();
+        let y = point.y.get();
+        let out_x = Twips::new(
+            (self
+                .a
+                .wrapping_mul_int(x)
+                .wrapping_add(self.c.wrapping_mul_int(y)))
+            .wrapping_add(self.tx.get()),
+        );
+        let out_y = Twips::new(
+            (self
+                .b
+                .wrapping_mul_int(x)
+                .wrapping_add(self.d.wrapping_mul_int(y)))
+            .wrapping_add(self.ty.get()),
+        );
+        Point::new(out_x, out_y)
     }
 }
 

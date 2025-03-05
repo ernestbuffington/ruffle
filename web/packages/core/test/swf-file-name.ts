@@ -1,5 +1,5 @@
 import { strict as assert } from "assert";
-import { swfFileName } from "../src/swf-file-name";
+import { swfFileName } from "../src/swf-utils";
 
 describe("swfFileName", function () {
     it("should extract simple SWF name", function () {
@@ -8,9 +8,9 @@ describe("swfFileName", function () {
     it("should not include query parameters", function () {
         assert.deepEqual(
             nameFor(
-                "https://uploads.ungrounded.net/574000/574241_DiamondNGSP.swf?123"
+                "https://uploads.ungrounded.net/574000/574241_DiamondNGSP.swf?123",
             ),
-            "574241_DiamondNGSP.swf"
+            "574241_DiamondNGSP.swf",
         );
     });
 });

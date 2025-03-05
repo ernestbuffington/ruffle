@@ -7,9 +7,13 @@ license.workspace = true
 repository.workspace = true
 version.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 proc-macro = true
 
 [dependencies]
-quote = "1.0.23"
-syn = { version = "1.0.107", features = ["full"] }
+proc-macro2 = "1.0.94"
+quote = "1.0.39"
+syn = { version = "2.0.99", features = ["extra-traits", "full"] }

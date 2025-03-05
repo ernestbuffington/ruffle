@@ -1,36 +1,36 @@
+use crate::avm2::activation::Activation;
+use crate::avm2::error::make_error_1033;
 use crate::avm2::script::TranslationUnit;
-use crate::avm2::Error;
-use crate::avm2::Namespace;
-use crate::either::Either;
+use crate::avm2::{Error, Namespace};
+use crate::context::UpdateContext;
 use crate::string::{AvmString, WStr, WString};
-use gc_arena::{Collect, MutationContext};
+use either::Either;
+use gc_arena::{Collect, Mutation};
 use std::fmt::Debug;
 use swf::avm2::types::{Index, Multiname as AbcMultiname};
 
-/// A `QName`, likely "qualified name", consists of a namespace and name string.
-///
-/// This is technically interchangeable with `xml::XMLName`, as they both
-/// implement `QName`; however, AVM2 and XML have separate representations.
-///
-/// A property cannot be retrieved or set without first being resolved into a
-/// `QName`. All other forms of names and multinames are either versions of
-/// `QName` with unspecified parameters, or multiple names to be checked in
-/// order.
-#[derive(Clone, Copy, Collect, Hash)]
+use super::api_version::ApiVersion;
+use super::Multiname;
+
+/// Qualified name.
+/// NOTE: this struct doesn't actually directly correspond to an AVM2 QName concept.
+/// Currently, we mostly use this struct simply to wrap a name+namespace pair,
+/// and try to reduce its future use if possible.
+#[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
 pub struct QName<'gc> {
     ns: Namespace<'gc>,
     name: AvmString<'gc>,
 }
 
-impl<'gc> PartialEq for QName<'gc> {
+impl PartialEq for QName<'_> {
     fn eq(&self, other: &Self) -> bool {
         // Implemented by hand to enforce order of comparisons for perf
-        self.name == other.name && self.ns == other.ns
+        self.name == other.name && self.ns.exact_version_match(other.ns)
     }
 }
 
-impl<'gc> Eq for QName<'gc> {}
+impl Eq for QName<'_> {}
 
 impl<'gc> QName<'gc> {
     pub fn new(ns: Namespace<'gc>, name: impl Into<AvmString<'gc>>) -> Self {
@@ -40,40 +40,38 @@ impl<'gc> QName<'gc> {
         }
     }
 
-    pub fn dynamic_name(local_part: impl Into<AvmString<'gc>>) -> Self {
-        Self {
-            ns: Namespace::public(),
-            name: local_part.into(),
-        }
-    }
-
     /// Pull a `QName` from the multiname pool.
     ///
-    /// This function returns an Err if the multiname does not exist or is not
-    /// a `QName`.
+    /// This function returns an Err if the multiname is not a `QName`.
     pub fn from_abc_multiname(
+        activation: &mut Activation<'_, 'gc>,
         translation_unit: TranslationUnit<'gc>,
         multiname_index: Index<AbcMultiname>,
-        mc: MutationContext<'gc, '_>,
     ) -> Result<Self, Error<'gc>> {
-        if multiname_index.0 == 0 {
-            return Err("Attempted to load a trait name of index zero".into());
+        let name = Multiname::from_abc_index(activation, translation_unit, multiname_index)?;
+
+        if name.is_any_namespace()
+            || name.is_any_name()
+            || name.has_lazy_component()
+            || name.is_attribute()
+        {
+            return Err(make_error_1033(activation));
         }
 
-        let actual_index = multiname_index.0 as usize - 1;
-        let abc = translation_unit.abc();
-        let abc_multiname: Result<_, Error<'gc>> = abc
-            .constant_pool
-            .multinames
-            .get(actual_index)
-            .ok_or_else(|| format!("Unknown multiname constant {}", multiname_index.0).into());
+        // For any non-QName not in the playerglobals domain, return an error.
+        if !name.is_qname()
+            && !translation_unit
+                .domain()
+                .is_playerglobals_domain(activation.avm2())
+        {
+            return Err(make_error_1033(activation));
+        }
 
-        Ok(match abc_multiname? {
-            AbcMultiname::QName { namespace, name } => Self {
-                ns: Namespace::from_abc_namespace(translation_unit, *namespace, mc)?,
-                name: translation_unit.pool_string(name.0, mc)?,
-            },
-            _ => return Err("Attempted to pull QName from non-QName multiname".into()),
+        // Now we know that the Multiname must have an explicit namespace and a local name.
+
+        Ok(Self {
+            ns: name.namespace_set()[0],
+            name: name.local_name().unwrap(),
         })
     }
 
@@ -83,66 +81,74 @@ impl<'gc> QName<'gc> {
     /// NAMESPACE::LOCAL_NAME
     /// NAMESPACE.LOCAL_NAME (Where the LAST dot is used to split the namespace & local_name)
     /// LOCAL_NAME (Use the public namespace)
-    pub fn from_qualified_name(name: AvmString<'gc>, mc: MutationContext<'gc, '_>) -> Self {
+    ///
+    /// This does *not* handle `Vector.<SomeTypeParam>` - use `get_defined_value_handling_vector` for that
+    pub fn from_qualified_name(
+        name: AvmString<'gc>,
+        api_version: ApiVersion,
+        context: &mut UpdateContext<'gc>,
+    ) -> Self {
         let parts = name
             .rsplit_once(WStr::from_units(b"::"))
             .or_else(|| name.rsplit_once(WStr::from_units(b".")));
 
         if let Some((package_name, local_name)) = parts {
+            let package_name = context.strings.intern_wstr(package_name);
+
             Self {
-                ns: Namespace::Namespace(AvmString::new(mc, package_name)),
-                name: AvmString::new(mc, local_name),
+                ns: Namespace::package(package_name, api_version, &mut context.strings),
+                name: AvmString::new(context.gc(), local_name),
             }
         } else {
             Self {
-                ns: Namespace::public(),
+                ns: context.avm2.namespaces.public_for(api_version),
                 name,
             }
         }
     }
 
     /// Converts this `QName` to a fully qualified name.
-    pub fn to_qualified_name(self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
+    pub fn to_qualified_name(self, mc: &Mutation<'gc>) -> AvmString<'gc> {
         match self.to_qualified_name_no_mc() {
             Either::Left(avm_string) => avm_string,
             Either::Right(wstring) => AvmString::new(mc, wstring),
         }
     }
 
-    /// Like `to_qualified_name`, but avoids the need for a `MutationContext`
+    /// Like `to_qualified_name`, but avoids the need for a `Mutation`
     /// by returning `Either::Right(wstring)` when it would otherwise
     /// be necessary to allocate a new `AvmString`.
     ///
     /// This method is intended for contexts like `Debug` impls where
-    /// a `MutationContext` is not available. Normally, you should
+    /// a `Mutation` is not available. Normally, you should
     /// use `to_qualified_name`
     pub fn to_qualified_name_no_mc(self) -> Either<AvmString<'gc>, WString> {
-        let uri = self.namespace().as_uri();
         let name = self.local_name();
-        if uri.is_empty() {
-            Either::Left(name)
-        } else {
-            Either::Right({
+        match self.namespace().as_uri_opt() {
+            Some(uri) if !uri.is_empty() => Either::Right({
                 let mut buf = WString::from(uri.as_wstr());
                 buf.push_str(WStr::from_units(b"::"));
                 buf.push_str(&name);
                 buf
-            })
+            }),
+            _ => Either::Left(name),
         }
     }
 
     // Like `to_qualified_name`, but uses a `.` instead of `::` separate
     // the namespace and local name. This matches the output produced by
     // Flash Player in error messages
-    pub fn to_qualified_name_err_message(self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
-        let mut buf = WString::new();
-        let uri = self.namespace().as_uri();
-        if !uri.is_empty() {
-            buf.push_str(&uri);
-            buf.push_char('.');
+    pub fn to_qualified_name_err_message(self, mc: &Mutation<'gc>) -> AvmString<'gc> {
+        let name = self.local_name();
+        match self.namespace().as_uri_opt() {
+            Some(uri) if !uri.is_empty() => {
+                let mut buf = WString::from(uri.as_wstr());
+                buf.push_char('.');
+                buf.push_str(&name);
+                AvmString::new(mc, buf)
+            }
+            _ => name,
         }
-        buf.push_str(&self.local_name());
-        AvmString::new(mc, buf)
     }
 
     pub fn local_name(&self) -> AvmString<'gc> {
@@ -154,20 +160,13 @@ impl<'gc> QName<'gc> {
     }
 
     /// Get the string value of this QName, including the namespace URI.
-    pub fn as_uri(&self, mc: MutationContext<'gc, '_>) -> AvmString<'gc> {
-        let ns = match &self.ns {
-            Namespace::Namespace(s) => s,
-            Namespace::PackageInternal(s) => s,
-            Namespace::Protected(s) => s,
-            Namespace::Explicit(s) => s,
-            Namespace::StaticProtected(s) => s,
-            Namespace::Private(s) => s,
-            Namespace::Any => WStr::from_units(b"*"),
+    pub fn as_uri(&self, mc: &Mutation<'gc>) -> AvmString<'gc> {
+        let ns_uri = self.ns.as_uri_opt();
+        let ns = match &ns_uri {
+            Some(s) if s.is_empty() => return self.name,
+            Some(s) => s,
+            None => WStr::from_units(b"*"),
         };
-
-        if ns.is_empty() {
-            return self.name;
-        }
 
         let mut uri = WString::from(ns);
         uri.push_str(WStr::from_units(b"::"));
@@ -176,7 +175,7 @@ impl<'gc> QName<'gc> {
     }
 }
 
-impl<'gc> Debug for QName<'gc> {
+impl Debug for QName<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         match self.to_qualified_name_no_mc() {
             Either::Left(name) => write!(f, "{name}"),

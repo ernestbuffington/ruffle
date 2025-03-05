@@ -10,8 +10,9 @@ use std::path::Path;
 bitflags! {
     /// A set of currently held-down mouse buttons.
     ///
-    /// Convertable from `MouseButton`, which is intended to represent ONE
+    /// Convertible from `MouseButton`, which is intended to represent ONE
     /// button being held or released.
+    #[derive(Clone, Copy)]
     pub struct MouseButtons: u8 {
         const LEFT = 0b00000001;
         const MIDDLE = 0b00000010;
@@ -56,6 +57,19 @@ impl InputInjector {
         })
     }
 
+    /// Construct an input injector from an input reader and a platform-specific
+    /// event sink.
+    pub fn from_reader<R>(reader: R) -> Result<Self, io::Error>
+    where
+        R: io::Read,
+    {
+        Ok(Self {
+            items: from_reader(reader)?,
+            pos: 0,
+            buttons: MouseButtons::empty(),
+        })
+    }
+
     /// Create an empty input injector with no input to inject.
     ///
     /// Useful to represent a missing input file in cases where providing one
@@ -80,7 +94,15 @@ impl InputInjector {
 
                 match event {
                     AutomatedEvent::Wait => break,
-                    AutomatedEvent::MouseMove { .. } => {}
+                    AutomatedEvent::MouseMove { .. }
+                    | AutomatedEvent::KeyDown { .. }
+                    | AutomatedEvent::KeyUp { .. }
+                    | AutomatedEvent::TextInput { .. }
+                    | AutomatedEvent::TextControl { .. }
+                    | AutomatedEvent::SetClipboardText { .. }
+                    | AutomatedEvent::MouseWheel { .. }
+                    | AutomatedEvent::FocusGained
+                    | AutomatedEvent::FocusLost => {}
                     AutomatedEvent::MouseDown { btn, .. } => {
                         self.buttons |= (*btn).into();
                     }

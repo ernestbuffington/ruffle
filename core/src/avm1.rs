@@ -9,34 +9,32 @@ mod property_decl;
 
 mod activation;
 mod callable_value;
+mod clamp;
 mod debug;
 mod error;
+mod flv;
 mod fscommand;
 pub(crate) mod globals;
 mod object;
+mod object_reference;
 mod property;
 mod property_map;
 mod runtime;
 mod scope;
 mod value;
 
-#[cfg(test)]
-mod tests;
-
-pub use activation::{start_drag, Activation, ActivationIdentifier};
+pub use activation::{Activation, ActivationIdentifier};
 pub use debug::VariableDumper;
 pub use error::Error;
-pub use function::ExecutionReason;
+pub use flv::FlvValueAvm1Ext;
+pub use function::{Executable, ExecutionReason};
 pub use globals::context_menu::make_context_menu_state;
-pub use globals::shared_object::flush;
 pub use globals::sound::start as start_sound;
 pub use globals::system::SystemProperties;
 pub use object::array_object::ArrayObject;
 pub use object::script_object::ScriptObject;
-pub use object::sound_object::SoundObject;
 pub use object::stage_object::StageObject;
-pub use object::xml_node_object::XmlNodeObject;
-pub use object::{Object, ObjectPtr, TObject};
+pub use object::{NativeObject, Object, ObjectPtr, TObject};
 pub use property::Attribute;
 pub use property_map::PropertyMap;
 pub use runtime::Avm1;
@@ -66,6 +64,14 @@ macro_rules! avm_error {
 
 #[macro_export]
 macro_rules! avm1_stub {
+    ($activation: ident, $class: literal) => {
+        #[cfg_attr(
+            feature = "known_stubs",
+            linkme::distributed_slice($crate::stub::KNOWN_STUBS)
+        )]
+        static STUB: $crate::stub::Stub = $crate::stub::Stub::Avm1Constructor { class: $class };
+        $activation.context.stub_tracker.encounter(&STUB);
+    };
     ($activation: ident, $class: literal, $method: literal) => {
         #[cfg_attr(
             feature = "known_stubs",

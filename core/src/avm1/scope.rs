@@ -5,12 +5,12 @@ use crate::avm1::callable_value::CallableValue;
 use crate::avm1::error::Error;
 use crate::avm1::property::Attribute;
 use crate::avm1::{Object, ScriptObject, TObject, Value};
+use crate::display_object::TDisplayObject;
 use crate::string::AvmString;
-use gc_arena::{Collect, Gc, MutationContext};
+use gc_arena::{Collect, Gc, Mutation};
 
 /// Indicates what kind of scope a scope is.
-#[derive(Clone, Collect, Copy, Debug, Eq, PartialEq)]
-#[collect(require_static)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScopeClass {
     /// Scope represents global scope.
     Global,
@@ -33,6 +33,7 @@ pub enum ScopeClass {
 #[collect(no_drop)]
 pub struct Scope<'gc> {
     parent: Option<Gc<'gc, Scope<'gc>>>,
+    #[collect(require_static)]
     class: ScopeClass,
     values: Object<'gc>,
 }
@@ -48,11 +49,11 @@ impl<'gc> Scope<'gc> {
     }
 
     /// Construct a child scope of another scope.
-    pub fn new_local_scope(parent: Gc<'gc, Self>, mc: MutationContext<'gc, '_>) -> Self {
+    pub fn new_local_scope(parent: Gc<'gc, Self>, mc: &Mutation<'gc>) -> Self {
         Scope {
             parent: Some(parent),
             class: ScopeClass::Local,
-            values: ScriptObject::new(mc, None).into(),
+            values: ScriptObject::new_without_proto(mc).into(),
         }
     }
 
@@ -61,7 +62,7 @@ impl<'gc> Scope<'gc> {
     pub fn new_target_scope(
         parent: Gc<'gc, Self>,
         clip: Object<'gc>,
-        mc: MutationContext<'gc, '_>,
+        mc: &Mutation<'gc>,
     ) -> Gc<'gc, Self> {
         let mut scope = (*parent).clone();
 
@@ -71,7 +72,7 @@ impl<'gc> Scope<'gc> {
             scope.parent = scope.parent.map(|p| Self::new_target_scope(p, clip, mc));
         }
 
-        Gc::allocate(mc, scope)
+        Gc::new(mc, scope)
     }
 
     /// Construct a with scope to be used as the scope during a with block.
@@ -125,17 +126,44 @@ impl<'gc> Scope<'gc> {
         name: AvmString<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<CallableValue<'gc>, Error<'gc>> {
+        self.resolve_recursive(name, activation, true)
+    }
+
+    /// Recursively resolve a value on the scope chain
+    /// See [`Scope::resolve`] for details
+    fn resolve_recursive(
+        &self,
+        name: AvmString<'gc>,
+        activation: &mut Activation<'_, 'gc>,
+        top_level: bool,
+    ) -> Result<CallableValue<'gc>, Error<'gc>> {
         if self.locals().has_property(activation, name) {
             return self
                 .locals()
-                .get(name, activation)
+                .get_non_slash_path(name, activation)
                 .map(|v| CallableValue::Callable(self.locals_cell(), v));
         }
         if let Some(scope) = self.parent() {
-            return scope.resolve(name, activation);
-        }
+            let res = scope.resolve(name, activation)?;
 
-        Ok(CallableValue::UnCallable(Value::Undefined))
+            // If we failed to find the value in the scope chain, but it *would* resolve on `self.locals()` if it wasn't
+            // a removed clip, then try resolving on root instead
+            if let (CallableValue::UnCallable(Value::Undefined), Object::StageObject(s)) =
+                (&res, self.locals())
+            {
+                if top_level && s.raw_script_object().has_property(activation, name) {
+                    return activation
+                        .root_object()
+                        .coerce_to_object(activation)
+                        .get_non_slash_path(name, activation)
+                        .map(|v| CallableValue::Callable(self.locals_cell(), v));
+                }
+            }
+
+            Ok(res)
+        } else {
+            Ok(CallableValue::UnCallable(Value::Undefined))
+        }
     }
 
     /// Update a particular value in the scope chain.
@@ -150,7 +178,15 @@ impl<'gc> Scope<'gc> {
         value: Value<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) -> Result<(), Error<'gc>> {
-        if self.class == ScopeClass::Target || self.locals().has_property(activation, name) {
+        let removed = if let Some(s) = self.values.as_stage_object() {
+            s.as_display_object().unwrap().avm1_removed()
+        } else {
+            false
+        };
+
+        if !removed
+            && (self.class == ScopeClass::Target || self.locals().has_property(activation, name))
+        {
             // Value found on this object, so overwrite it.
             // Or we've hit the executing movie clip, so create it here.
             self.locals().set(name, value, activation)
@@ -197,12 +233,7 @@ impl<'gc> Scope<'gc> {
     ///
     /// This inserts a value as a stored property on the local scope. If the property already
     /// exists, it will be forcefully overwritten. Used internally to initialize objects.
-    pub fn force_define_local(
-        &self,
-        name: AvmString<'gc>,
-        value: Value<'gc>,
-        mc: MutationContext<'gc, '_>,
-    ) {
+    pub fn force_define_local(&self, name: AvmString<'gc>, value: Value<'gc>, mc: &Mutation<'gc>) {
         self.locals()
             .define_value(mc, name, value, Attribute::empty());
     }

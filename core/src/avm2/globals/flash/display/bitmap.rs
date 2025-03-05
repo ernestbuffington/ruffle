@@ -1,143 +1,133 @@
 //! `flash.display.Bitmap` builtin/prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::{Class, ClassAttributes};
-use crate::avm2::globals::flash::display::bitmapdata::fill_bitmap_data_from_symbol;
-use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{BitmapDataObject, Object, TObject};
+use crate::avm2::globals::flash::display::bitmap_data::fill_bitmap_data_from_symbol;
+use crate::avm2::globals::flash::display::display_object::initialize_for_allocator;
+use crate::avm2::object::{BitmapDataObject, ClassObject, Object, TObject};
 use crate::avm2::value::Value;
 use crate::avm2::Error;
-use crate::avm2::Multiname;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
+use ruffle_macros::istr;
+use ruffle_render::bitmap::PixelSnapping;
 
-use crate::bitmap::bitmap_data::BitmapData;
+use crate::avm2::error::make_error_2008;
+use crate::avm2::parameters::ParametersExt;
+use crate::bitmap::bitmap_data::BitmapDataWrapper;
 use crate::character::Character;
 use crate::display_object::{Bitmap, TDisplayObject};
-use crate::{avm2_stub_getter, avm2_stub_setter};
-use gc_arena::{GcCell, MutationContext};
 
-/// Implements `flash.display.Bitmap`'s instance constructor.
-pub fn instance_init<'gc>(
+pub fn bitmap_allocator<'gc>(
+    class: ClassObject<'gc>,
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+) -> Result<Object<'gc>, Error<'gc>> {
+    let bitmap_cls = activation.avm2().class_defs().bitmap;
+    let bitmapdata_cls = activation.context.avm2.classes().bitmapdata;
+
+    let mut class_def = Some(class.inner_class_definition());
+    let orig_class = class;
+    while let Some(class) = class_def {
+        if class == bitmap_cls {
+            let bitmap_data = BitmapDataWrapper::dummy(activation.gc());
+            let display_object = Bitmap::new_with_bitmap_data(
+                activation.gc(),
+                0,
+                bitmap_data,
+                false,
+                &activation.caller_movie_or_root(),
+            )
+            .into();
+            return initialize_for_allocator(activation, display_object, orig_class);
+        }
+
+        if let Some((movie, symbol)) = activation
+            .context
+            .library
+            .avm2_class_registry()
+            .class_symbol(class)
+        {
+            if let Some(Character::Bitmap {
+                compressed,
+                avm2_bitmapdata_class: _,
+                handle: _,
+            }) = activation
+                .context
+                .library
+                .library_for_movie_mut(movie)
+                .character_by_id(symbol)
+                .cloned()
+            {
+                let new_bitmap_data = fill_bitmap_data_from_symbol(activation, &compressed);
+                let bitmap_data_obj = BitmapDataObject::from_bitmap_data_internal(
+                    activation,
+                    BitmapDataWrapper::dummy(activation.gc()),
+                    bitmapdata_cls,
+                )?;
+                bitmap_data_obj.init_bitmap_data(activation.gc(), new_bitmap_data);
+                new_bitmap_data.init_object2(activation.gc(), bitmap_data_obj);
+
+                let child = Bitmap::new_with_bitmap_data(
+                    activation.gc(),
+                    0,
+                    new_bitmap_data,
+                    false,
+                    &activation.caller_movie_or_root(),
+                );
+
+                return initialize_for_allocator(activation, child.into(), orig_class);
+            }
+        }
+        class_def = class.super_class();
+    }
+    unreachable!("A Bitmap subclass should have Bitmap in superclass chain");
+}
+
+/// Implements `flash.display.Bitmap`'s `init` method, which is called from the constructor
+pub fn init<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(mut this) = this {
-        activation.super_init(this, &[])?;
+    let this = this.as_object().unwrap();
 
-        let bitmap_data = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Null)
-            .as_object()
-            .and_then(|bd| bd.as_bitmap_data());
-        //TODO: Pixel snapping is not supported
-        let _pixel_snapping = args
-            .get(1)
-            .cloned()
-            .unwrap_or_else(|| "auto".into())
-            .coerce_to_string(activation)?;
-        let smoothing = args
-            .get(2)
-            .cloned()
-            .unwrap_or_else(|| false.into())
-            .coerce_to_boolean();
+    let bitmap_data = args
+        .try_get_object(activation, 0)
+        .and_then(|o| o.as_bitmap_data());
 
-        if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
-            //We are being initialized by the movie. This means that we
-            //need to create bitmap data right away, since all AVM2 bitmaps
-            //hold bitmap data.
+    let pixel_snapping = args.get_string(activation, 1)?;
 
-            let bd_object = if let Some(bd_class) = bitmap.avm2_bitmapdata_class() {
-                bd_class.construct(activation, &[])?
-            } else if let Some(b_class) = bitmap.avm2_bitmap_class() {
-                // Instantiating Bitmap from a Flex-style bitmap asset.
-                // Contrary to the above comment, this code path DOES
-                // trigger from AVM2, since the DisplayObject instantiation
-                // logic does its job in this case.
-                if let Some((movie, symbol_id)) = activation
-                    .context
-                    .library
-                    .avm2_class_registry()
-                    .class_symbol(b_class)
-                {
-                    if let Some(Character::Bitmap { bitmap }) = activation
-                        .context
-                        .library
-                        .library_for_movie_mut(movie)
-                        .character_by_id(symbol_id)
-                        .cloned()
-                    {
-                        let new_bitmap_data =
-                            GcCell::allocate(activation.context.gc_context, BitmapData::default());
+    let pixel_snapping = if &pixel_snapping == b"always" {
+        PixelSnapping::Always
+    } else if &pixel_snapping == b"auto" {
+        PixelSnapping::Auto
+    } else if &pixel_snapping == b"never" {
+        PixelSnapping::Never
+    } else {
+        return Err(make_error_2008(activation, "pixelSnapping"));
+    };
 
-                        fill_bitmap_data_from_symbol(activation, bitmap, new_bitmap_data);
-                        BitmapDataObject::from_bitmap_data(
-                            activation,
-                            new_bitmap_data,
-                            activation.context.avm2.classes().bitmapdata,
-                        )?
-                    } else {
-                        //Class association not to a Bitmap
-                        return Err("Attempted to instantiate Bitmap from timeline with symbol class associated to non-Bitmap!".into());
-                    }
-                } else {
-                    //Class association not bidirectional
-                    return Err("Cannot instantiate Bitmap from timeline without bidirectional symbol class association".into());
-                }
-            } else {
-                // No class association
-                return Err(
-                    "Cannot instantiate Bitmap from timeline without associated symbol class"
-                        .into(),
-                );
-            };
+    let smoothing = args.get_bool(2);
 
-            this.set_property(
-                &Multiname::public("bitmapData"),
-                bd_object.into(),
-                activation,
-            )?;
-
-            bitmap.set_smoothing(activation.context.gc_context, smoothing);
-        } else {
-            //We are being initialized by AVM2 (and aren't associated with a
-            //Bitmap subclass).
-
-            let bitmap_data = bitmap_data.unwrap_or_else(|| {
-                GcCell::allocate(activation.context.gc_context, BitmapData::dummy())
-            });
-
-            let bitmap =
-                Bitmap::new_with_bitmap_data(&mut activation.context, 0, bitmap_data, smoothing);
-
-            this.init_display_object(activation.context.gc_context, bitmap.into());
+    if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
+        if let Some(bitmap_data) = bitmap_data {
+            bitmap.set_bitmap_data(activation.context, bitmap_data);
         }
+        bitmap.set_smoothing(smoothing);
+        bitmap.set_pixel_snapping(pixel_snapping);
+    } else {
+        unreachable!();
     }
 
     Ok(Value::Undefined)
 }
 
-/// Implements `flash.display.Bitmap`'s class constructor.
-pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(Value::Undefined)
-}
-
 /// Implements `Bitmap.bitmapData`'s getter.
-pub fn bitmap_data<'gc>(
+pub fn get_bitmap_data<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(bitmap) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|dobj| dobj.as_bitmap())
-    {
+    let this = this.as_object().unwrap();
+
+    if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
         let mut value = bitmap.bitmap_data_wrapper().object2();
 
         // AS3 expects an unset BitmapData to be null, not 'undefined'
@@ -153,58 +143,82 @@ pub fn bitmap_data<'gc>(
 /// Implements `Bitmap.bitmapData`'s setter.
 pub fn set_bitmap_data<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(bitmap) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|dobj| dobj.as_bitmap())
-    {
-        let bitmap_data = args.get(0).unwrap_or(&Value::Null);
-        let bitmap_data = if matches!(bitmap_data, Value::Null) {
-            GcCell::allocate(activation.context.gc_context, BitmapData::dummy())
+    let this = this.as_object().unwrap();
+
+    if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
+        let bitmap_data = args.try_get_object(activation, 0);
+
+        let bitmap_data = if let Some(bitmap_data) = bitmap_data {
+            bitmap_data.as_bitmap_data().expect("Must be a BitmapData")
         } else {
-            bitmap_data
-                .coerce_to_object(activation)?
-                .as_bitmap_data()
-                .ok_or_else(|| Error::RustError("Argument was not a BitmapData".into()))?
+            // Passing null results in a dummy BitmapData being set.
+            BitmapDataWrapper::dummy(activation.gc())
         };
-        bitmap.set_bitmap_data(&mut activation.context, bitmap_data);
+
+        bitmap.set_bitmap_data(activation.context, bitmap_data);
     }
 
     Ok(Value::Undefined)
 }
 
 /// Stub `Bitmap.pixelSnapping`'s getter
-pub fn pixel_snapping<'gc>(
+pub fn get_pixel_snapping<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_getter!(activation, "flash.display.Bitmap", "pixelSnapping");
-    Ok("auto".into())
+    let this = this.as_object().unwrap();
+
+    if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
+        let pixel_snapping = match bitmap.pixel_snapping() {
+            PixelSnapping::Always => istr!("always"),
+            PixelSnapping::Auto => istr!("auto"),
+            PixelSnapping::Never => istr!("never"),
+        };
+
+        return Ok(pixel_snapping.into());
+    }
+    Ok(Value::Undefined)
 }
 
 /// Stub `Bitmap.pixelSnapping`'s setter
 pub fn set_pixel_snapping<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
+    this: Value<'gc>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_setter!(activation, "flash.display.Bitmap", "pixelSnapping");
+    let this = this.as_object().unwrap();
+
+    if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
+        let value = args.get_string(activation, 0)?;
+
+        let pixel_snapping = if &value == b"always" {
+            PixelSnapping::Always
+        } else if &value == b"auto" {
+            PixelSnapping::Auto
+        } else if &value == b"never" {
+            PixelSnapping::Never
+        } else {
+            return Err(make_error_2008(activation, "pixelSnapping"));
+        };
+
+        bitmap.set_pixel_snapping(pixel_snapping);
+    }
     Ok(Value::Undefined)
 }
 
 /// Implement `Bitmap.smoothing`'s getter
-pub fn smoothing<'gc>(
+pub fn get_smoothing<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(bitmap) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|dobj| dobj.as_bitmap())
-    {
+    let this = this.as_object().unwrap();
+
+    if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
         return Ok(bitmap.smoothing().into());
     }
 
@@ -213,52 +227,16 @@ pub fn smoothing<'gc>(
 
 /// Implement `Bitmap.smoothing`'s setter
 pub fn set_smoothing<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    _activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(bitmap) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|dobj| dobj.as_bitmap())
-    {
-        let smoothing = args.get(0).unwrap_or(&Value::Undefined).coerce_to_boolean();
-        bitmap.set_smoothing(activation.context.gc_context, smoothing);
+    let this = this.as_object().unwrap();
+
+    if let Some(bitmap) = this.as_display_object().and_then(|dobj| dobj.as_bitmap()) {
+        let smoothing = args.get_bool(0);
+        bitmap.set_smoothing(smoothing);
     }
 
     Ok(Value::Undefined)
-}
-
-/// Construct `Bitmap`'s class.
-pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
-    let class = Class::new(
-        QName::new(Namespace::package("flash.display"), "Bitmap"),
-        Some(Multiname::new(
-            Namespace::package("flash.display"),
-            "DisplayObject",
-        )),
-        Method::from_builtin(instance_init, "<Bitmap instance initializer>", mc),
-        Method::from_builtin(class_init, "<Bitmap class initializer>", mc),
-        mc,
-    );
-
-    let mut write = class.write(mc);
-
-    write.set_attributes(ClassAttributes::SEALED);
-
-    const PUBLIC_INSTANCE_PROPERTIES: &[(
-        &str,
-        Option<NativeMethodImpl>,
-        Option<NativeMethodImpl>,
-    )] = &[
-        ("bitmapData", Some(bitmap_data), Some(set_bitmap_data)),
-        (
-            "pixelSnapping",
-            Some(pixel_snapping),
-            Some(set_pixel_snapping),
-        ),
-        ("smoothing", Some(smoothing), Some(set_smoothing)),
-    ];
-    write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
-
-    class
 }

@@ -119,7 +119,7 @@ impl<'a> VariableDumper<'a> {
         object: &Object<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) {
-        let keys = object.get_keys(activation);
+        let keys = object.get_keys(activation, false);
         if keys.is_empty() {
             self.output.push_str(" {}");
         } else {
@@ -152,6 +152,10 @@ impl<'a> VariableDumper<'a> {
             Value::Object(object) => {
                 self.print_object(object, activation);
             }
+            Value::MovieClip(_) => {
+                let obj = value.coerce_to_object(activation);
+                self.print_object(&obj, activation);
+            }
         }
     }
 
@@ -162,7 +166,7 @@ impl<'a> VariableDumper<'a> {
         object: &Object<'gc>,
         activation: &mut Activation<'_, 'gc>,
     ) {
-        let keys = object.get_keys(activation);
+        let keys = object.get_keys(activation, false);
         if keys.is_empty() {
             return;
         }
@@ -182,126 +186,5 @@ impl<'a> VariableDumper<'a> {
 
         self.depth -= 1;
         self.output.push('\n');
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::avm1::error::Error;
-    use crate::avm1::test_utils::with_avm;
-    use crate::avm1::ScriptObject;
-
-    #[test]
-    fn dump_undefined() {
-        with_avm(19, |activation, _root| -> Result<(), Error> {
-            assert_eq!(
-                VariableDumper::dump(&Value::Undefined, " ", activation),
-                "undefined"
-            );
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn dump_null() {
-        with_avm(19, |activation, _root| -> Result<(), Error> {
-            assert_eq!(VariableDumper::dump(&Value::Null, " ", activation), "null");
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn dump_bool() {
-        with_avm(19, |activation, _root| -> Result<(), Error> {
-            assert_eq!(VariableDumper::dump(&true.into(), " ", activation), "true");
-            assert_eq!(
-                VariableDumper::dump(&false.into(), " ", activation),
-                "false"
-            );
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn dump_number() {
-        with_avm(19, |activation, _root| -> Result<(), Error> {
-            assert_eq!(VariableDumper::dump(&1000.into(), " ", activation), "1000");
-            assert_eq!(
-                VariableDumper::dump(&(-0.05).into(), " ", activation),
-                "-0.05"
-            );
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn dump_string() {
-        with_avm(19, |activation, _root| -> Result<(), Error> {
-            assert_eq!(VariableDumper::dump(&"".into(), " ", activation), "\"\"");
-            assert_eq!(
-                VariableDumper::dump(&"HELLO WORLD".into(), " ", activation),
-                "\"HELLO WORLD\""
-            );
-            assert_eq!(
-                VariableDumper::dump(
-                    &"Escape \"this\" string\nplease! \u{0008}\u{000C}\n\r\t\"\\".into(),
-                    " ",
-                    activation,
-                ),
-                "\"Escape \\\"this\\\" string\\nplease! \\b\\f\\n\\r\\t\\\"\\\\\""
-            );
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn dump_empty_object() {
-        with_avm(19, |activation, _root| -> Result<(), Error> {
-            let object = ScriptObject::new(activation.context.gc_context, None);
-            assert_eq!(
-                VariableDumper::dump(&object.into(), " ", activation),
-                "[object #0] {}"
-            );
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn dump_object() {
-        with_avm(19, |activation, _root| -> Result<(), Error> {
-            let object = ScriptObject::new(activation.context.gc_context, None);
-            let child = ScriptObject::new(activation.context.gc_context, None);
-            object.set("self", object.into(), activation)?;
-            object.set("test", "value".into(), activation)?;
-            object.set("child", child.into(), activation)?;
-            child.set("parent", object.into(), activation)?;
-            child.set("age", 6.into(), activation)?;
-            assert_eq!(
-                VariableDumper::dump(&object.into(), " ", activation),
-                "[object #0] {\n child: [object #1] {\n  age: 6\n  parent: [object #0]\n }\n test: \"value\"\n self: [object #0]\n}",
-            );
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn dump_variables() {
-        with_avm(19, |activation, _root| -> Result<(), Error> {
-            let object = ScriptObject::new(activation.context.gc_context, None);
-            let child = ScriptObject::new(activation.context.gc_context, None);
-            object.set("self", object.into(), activation)?;
-            object.set("test", "value".into(), activation)?;
-            object.set("child", child.into(), activation)?;
-            child.set("parent", object.into(), activation)?;
-            child.set("age", 6.into(), activation)?;
-            let mut dumper = VariableDumper::new(" ");
-            dumper.print_variables("Variables:", "object", &object.into(), activation);
-            assert_eq!(
-                dumper.output,
-                "Variables:\nobject.child = [object #0] {\n  age: 6\n  parent: [object #1] {\n   child: [object #0]\n   test: \"value\"\n   self: [object #1]\n  }\n }\nobject.test = \"value\"\nobject.self = [object #1]\n\n"
-            );
-            Ok(())
-        })
     }
 }

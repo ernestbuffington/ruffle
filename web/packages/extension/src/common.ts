@@ -1,12 +1,12 @@
 import * as utils from "./utils";
-import type { LogLevel } from "ruffle-core";
+import type { Config } from "ruffle-core";
 
-export interface Options {
+export interface Options extends Config.BaseLoadOptions {
     ruffleEnable: boolean;
     ignoreOptout: boolean;
-    warnOnUnsupportedContent: boolean;
-    logLevel: LogLevel;
-    showSwfDownload: boolean;
+    autostart: boolean;
+    showReloadButton: boolean;
+    swfTakeover: boolean;
 }
 
 interface OptionElement<T> {
@@ -16,13 +16,10 @@ interface OptionElement<T> {
 }
 
 class CheckboxOption implements OptionElement<boolean> {
-    private checkbox: HTMLInputElement;
-    readonly label: HTMLLabelElement;
-
-    constructor(checkbox: HTMLInputElement, label: HTMLLabelElement) {
-        this.checkbox = checkbox;
-        this.label = label;
-    }
+    constructor(
+        private readonly checkbox: HTMLInputElement,
+        readonly label: HTMLLabelElement,
+    ) {}
 
     get input() {
         return this.checkbox;
@@ -37,13 +34,60 @@ class CheckboxOption implements OptionElement<boolean> {
     }
 }
 
-class SelectOption implements OptionElement<string> {
-    private select: HTMLSelectElement;
-    readonly label: HTMLLabelElement;
+class NumberOption implements OptionElement<number | null> {
+    constructor(
+        private readonly numberInput: HTMLInputElement,
+        readonly label: HTMLLabelElement,
+    ) {
+        this.numberInput.addEventListener("input", () => {
+            this.numberInput.reportValidity();
+        });
+    }
 
-    constructor(select: HTMLSelectElement, label: HTMLLabelElement) {
-        this.select = select;
-        this.label = label;
+    get input() {
+        return this.numberInput;
+    }
+
+    get value(): number | null {
+        const ni = this.numberInput;
+        const num = ni.valueAsNumber;
+        if (Number.isNaN(num)) {
+            return null;
+        }
+        if (ni.min) {
+            const min = Number(ni.min);
+            if (min > num) {
+                return min;
+            }
+        }
+        if (ni.max) {
+            const max = Number(ni.max);
+            if (num > max) {
+                return max;
+            }
+        }
+        return num;
+    }
+
+    set value(value: number | null) {
+        this.numberInput.value = value?.toString() ?? "";
+    }
+}
+
+class SelectOption implements OptionElement<string | null> {
+    constructor(
+        private readonly select: HTMLSelectElement,
+        readonly label: HTMLLabelElement,
+    ) {
+        // Localize each `option`, if relevant.
+        Array.prototype.forEach.call(select.options, (option) => {
+            if (option.hasAttribute("id")) {
+                const message = utils.i18n.getMessage(`settings_${option.id}`);
+                if (message) {
+                    option.textContent = message;
+                }
+            }
+        });
     }
 
     get input() {
@@ -52,11 +96,14 @@ class SelectOption implements OptionElement<string> {
 
     get value() {
         const index = this.select.selectedIndex;
-        const option = this.select.options[index];
-        return option.value;
+        const option = this.select.options[index]!;
+        // Convert the empty string to `null`.
+        return option.value || null;
     }
 
-    set value(value: string) {
+    set value(value: string | null) {
+        // Convert `null` to the empty string.
+        value ??= "";
         const options = Array.from(this.select.options);
         const index = options.findIndex((option) => option.value === value);
         this.select.selectedIndex = index;
@@ -64,11 +111,17 @@ class SelectOption implements OptionElement<string> {
 }
 
 function getElement(option: Element): OptionElement<unknown> {
-    const [label] = option.getElementsByTagName("label");
+    const label = option.getElementsByTagName("label")[0]!;
 
-    const [checkbox] = option.getElementsByTagName("input");
-    if (checkbox && checkbox.type === "checkbox") {
-        return new CheckboxOption(checkbox, label);
+    const [input] = option.getElementsByTagName("input");
+    if (input) {
+        if (input.type === "checkbox") {
+            return new CheckboxOption(input, label);
+        }
+
+        if (input.type === "number") {
+            return new NumberOption(input, label);
+        }
     }
 
     const [select] = option.getElementsByTagName("select");
@@ -93,7 +146,7 @@ function findOptionElements() {
 }
 
 export async function bindOptions(
-    onChange?: (options: Options) => void
+    onChange?: (options: Options) => void,
 ): Promise<void> {
     const elements = findOptionElements();
     const options = await utils.getOptions();
@@ -105,6 +158,7 @@ export async function bindOptions(
         // Prevent transition on load.
         // Method from https://stackoverflow.com/questions/11131875.
         element.label.classList.add("notransition");
+        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
         element.label.offsetHeight; // Trigger a reflow, flushing the CSS changes.
         element.label.classList.remove("notransition");
 
@@ -144,5 +198,16 @@ export async function bindOptions(
 
     if (onChange) {
         onChange(options);
+    }
+}
+
+export async function resetOptions(): Promise<void> {
+    // This setting is consistent for the browser in use and should not change
+    const data = await utils.storage.sync.get({
+        responseHeadersUnsupported: false,
+    });
+    await utils.storage.sync.clear();
+    if (data["responseHeadersUnsupported"]) {
+        utils.storage.sync.set({ responseHeadersUnsupported: true });
     }
 }

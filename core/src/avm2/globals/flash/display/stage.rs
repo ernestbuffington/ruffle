@@ -1,273 +1,23 @@
 //! `flash.display.Stage` builtin/prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::{Class, ClassAttributes};
-use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{Object, TObject};
-use crate::avm2::traits::Trait;
+use crate::avm2::error::make_error_2008;
+use crate::avm2::object::{TObject, VectorObject};
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
+use crate::avm2::vector::VectorStorage;
 use crate::avm2::Error;
-use crate::avm2::Multiname;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
-use crate::avm2::{ArrayObject, ArrayStorage};
-use crate::display_object::{StageDisplayState, TDisplayObject};
+use crate::avm2_stub_getter;
+use crate::display_object::{
+    StageDisplayState, TDisplayObject, TDisplayObjectContainer, TInteractiveObject,
+};
 use crate::string::{AvmString, WString};
-use crate::{avm2_stub_getter, avm2_stub_setter};
-use gc_arena::{GcCell, MutationContext};
 use swf::Color;
 
-/// Implements `flash.display.Stage`'s instance constructor.
-pub fn instance_init<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("You cannot construct new instances of the Stage.".into())
-}
-
-/// Implements `flash.display.Stage`'s native instance constructor.
-pub fn native_instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this {
-        activation.super_init(this, args)?;
-    }
-
-    Ok(Value::Undefined)
-}
-
-/// Implements `flash.display.Stage`'s class constructor.
-pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(Value::Undefined)
-}
-
-/// Overrides `accessibilityProperties`'s setter.
-pub fn set_accessibility_properties<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set accessibility properties on the stage.".into())
-}
-
-/// Overrides `alpha`'s setter.
-pub fn set_alpha<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage's opacity.".into())
-}
-
-/// Overrides `blendMode`'s setter.
-pub fn set_blend_mode<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the blend mode of the stage.".into())
-}
-
-/// Overrides `cacheAsBitmap`'s setter.
-pub fn set_cache_as_bitmap<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage to be cached as a bitmap.".into())
-}
-
-/// Overrides `contextMenu`'s setter.
-pub fn set_context_menu<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage's context menu.".into())
-}
-
-/// Overrides `filters`'s setter.
-pub fn set_filters<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot apply filters to the stage.".into())
-}
-
-/// Overrides `focusRect`'s setter.
-pub fn set_focus_rect<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage's focus rect.".into())
-}
-
-/// Overrides `loaderInfo`'s setter.
-pub fn set_loader_info<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the blend mode of the stage.".into())
-}
-
-/// Overrides `mask`'s setter.
-pub fn set_mask<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot mask the stage.".into())
-}
-
-/// Overrides `mouseEnabled`'s setter.
-pub fn set_mouse_enabled<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot enable or disable the mouse on the stage.".into())
-}
-
-/// Overrides `name`'s getter.
-pub fn name<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(Value::Null)
-}
-
-/// Overrides `name`'s setter.
-pub fn set_name<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the name of the stage.".into())
-}
-
-/// Overrides `opaqueBackground`'s setter.
-pub fn set_opaque_background<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot give or take away the stage's opaque background.".into())
-}
-
-/// Overrides `rotation`'s setter.
-pub fn set_rotation<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot rotate the stage.".into())
-}
-
-/// Overrides `scale9Grid`'s setter.
-pub fn set_scale_nine_grid<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage's 9-slice grid.".into())
-}
-
-/// Overrides `scaleX`'s setter.
-pub fn set_scale_x<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage's horizontal scale.".into())
-}
-
-/// Overrides `scaleY`'s setter.
-pub fn set_scale_y<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage's vertical scale.".into())
-}
-
-/// Overrides `scrollRect`'s setter.
-pub fn set_scroll_rect<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage's scroll rectangle.".into())
-}
-
-/// Overrides `tabEnabled`'s setter.
-pub fn set_tab_enabled<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot enable or disable tabbing the stage.".into())
-}
-
-/// Overrides `tabIndex`'s setter.
-pub fn set_tab_index<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot set the stage's tab index.".into())
-}
-
-/// Overrides `transform`'s setter.
-pub fn set_transform<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot transform the stage.".into())
-}
-
-/// Overrides `visible`'s setter.
-pub fn set_visible<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot hide or unhide the stage.".into())
-}
-
-/// Overrides `x`'s setter.
-pub fn set_x<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot move the stage horizontally.".into())
-}
-
-/// Overrides `y`'s setter.
-pub fn set_y<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Err("Error: You cannot move the stage vertically.".into())
-}
-
 /// Implement `align`'s getter
-pub fn align<'gc>(
+pub fn get_align<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let align = activation.context.stage.align();
@@ -289,37 +39,34 @@ pub fn align<'gc>(
     if align.contains(StageAlign::RIGHT) {
         s.push_byte(b'R');
     }
-    let align = AvmString::new(activation.context.gc_context, s);
+    let align = AvmString::new(activation.gc(), s);
     Ok(align.into())
 }
 
 /// Implement `align`'s setter
 pub fn set_align<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let align = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_string(activation)?
-        .parse()
-        .unwrap_or_default();
+    let align = args.get_string(activation, 0)?.parse().unwrap_or_default();
     activation
         .context
         .stage
-        .set_align(&mut activation.context, align);
+        .set_align(activation.context, align);
     Ok(Value::Undefined)
 }
 
 /// Implement `browserZoomFactor`'s getter
-pub fn browser_zoom_factor<'gc>(
+pub fn get_browser_zoom_factor<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if this
-        .and_then(|this| this.as_display_object())
+        .as_display_object()
         .and_then(|this| this.as_stage())
         .is_some()
     {
@@ -335,15 +82,14 @@ pub fn browser_zoom_factor<'gc>(
 }
 
 /// Implement `color`'s getter
-pub fn color<'gc>(
+pub fn get_color<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(dobj) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|this| this.as_stage())
-    {
+    let this = this.as_object().unwrap();
+
+    if let Some(dobj) = this.as_display_object().and_then(|this| this.as_stage()) {
         let color = dobj.background_color().unwrap_or(Color::WHITE);
         return Ok(color.to_rgba().into());
     }
@@ -354,34 +100,29 @@ pub fn color<'gc>(
 /// Implement `color`'s setter
 pub fn set_color<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(dobj) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|this| this.as_stage())
-    {
-        let color = Color::from_rgb(
-            args.get(0)
-                .cloned()
-                .unwrap_or(Value::Undefined)
-                .coerce_to_u32(activation)?,
-            255,
-        );
-        dobj.set_background_color(activation.context.gc_context, Some(color));
+    let this = this.as_object().unwrap();
+
+    if let Some(dobj) = this.as_display_object().and_then(|this| this.as_stage()) {
+        let color = Color::from_rgb(args.get_u32(activation, 0)?, 255);
+        dobj.set_background_color(activation.gc(), Some(color));
     }
 
     Ok(Value::Undefined)
 }
 
 /// Implement `contentsScaleFactor`'s getter
-pub fn contents_scale_factor<'gc>(
+pub fn get_contents_scale_factor<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
+
     if this
-        .and_then(|this| this.as_display_object())
+        .as_display_object()
         .and_then(|this| this.as_stage())
         .is_some()
     {
@@ -397,13 +138,13 @@ pub fn contents_scale_factor<'gc>(
 }
 
 /// Implement `displayState`'s getter
-pub fn display_state<'gc>(
+pub fn get_display_state<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let display_state = AvmString::new_utf8(
-        activation.context.gc_context,
+        activation.gc(),
         activation.context.stage.display_state().to_string(),
     );
     Ok(display_state.into())
@@ -412,15 +153,10 @@ pub fn display_state<'gc>(
 /// Implement `displayState`'s setter
 pub fn set_display_state<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Ok(mut display_state) = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_string(activation)?
-        .parse()
-    {
+    if let Ok(mut display_state) = args.get_string(activation, 0)?.parse() {
         // It's not entirely clear why when setting to FullScreen, desktop flash player at least will
         // set its value to FullScreenInteractive. Overriding until flash logic is clearer.
         if display_state == StageDisplayState::FullScreen {
@@ -429,26 +165,24 @@ pub fn set_display_state<'gc>(
         activation
             .context
             .stage
-            .set_display_state(&mut activation.context, display_state);
+            .set_display_state(activation.context, display_state);
     } else {
-        return Err(
-            "ArgumentError: Error #2008: Parameter displayState must be one of the accepted values."
-                .into(),
-        );
+        return Err(make_error_2008(activation, "displayState"));
     }
     Ok(Value::Undefined)
 }
 
 /// Implement `focus`'s getter
-pub fn focus<'gc>(
+pub fn get_focus<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(activation
         .context
         .focus_tracker
         .get()
+        .map(|o| o.as_displayobject())
         .and_then(|focus_dobj| focus_dobj.object2().as_object())
         .map(|o| o.into())
         .unwrap_or(Value::Null))
@@ -457,15 +191,15 @@ pub fn focus<'gc>(
 /// Implement `focus`'s setter
 pub fn set_focus<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let focus = activation.context.focus_tracker;
-    match args.get(0).cloned().unwrap_or(Value::Undefined) {
-        Value::Null => focus.set(None, &mut activation.context),
-        val => {
-            if let Some(dobj) = val.as_object().and_then(|o| o.as_display_object()) {
-                focus.set(Some(dobj), &mut activation.context);
+    match args.try_get_object(activation, 0) {
+        None => focus.set(None, activation.context),
+        Some(obj) => {
+            if let Some(dobj) = obj.as_display_object().and_then(|o| o.as_interactive()) {
+                focus.set(Some(dobj), activation.context);
             } else {
                 return Err("Cannot set focus to non-DisplayObject".into());
             }
@@ -476,33 +210,36 @@ pub fn set_focus<'gc>(
 }
 
 /// Implement `frameRate`'s getter
-pub fn frame_rate<'gc>(
+pub fn get_frame_rate<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok((*activation.context.frame_rate).into())
+    let mut frame_rate = *activation.context.frame_rate;
+    if frame_rate < 0.0 {
+        // Uncommon frame rate from the SWF header.
+        frame_rate = frame_rate.rem_euclid(256.0);
+    }
+    Ok(frame_rate.into())
 }
 
 /// Implement `frameRate`'s setter
 pub fn set_frame_rate<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let new_frame_rate = args
-        .get(0)
-        .cloned()
-        .unwrap_or(Value::Undefined)
-        .coerce_to_number(activation)?;
-    *activation.context.frame_rate = new_frame_rate;
+    if !activation.context.forced_frame_rate {
+        let new_frame_rate = args.get_f64(activation, 0)?.clamp(0.01, 1000.0);
+        *activation.context.frame_rate = new_frame_rate;
+    }
 
     Ok(Value::Undefined)
 }
 
-pub fn show_default_context_menu<'gc>(
+pub fn get_show_default_context_menu<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     Ok(activation.context.stage.show_menu().into())
@@ -510,25 +247,25 @@ pub fn show_default_context_menu<'gc>(
 
 pub fn set_show_default_context_menu<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let show_default_context_menu = args.get(0).unwrap_or(&Value::Undefined).coerce_to_boolean();
+    let show_default_context_menu = args.get_bool(0);
     activation
         .context
         .stage
-        .set_show_menu(&mut activation.context, show_default_context_menu);
+        .set_show_menu(activation.context, show_default_context_menu);
     Ok(Value::Undefined)
 }
 
 /// Implement `scaleMode`'s getter
-pub fn scale_mode<'gc>(
+pub fn get_scale_mode<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let scale_mode = AvmString::new_utf8(
-        activation.context.gc_context,
+        activation.gc(),
         activation.context.stage.scale_mode().to_string(),
     );
     Ok(scale_mode.into())
@@ -537,40 +274,29 @@ pub fn scale_mode<'gc>(
 /// Implement `scaleMode`'s setter
 pub fn set_scale_mode<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Ok(scale_mode) = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_string(activation)?
-        .parse()
-    {
+    if let Ok(scale_mode) = args.get_string(activation, 0)?.parse() {
         activation
             .context
             .stage
-            .set_scale_mode(&mut activation.context, scale_mode);
+            .set_scale_mode(activation.context, scale_mode, true);
     } else {
-        return Err(
-            "ArgumentError: Error #2008: Parameter scaleMode must be one of the accepted values."
-                .into(),
-        );
+        return Err(make_error_2008(activation, "scaleMode"));
     }
     Ok(Value::Undefined)
 }
 
 /// Implement `stageFocusRect`'s getter
-///
-/// This setting is currently ignored in Ruffle.
-pub fn stage_focus_rect<'gc>(
+pub fn get_stage_focus_rect<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(dobj) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|this| this.as_stage())
-    {
+    let this = this.as_object().unwrap();
+
+    if let Some(dobj) = this.as_display_object().and_then(|this| this.as_stage()) {
         return Ok(dobj.stage_focus_rect().into());
     }
 
@@ -578,34 +304,30 @@ pub fn stage_focus_rect<'gc>(
 }
 
 /// Implement `stageFocusRect`'s setter
-///
-/// This setting is currently ignored in Ruffle.
 pub fn set_stage_focus_rect<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(dobj) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|this| this.as_stage())
-    {
-        let rf = args.get(0).unwrap_or(&Value::Undefined).coerce_to_boolean();
-        dobj.set_stage_focus_rect(activation.context.gc_context, rf);
+    let this = this.as_object().unwrap();
+
+    if let Some(dobj) = this.as_display_object().and_then(|this| this.as_stage()) {
+        let rf = args.get_bool(0);
+        dobj.set_stage_focus_rect(activation.gc(), rf);
     }
 
     Ok(Value::Undefined)
 }
 
 /// Implement `stageWidth`'s getter
-pub fn stage_width<'gc>(
+pub fn get_stage_width<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(dobj) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|this| this.as_stage())
-    {
+    let this = this.as_object().unwrap();
+
+    if let Some(dobj) = this.as_display_object().and_then(|this| this.as_stage()) {
         return Ok(dobj.stage_size().0.into());
     }
 
@@ -615,7 +337,7 @@ pub fn stage_width<'gc>(
 /// Implement `stageWidth`'s setter
 pub fn set_stage_width<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     // For some reason this value is settable but it does nothing.
@@ -623,15 +345,14 @@ pub fn set_stage_width<'gc>(
 }
 
 /// Implement `stageHeight`'s getter
-pub fn stage_height<'gc>(
+pub fn get_stage_height<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(dobj) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|this| this.as_stage())
-    {
+    let this = this.as_object().unwrap();
+
+    if let Some(dobj) = this.as_display_object().and_then(|this| this.as_stage()) {
         return Ok(dobj.stage_size().1.into());
     }
 
@@ -641,7 +362,7 @@ pub fn stage_height<'gc>(
 /// Implement `stageHeight`'s setter
 pub fn set_stage_height<'gc>(
     _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     // For some reason this value is settable but it does nothing.
@@ -649,9 +370,9 @@ pub fn set_stage_height<'gc>(
 }
 
 /// Implement `allowsFullScreen`'s getter
-pub fn allows_full_screen<'gc>(
+pub fn get_allows_full_screen<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm2_stub_getter!(activation, "flash.display.Stage", "allowsFullScreen");
@@ -659,9 +380,9 @@ pub fn allows_full_screen<'gc>(
 }
 
 /// Implement `allowsFullScreenInteractive`'s getter
-pub fn allows_full_screen_interactive<'gc>(
+pub fn get_allows_full_screen_interactive<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     avm2_stub_getter!(
@@ -673,55 +394,51 @@ pub fn allows_full_screen_interactive<'gc>(
 }
 
 /// Implement `quality`'s getter
-pub fn quality<'gc>(
+pub fn get_quality<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let quality = activation.context.stage.quality().into_avm_str();
-    Ok(AvmString::from(quality).into())
+    Ok(AvmString::new_utf8(activation.gc(), quality).into())
 }
 
 /// Implement `quality`'s setter
 pub fn set_quality<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     // Invalid values result in no change.
-    if let Ok(quality) = args
-        .get(0)
-        .unwrap_or(&Value::Undefined)
-        .coerce_to_string(activation)?
-        .parse()
-    {
+    if let Ok(quality) = args.get_string(activation, 0)?.parse() {
         activation
             .context
             .stage
-            .set_quality(&mut activation.context, quality);
+            .set_quality(activation.context, quality);
     }
     Ok(Value::Undefined)
 }
 
 /// Implement `stage3Ds`'s getter
-pub fn stage3ds<'gc>(
+pub fn get_stage3ds<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(stage) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|this| this.as_stage())
-    {
-        let storage = ArrayStorage::from_storage(
+    let this = this.as_object().unwrap();
+
+    if let Some(stage) = this.as_display_object().and_then(|this| this.as_stage()) {
+        let storage = VectorStorage::from_values(
             stage
                 .stage3ds()
                 .iter()
-                .map(|obj| Some(Value::Object(*obj)))
+                .map(|obj| Value::Object(*obj))
                 .collect(),
+            false,
+            Some(activation.avm2().classes().stage3d.inner_class_definition()),
         );
-        let stage3ds_array = ArrayObject::from_storage(activation, storage)?;
-        return Ok(stage3ds_array.into());
+        let stage3ds = VectorObject::from_vector(storage, activation)?;
+        return Ok(stage3ds.into());
     }
     Ok(Value::Undefined)
 }
@@ -729,157 +446,57 @@ pub fn stage3ds<'gc>(
 /// Implement `invalidate`
 pub fn invalidate<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(stage) = this
-        .and_then(|this| this.as_display_object())
-        .and_then(|this| this.as_stage())
-    {
-        stage.set_invalidated(activation.context.gc_context, true);
+    let this = this.as_object().unwrap();
+
+    if let Some(stage) = this.as_display_object().and_then(|this| this.as_stage()) {
+        stage.set_invalidated(activation.gc(), true);
     }
     Ok(Value::Undefined)
 }
 
-/// Stage.fullScreenSourceRect's getter
-pub fn full_screen_source_rect<'gc>(
+/// Stage.fullScreenHeight's getter
+pub fn get_full_screen_height<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_getter!(activation, "flash.display.Stage", "fullScreenSourceRect");
-    Ok(Value::Undefined)
+    avm2_stub_getter!(activation, "flash.display.Stage", "fullScreenHeight");
+    Ok(768.into())
 }
 
-/// Stage.fullScreenSourceRect's setter
-pub fn set_full_screen_source_rect<'gc>(
+/// Stage.fullScreenWidth's getter
+pub fn get_full_screen_width<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
+    _this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_setter!(activation, "flash.display.Stage", "fullScreenSourceRect");
-    Ok(Value::Undefined)
+    avm2_stub_getter!(activation, "flash.display.Stage", "fullScreenWidth");
+    Ok(1024.into())
 }
 
-/// Construct `Stage`'s class.
-pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
-    let class = Class::new(
-        QName::new(Namespace::package("flash.display"), "Stage"),
-        Some(Multiname::new(
-            Namespace::package("flash.display"),
-            "DisplayObjectContainer",
-        )),
-        Method::from_builtin(instance_init, "<Stage instance initializer>", mc),
-        Method::from_builtin(class_init, "<Stage class initializer>", mc),
-        mc,
-    );
+pub fn set_tab_children<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: Value<'gc>,
+    args: &[Value<'gc>],
+) -> Result<Value<'gc>, Error<'gc>> {
+    let this = this.as_object().unwrap();
 
-    let mut write = class.write(mc);
-
-    write.set_attributes(ClassAttributes::SEALED);
-    write.set_native_instance_init(Method::from_builtin(
-        native_instance_init,
-        "<Stage native instance initializer>",
-        mc,
-    ));
-
-    const PUBLIC_OVERRIDE_INSTANCE_PROPERTIES: &[(
-        &str,
-        Option<NativeMethodImpl>,
-        Option<NativeMethodImpl>,
-    )] = &[
-        (
-            "accessibilityProperties",
-            None,
-            Some(set_accessibility_properties),
-        ),
-        ("alpha", None, Some(set_alpha)),
-        ("blendMode", None, Some(set_blend_mode)),
-        ("cacheAsBitmap", None, Some(set_cache_as_bitmap)),
-        ("contextMenu", None, Some(set_context_menu)),
-        ("filters", None, Some(set_filters)),
-        ("focusRect", None, Some(set_focus_rect)),
-        ("loaderInfo", None, Some(set_loader_info)),
-        ("mask", None, Some(set_mask)),
-        ("mouseEnabled", None, Some(set_mouse_enabled)),
-        ("name", Some(name), Some(set_name)),
-        ("opaqueBackground", None, Some(set_opaque_background)),
-        ("rotation", None, Some(set_rotation)),
-        ("scale9Grid", None, Some(set_scale_nine_grid)),
-        ("scaleX", None, Some(set_scale_x)),
-        ("scaleY", None, Some(set_scale_y)),
-        ("scrollRect", None, Some(set_scroll_rect)),
-        ("tabEnabled", None, Some(set_tab_enabled)),
-        ("tabIndex", None, Some(set_tab_index)),
-        ("transform", None, Some(set_transform)),
-        ("visible", None, Some(set_visible)),
-        ("x", None, Some(set_x)),
-        ("y", None, Some(set_y)),
-    ];
-    for &(name, getter, setter) in PUBLIC_OVERRIDE_INSTANCE_PROPERTIES {
-        if let Some(getter) = getter {
-            write.define_instance_trait(
-                Trait::from_getter(
-                    QName::new(Namespace::public(), name),
-                    Method::from_builtin(getter, name, mc),
-                )
-                .with_override(),
-            );
-        }
-        if let Some(setter) = setter {
-            write.define_instance_trait(
-                Trait::from_setter(
-                    QName::new(Namespace::public(), name),
-                    Method::from_builtin(setter, name, mc),
-                )
-                .with_override(),
-            );
+    if let Some(stage) = this.as_display_object().and_then(|this| this.as_stage()) {
+        // TODO FP actually refers here to the original root,
+        //      even if it has been removed.
+        //      See the test tab_ordering_stage_tab_children_remove_root.
+        if let Some(root) = stage.root_clip() {
+            if let Some(root) = root.as_container() {
+                // Stage's tabChildren setter just propagates the value to the AVM2 root.
+                // It does not affect the value of tabChildren of the stage, which is always true.
+                let value = args.get_bool(0);
+                root.set_tab_children(activation.context, value);
+            }
         }
     }
 
-    const PUBLIC_INSTANCE_PROPERTIES: &[(
-        &str,
-        Option<NativeMethodImpl>,
-        Option<NativeMethodImpl>,
-    )] = &[
-        ("align", Some(align), Some(set_align)),
-        ("browserZoomFactor", Some(browser_zoom_factor), None),
-        ("color", Some(color), Some(set_color)),
-        ("contentsScaleFactor", Some(contents_scale_factor), None),
-        ("displayState", Some(display_state), Some(set_display_state)),
-        ("focus", Some(focus), Some(set_focus)),
-        ("frameRate", Some(frame_rate), Some(set_frame_rate)),
-        (
-            "fullScreenSourceRect",
-            Some(full_screen_source_rect),
-            Some(set_full_screen_source_rect),
-        ),
-        ("scaleMode", Some(scale_mode), Some(set_scale_mode)),
-        (
-            "showDefaultContextMenu",
-            Some(show_default_context_menu),
-            Some(set_show_default_context_menu),
-        ),
-        ("stageWidth", Some(stage_width), Some(set_stage_width)),
-        ("stageHeight", Some(stage_height), Some(set_stage_height)),
-        (
-            "stageFocusRect",
-            Some(stage_focus_rect),
-            Some(set_stage_focus_rect),
-        ),
-        ("allowsFullScreen", Some(allows_full_screen), None),
-        (
-            "allowsFullScreenInteractive",
-            Some(allows_full_screen_interactive),
-            None,
-        ),
-        ("quality", Some(quality), Some(set_quality)),
-        ("stage3Ds", Some(stage3ds), None),
-    ];
-    write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
-
-    const PUBLIC_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[("invalidate", invalidate)];
-    write.define_public_builtin_instance_methods(mc, PUBLIC_INSTANCE_METHODS);
-
-    class
+    Ok(Value::Undefined)
 }

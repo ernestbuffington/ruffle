@@ -1,25 +1,21 @@
-import { PublicAPI, Config } from "ruffle-core";
-
-interface LoadMessage {
-    type: "load";
-    config: Config;
-}
-
-interface PingMessage {
-    type: "ping";
-}
-
-type Message = LoadMessage | PingMessage;
+import { Setup } from "ruffle-core";
+import { Message } from "./messages";
 
 function handleMessage(message: Message) {
     switch (message.type) {
         case "load": {
-            const api = window.RufflePlayer ?? {};
-            api.config = {
-                ...api.config,
+            if (window.RufflePlayer === undefined) {
+                window.RufflePlayer = {};
+            }
+            if (window.RufflePlayer.config === undefined) {
+                window.RufflePlayer.config = {};
+            }
+            window.RufflePlayer.config = {
                 ...message.config,
+                ...window.RufflePlayer.config,
+                openInNewTab,
             };
-            window.RufflePlayer = PublicAPI.negotiate(api, "extension");
+            Setup.installRuffle("extension");
             return {};
         }
         case "ping":
@@ -32,23 +28,39 @@ function handleMessage(message: Message) {
 }
 
 let ID: string | null = null;
-if (
-    document.currentScript !== undefined &&
-    document.currentScript !== null &&
-    "src" in document.currentScript &&
-    document.currentScript.src !== ""
-) {
-    try {
-        ID = new URL(document.currentScript.src).searchParams.get("id");
-    } catch (_) {
-        // ID remains null.
+if (document.currentScript !== undefined && document.currentScript !== null) {
+    if ("src" in document.currentScript && document.currentScript.src !== "") {
+        try {
+            ID = new URL(document.currentScript.src).searchParams.get("id");
+        } catch (_) {
+            // ID remains null.
+        }
     }
+    if (ID === null) {
+        // if `script.src` is masked, get id from attrs
+        const ruffleId = document.currentScript.getAttribute("ruffle-id");
+        if (ruffleId) {
+            ID = ruffleId;
+        }
+    }
+}
+
+function openInNewTab(swf: URL): void {
+    const message = {
+        to: `ruffle_content${ID}`,
+        index: null,
+        data: {
+            type: "open_url_in_player",
+            url: swf.toString(),
+        },
+    };
+    window.postMessage(message, "*");
 }
 
 if (ID) {
     window.addEventListener("message", (event) => {
         // We only accept messages from ourselves.
-        if (event.source !== window) {
+        if (event.source !== window || !event.data) {
             return;
         }
 
