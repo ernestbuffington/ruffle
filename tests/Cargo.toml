@@ -7,31 +7,36 @@ license.workspace = true
 repository.workspace = true
 version.workspace = true
 
-[dependencies]
-futures = "0.3.25"
-ruffle_core = { path = "../core", features = ["deterministic", "timeline_debug", "avm_debug"] }
-ruffle_render_wgpu = { path = "../render/wgpu" }
-ruffle_render = { path = "../render" }
-ruffle_input_format = { path = "input-format" }
-image = { version = "0.24.5", default-features = false, features = ["png"] }
-regex = "1.7.1"
+[lints]
+workspace = true
 
 [features]
 # Enable running image comparison tests. This is off by default,
 # since the images we compare against are generated on CI, and may
 # not match your local machine's Vulkan version / image output.
-imgtests = []
+imgtests = [
+    "ruffle_render_wgpu",
+    "ruffle_test_framework/ruffle_video_software",
+    "ruffle_test_framework/ruffle_video_external",
+]
+jpegxr = ["ruffle_test_framework/jpegxr"]
+lzma = ["ruffle_test_framework/lzma"]
+
+[dependencies]
+ruffle_render_wgpu = { path = "../render/wgpu", optional = true }
+regex = "1.11.1"
 
 [dev-dependencies]
-approx = "0.5.1"
-pretty_assertions = "1.3.0"
-env_logger = "0.10.0"
-serde = "1.0"
-toml = "0.5.10"
-libtest-mimic = "0.6.0"
-walkdir = "2.3.2"
-anyhow = "1.0"
-once_cell = "1.17.0"
+ruffle_core = { path = "../core", features = ["deterministic", "timeline_debug", "avm_debug", "audio", "mp3", "aac", "default_font"] }
+ruffle_test_framework = { path = "framework" }
+libtest-mimic = "0.8.1"
+walkdir = { workspace = true }
+anyhow = { workspace = true }
+image = { workspace = true, features  = ["png"] }
+futures = { workspace = true }
+env_logger = "0.11.6"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [[test]]
 name = "tests"

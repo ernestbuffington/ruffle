@@ -13,13 +13,18 @@ pub mod screen;
 /// Trait for video decoders.
 /// This should be implemented for each video codec.
 pub trait VideoDecoder {
+    /// Configure the decoder.
+    fn configure_decoder(&mut self, _configuration_data: &[u8]) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// Preload a frame.
     ///
     /// No decoding is intended to happen at this point in time. Instead, the
     /// video data should be inspected to determine inter-frame dependencies
     /// between this and any previous frames in the stream.
     ///
-    /// Frames should be preloaded in the order that they are recieved.
+    /// Frames should be preloaded in the order that they are received.
     ///
     /// Any dependencies listed here are inherent to the video bitstream. The
     /// containing video stream is also permitted to introduce additional

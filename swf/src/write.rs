@@ -17,7 +17,12 @@ use std::io::{self, Write};
 /// let header = Header {
 ///     compression: Compression::Zlib,
 ///     version: 6,
-///     stage_size: Rectangle { x_min: Twips::from_pixels(0.0), x_max: Twips::from_pixels(400.0), y_min: Twips::from_pixels(0.0), y_max: Twips::from_pixels(400.0) },
+///     stage_size: Rectangle {
+///         x_min: Twips::ZERO,
+///         x_max: Twips::from_pixels(400.0),
+///         y_min: Twips::ZERO,
+///         y_max: Twips::from_pixels(400.0),
+///     },
 ///     frame_rate: Fixed8::from_f32(60.0),
 ///     num_frames: 1,
 /// };
@@ -28,7 +33,20 @@ use std::io::{self, Write};
 /// let output = Vec::new();
 /// swf::write_swf(&header, &tags, output).unwrap();
 /// ```
-pub fn write_swf<W: Write>(header: &Header, tags: &[Tag<'_>], mut output: W) -> Result<()> {
+pub fn write_swf<W: Write>(header: &Header, tags: &[Tag<'_>], output: W) -> Result<()> {
+    // Write SWF body.
+    let mut swf_body = Vec::new();
+    {
+        let mut writer = Writer::new(&mut swf_body, header.version);
+        // Write main timeline tag list.
+        writer.write_tag_list(tags)?;
+    }
+    write_swf_raw_tags(header, &swf_body, output)
+}
+
+/// Writes a SWF to the output stream, where the tag list has already been serialized to bytes.
+/// This still appends other header information such as stage size.
+pub fn write_swf_raw_tags<W: Write>(header: &Header, tags: &[u8], mut output: W) -> Result<()> {
     let signature = match header.compression {
         Compression::None => b"FWS",
         Compression::Zlib => b"CWS",
@@ -45,10 +63,8 @@ pub fn write_swf<W: Write>(header: &Header, tags: &[Tag<'_>], mut output: W) -> 
         writer.write_rectangle(&header.stage_size)?;
         writer.write_fixed8(header.frame_rate)?;
         writer.write_u16(header.num_frames)?;
-
-        // Write main timeline tag list.
-        writer.write_tag_list(tags)?;
     }
+    swf_body.extend_from_slice(tags);
 
     // Write SWF header.
     // Uncompressed SWF length.
@@ -80,16 +96,7 @@ fn write_zlib_swf<W: Write>(mut output: W, swf_body: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(feature = "libflate", not(feature = "flate2")))]
-fn write_zlib_swf<W: Write>(mut output: W, swf_body: &[u8]) -> Result<()> {
-    use libflate::zlib::Encoder;
-    let mut encoder = Encoder::new(&mut output)?;
-    encoder.write_all(&swf_body)?;
-    encoder.finish().into_result()?;
-    Ok(())
-}
-
-#[cfg(not(any(feature = "flate2", feature = "libflate")))]
+#[cfg(not(feature = "flate2"))]
 fn write_zlib_swf<W: Write>(_output: W, _swf_body: &[u8]) -> Result<()> {
     Err(Error::unsupported(
         "Support for Zlib compressed SWFs is not enabled.",
@@ -551,7 +558,7 @@ impl<W: Write> Writer<W> {
                 if let BitmapFormat::ColorMap8 { num_colors } = tag.format {
                     self.write_u8(num_colors)?;
                 }
-                self.output.write_all(tag.data)?;
+                self.output.write_all(&tag.data)?;
             }
 
             Tag::DefineButton(ref button) => self.write_define_button(button)?,
@@ -648,6 +655,7 @@ impl<W: Write> Writer<W> {
             Tag::DefineFont2(ref font) => self.write_define_font_2(font)?,
             Tag::DefineFont4(ref font) => self.write_define_font_4(font)?,
 
+            #[allow(clippy::unusual_byte_groupings)]
             Tag::DefineFontAlignZones {
                 id,
                 thickness,
@@ -701,11 +709,16 @@ impl<W: Write> Writer<W> {
             Tag::DefineShape(ref shape) => self.write_define_shape(shape)?,
             Tag::DefineSound(ref sound) => self.write_define_sound(sound)?,
             Tag::DefineSprite(ref sprite) => self.write_define_sprite(sprite)?,
-            Tag::DefineText(ref text) => self.write_define_text(text)?,
+            Tag::DefineText(ref text) => self.write_define_text(text, 1)?,
+            Tag::DefineText2(ref text) => self.write_define_text(text, 2)?,
             Tag::DefineVideoStream(ref video) => self.write_define_video_stream(video)?,
-            Tag::DoAbc(ref do_abc) => {
+            Tag::DoAbc(data) => {
+                self.write_tag_header(TagCode::DoAbc, data.len() as u32)?;
+                self.output.write_all(data)?;
+            }
+            Tag::DoAbc2(ref do_abc) => {
                 let len = do_abc.data.len() + do_abc.name.len() + 5;
-                self.write_tag_header(TagCode::DoAbc, len as u32)?;
+                self.write_tag_header(TagCode::DoAbc2, len as u32)?;
                 self.write_u32(do_abc.flags.bits())?;
                 self.write_string(do_abc.name)?;
                 self.output.write_all(do_abc.data)?;
@@ -957,7 +970,14 @@ impl<W: Write> Writer<W> {
                 }
                 writer_2.write_u8(0)?; // End button records
             }
-            writer.write_u16(record_data.len() as u16 + 2)?;
+
+            // Write action offset, this is explicitly 0 when there are no actions.
+            if button.actions.is_empty() {
+                writer.write_u16(0)?;
+            } else {
+                writer.write_u16(record_data.len() as u16 + 2)?;
+            }
+
             writer.output.write_all(&record_data)?;
 
             let mut iter = button.actions.iter().peekable();
@@ -968,12 +988,7 @@ impl<W: Write> Writer<W> {
                 } else {
                     writer.write_u16(0)?;
                 }
-                let mut flags = action.conditions.bits();
-                if action.conditions.contains(ButtonActionCondition::KEY_PRESS) {
-                    if let Some(key_code) = action.key_code {
-                        flags |= (key_code as u16) << 9;
-                    }
-                }
+                let flags = action.conditions.bits();
                 writer.write_u16(flags)?;
                 writer.output.write_all(action.action_data)?;
             }
@@ -1409,62 +1424,71 @@ impl<W: Write> Writer<W> {
         bits: &mut BitWriter<T>,
         context: &mut ShapeContext,
     ) -> Result<()> {
-        match *record {
-            ShapeRecord::StraightEdge { delta_x, delta_y } => {
+        match record {
+            ShapeRecord::StraightEdge { delta } => {
                 bits.write_ubits(2, 0b11)?; // Straight edge
                                             // TODO: Check underflow?
-                let mut num_bits = max(count_sbits_twips(delta_x), count_sbits_twips(delta_y));
-                num_bits = max(2, num_bits);
-                let is_axis_aligned = delta_x.get() == 0 || delta_y.get() == 0;
+                let num_bits = count_sbits_twips(delta.dx)
+                    .max(count_sbits_twips(delta.dy))
+                    .max(2);
+                let is_axis_aligned = delta.dx == Twips::ZERO || delta.dy == Twips::ZERO;
                 bits.write_ubits(4, num_bits - 2)?;
                 bits.write_bit(!is_axis_aligned)?;
+                let is_vertical = is_axis_aligned && delta.dx == Twips::ZERO;
                 if is_axis_aligned {
-                    bits.write_bit(delta_x.get() == 0)?;
+                    bits.write_bit(is_vertical)?;
                 }
-                if delta_x.get() != 0 {
-                    bits.write_sbits_twips(num_bits, delta_x)?;
+                if !is_axis_aligned || !is_vertical {
+                    bits.write_sbits_twips(num_bits, delta.dx)?;
                 }
-                if delta_y.get() != 0 {
-                    bits.write_sbits_twips(num_bits, delta_y)?;
+                if !is_axis_aligned || is_vertical {
+                    bits.write_sbits_twips(num_bits, delta.dy)?;
                 }
             }
             ShapeRecord::CurvedEdge {
-                control_delta_x,
-                control_delta_y,
-                anchor_delta_x,
-                anchor_delta_y,
+                control_delta,
+                anchor_delta,
             } => {
                 bits.write_ubits(2, 0b10)?; // Curved edge
-                let num_bits = [
-                    control_delta_x,
-                    control_delta_y,
-                    anchor_delta_x,
-                    anchor_delta_y,
-                ]
-                .iter()
-                .map(|x| count_sbits_twips(*x))
-                .max()
-                .unwrap();
+                let num_bits = count_sbits_twips(control_delta.dx)
+                    .max(count_sbits_twips(control_delta.dy))
+                    .max(count_sbits_twips(anchor_delta.dx))
+                    .max(count_sbits_twips(anchor_delta.dy))
+                    .max(2);
                 bits.write_ubits(4, num_bits - 2)?;
-                bits.write_sbits_twips(num_bits, control_delta_x)?;
-                bits.write_sbits_twips(num_bits, control_delta_y)?;
-                bits.write_sbits_twips(num_bits, anchor_delta_x)?;
-                bits.write_sbits_twips(num_bits, anchor_delta_y)?;
+                bits.write_sbits_twips(num_bits, control_delta.dx)?;
+                bits.write_sbits_twips(num_bits, control_delta.dy)?;
+                bits.write_sbits_twips(num_bits, anchor_delta.dx)?;
+                bits.write_sbits_twips(num_bits, anchor_delta.dy)?;
             }
-            ShapeRecord::StyleChange(ref style_change) => {
+            ShapeRecord::StyleChange(style_change) => {
                 bits.write_bit(false)?; // Style change
                 let num_fill_bits = context.num_fill_bits.into();
                 let num_line_bits = context.num_line_bits.into();
-                bits.write_bit(style_change.new_styles.is_some())?;
-                bits.write_bit(style_change.line_style.is_some())?;
-                bits.write_bit(style_change.fill_style_1.is_some())?;
-                bits.write_bit(style_change.fill_style_0.is_some())?;
-                bits.write_bit(style_change.move_to.is_some())?;
-                if let Some((move_x, move_y)) = style_change.move_to {
-                    let num_bits = max(count_sbits_twips(move_x), count_sbits_twips(move_y));
+                let mut flags = ShapeRecordFlag::empty();
+                flags.set(ShapeRecordFlag::MOVE_TO, style_change.move_to.is_some());
+                flags.set(
+                    ShapeRecordFlag::FILL_STYLE_0,
+                    style_change.fill_style_0.is_some(),
+                );
+                flags.set(
+                    ShapeRecordFlag::FILL_STYLE_1,
+                    style_change.fill_style_1.is_some(),
+                );
+                flags.set(
+                    ShapeRecordFlag::LINE_STYLE,
+                    style_change.line_style.is_some(),
+                );
+                flags.set(
+                    ShapeRecordFlag::NEW_STYLES,
+                    style_change.new_styles.is_some(),
+                );
+                bits.write_ubits(5, flags.bits().into())?;
+                if let Some(move_to) = &style_change.move_to {
+                    let num_bits = count_sbits_twips(move_to.x).max(count_sbits_twips(move_to.y));
                     bits.write_ubits(5, num_bits)?;
-                    bits.write_sbits_twips(num_bits, move_x)?;
-                    bits.write_sbits_twips(num_bits, move_y)?;
+                    bits.write_sbits_twips(num_bits, move_to.x)?;
+                    bits.write_sbits_twips(num_bits, move_to.y)?;
                 }
                 if let Some(fill_style_index) = style_change.fill_style_0 {
                     bits.write_ubits(num_fill_bits, fill_style_index)?;
@@ -1768,18 +1792,14 @@ impl<W: Write> Writer<W> {
         self.write_fixed16(filter.angle)?;
         self.write_fixed16(filter.distance)?;
         self.write_fixed8(filter.strength)?;
-        let mut bits = self.bits();
-        bits.write_bit(filter.is_inner)?;
-        bits.write_bit(filter.is_knockout)?;
-        bits.write_bit(true)?;
-        bits.write_ubits(5, filter.num_passes.into())?;
+        self.write_u8(filter.flags.bits())?;
         Ok(())
     }
 
     fn write_blur_filter(&mut self, filter: &BlurFilter) -> Result<()> {
         self.write_fixed16(filter.blur_x)?;
         self.write_fixed16(filter.blur_y)?;
-        self.write_u8(filter.num_passes << 3)?;
+        self.write_u8(filter.flags.bits())?;
         Ok(())
     }
 
@@ -1788,28 +1808,20 @@ impl<W: Write> Writer<W> {
         self.write_fixed16(filter.blur_x)?;
         self.write_fixed16(filter.blur_y)?;
         self.write_fixed8(filter.strength)?;
-        let mut bits = self.bits();
-        bits.write_bit(filter.is_inner)?;
-        bits.write_bit(filter.is_knockout)?;
-        bits.write_bit(true)?;
-        bits.write_ubits(5, filter.num_passes.into())?;
+        self.write_u8(filter.flags.bits())?;
         Ok(())
     }
 
     fn write_bevel_filter(&mut self, filter: &BevelFilter) -> Result<()> {
-        self.write_rgba(&filter.shadow_color)?;
+        // Note that the color order is wrong in the spec, it's highlight then shadow.
         self.write_rgba(&filter.highlight_color)?;
+        self.write_rgba(&filter.shadow_color)?;
         self.write_fixed16(filter.blur_x)?;
         self.write_fixed16(filter.blur_y)?;
         self.write_fixed16(filter.angle)?;
         self.write_fixed16(filter.distance)?;
         self.write_fixed8(filter.strength)?;
-        let mut bits = self.bits();
-        bits.write_bit(filter.is_inner)?;
-        bits.write_bit(filter.is_knockout)?;
-        bits.write_bit(true)?;
-        bits.write_bit(filter.is_on_top)?;
-        bits.write_ubits(4, filter.num_passes.into())?;
+        self.write_u8(filter.flags.bits())?;
         Ok(())
     }
 
@@ -1826,34 +1838,26 @@ impl<W: Write> Writer<W> {
         self.write_fixed16(filter.angle)?;
         self.write_fixed16(filter.distance)?;
         self.write_fixed8(filter.strength)?;
-        let mut bits = self.bits();
-        bits.write_bit(filter.is_inner)?;
-        bits.write_bit(filter.is_knockout)?;
-        bits.write_bit(true)?;
-        bits.write_bit(filter.is_on_top)?;
-        bits.write_ubits(4, filter.num_passes.into())?;
+        self.write_u8(filter.flags.bits())?;
         Ok(())
     }
 
     fn write_convolution_filter(&mut self, filter: &ConvolutionFilter) -> Result<()> {
         self.write_u8(filter.num_matrix_cols)?;
         self.write_u8(filter.num_matrix_rows)?;
-        self.write_fixed16(filter.divisor)?;
-        self.write_fixed16(filter.bias)?;
+        self.write_f32(filter.divisor)?;
+        self.write_f32(filter.bias)?;
         for val in &filter.matrix {
-            self.write_fixed16(*val)?;
+            self.write_f32(*val)?;
         }
         self.write_rgba(&filter.default_color)?;
-        self.write_u8(
-            if filter.is_clamped { 0b10 } else { 0 }
-                | if filter.is_preserve_alpha { 0b1 } else { 0 },
-        )?;
+        self.write_u8(filter.flags.bits())?;
         Ok(())
     }
 
     fn write_color_matrix_filter(&mut self, filter: &ColorMatrixFilter) -> Result<()> {
         for m in filter.matrix {
-            self.write_fixed16(m)?;
+            self.write_f32(m)?;
         }
         Ok(())
     }
@@ -1978,7 +1982,7 @@ impl<W: Write> Writer<W> {
     }
 
     fn write_sound_info(&mut self, sound_info: &SoundInfo) -> Result<()> {
-        let flags = (sound_info.event as u8) << 4
+        let flags = ((sound_info.event as u8) << 4)
             | if sound_info.in_sample.is_some() {
                 0b1
             } else {
@@ -2023,6 +2027,9 @@ impl<W: Write> Writer<W> {
 
             // We must write the glyph shapes into a temporary buffer
             // so that we can calculate their offsets.
+            // Note: these offsets are still wrong,
+            // as there's a variable size CodeTableOffset field in between.
+            // We correct for it with a +4/+2 addition later.
             let mut offsets = Vec::with_capacity(num_glyphs);
             let mut has_wide_offsets = false;
             let has_wide_codes = !font.flags.contains(FontFlag::IS_ANSI);
@@ -2039,7 +2046,7 @@ impl<W: Write> Writer<W> {
                 };
                 for glyph in &font.glyphs {
                     // Store offset for later.
-                    let offset = num_glyphs * 4 + shape_writer.output.len();
+                    let offset = shape_writer.output.len();
                     offsets.push(offset);
                     if offset > 0xFFFF {
                         has_wide_offsets = true;
@@ -2065,12 +2072,19 @@ impl<W: Write> Writer<W> {
 
             // If there are no glyphs, then the following tables are omitted.
             if num_glyphs > 0 {
+                // OffsetTable size, plus CodeTableOffset size
+                let init_offset = if has_wide_offsets {
+                    num_glyphs * 4 + 4
+                } else {
+                    num_glyphs * 2 + 2
+                };
+
                 // OffsetTable
                 for offset in offsets {
                     if has_wide_offsets {
-                        writer.write_u32(offset as u32)?;
+                        writer.write_u32((offset + init_offset) as u32)?;
                     } else {
-                        writer.write_u16(offset as u16)?;
+                        writer.write_u16((offset + init_offset) as u16)?;
                     }
                 }
 
@@ -2147,7 +2161,9 @@ impl<W: Write> Writer<W> {
     }
 
     fn write_define_font_info(&mut self, font_info: &FontInfo) -> Result<()> {
-        let use_wide_codes = self.version >= 6 || font_info.version >= 2;
+        let use_wide_codes = self.version >= 6
+            || font_info.version >= 2
+            || font_info.flags.contains(FontInfoFlag::HAS_WIDE_CODES);
 
         let len = font_info.name.len()
             + if use_wide_codes { 2 } else { 1 } * font_info.code_table.len()
@@ -2208,7 +2224,7 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
-    fn write_define_text(&mut self, text: &Text) -> Result<()> {
+    fn write_define_text(&mut self, text: &Text, version: u8) -> Result<()> {
         let mut buf = Vec::new();
         {
             let mut writer = Writer::new(&mut buf, self.version);
@@ -2241,7 +2257,11 @@ impl<W: Write> Writer<W> {
                     writer.write_character_id(id)?;
                 }
                 if let Some(ref color) = record.color {
-                    writer.write_rgb(color)?;
+                    if version == 1 {
+                        writer.write_rgb(color)?;
+                    } else {
+                        writer.write_rgba(color)?;
+                    }
                 }
                 if let Some(x) = record.x_offset {
                     writer.write_i16(x.get() as i16)?; // TODO(Herschel): Handle overflow.
@@ -2261,7 +2281,11 @@ impl<W: Write> Writer<W> {
             }
             writer.write_u8(0)?; // End of text records.
         }
-        self.write_tag_header(TagCode::DefineText, buf.len() as u32)?;
+        if version == 1 {
+            self.write_tag_header(TagCode::DefineText, buf.len() as u32)?;
+        } else {
+            self.write_tag_header(TagCode::DefineText2, buf.len() as u32)?;
+        }
         self.output.write_all(&buf)?;
         Ok(())
     }
@@ -2406,7 +2430,6 @@ fn count_fbits(n: Fixed16) -> u32 {
 #[cfg(test)]
 #[allow(clippy::unusual_byte_groupings)]
 mod tests {
-    use super::Writer;
     use super::*;
     use crate::test_data;
 
@@ -2418,9 +2441,9 @@ mod tests {
                 compression,
                 version: 13,
                 stage_size: Rectangle {
-                    x_min: Twips::from_pixels(0.0),
+                    x_min: Twips::ZERO,
                     x_max: Twips::from_pixels(640.0),
-                    y_min: Twips::from_pixels(0.0),
+                    y_min: Twips::ZERO,
                     y_max: Twips::from_pixels(480.0),
                 },
                 frame_rate: Fixed8::from_f32(60.0),
@@ -2610,27 +2633,32 @@ mod tests {
 
     #[test]
     fn write_rectangle_zero() {
-        let rect: Rectangle<Twips> = Default::default();
+        let rectangle = Rectangle {
+            x_min: Twips::ZERO,
+            y_min: Twips::ZERO,
+            x_max: Twips::ZERO,
+            y_max: Twips::ZERO,
+        };
         let mut buf = Vec::new();
         {
             let mut writer = Writer::new(&mut buf, 1);
-            writer.write_rectangle(&rect).unwrap();
+            writer.write_rectangle(&rectangle).unwrap();
         }
         assert_eq!(buf, [0]);
     }
 
     #[test]
     fn write_rectangle_signed() {
-        let rect = Rectangle {
-            x_min: Twips::from_pixels(-1.0),
-            x_max: Twips::from_pixels(1.0),
-            y_min: Twips::from_pixels(-1.0),
-            y_max: Twips::from_pixels(1.0),
+        let rectangle = Rectangle {
+            x_min: -Twips::ONE_PX,
+            x_max: Twips::ONE_PX,
+            y_min: -Twips::ONE_PX,
+            y_max: Twips::ONE_PX,
         };
         let mut buf = Vec::new();
         {
             let mut writer = Writer::new(&mut buf, 1);
-            writer.write_rectangle(&rect).unwrap();
+            writer.write_rectangle(&rectangle).unwrap();
         }
         assert_eq!(buf, [0b_00110_101, 0b100_01010, 0b0_101100_0, 0b_10100_000]);
     }
@@ -2733,5 +2761,297 @@ mod tests {
             expected.extend_from_slice(&[0b01_000000, 0b00000000, 0, 0]);
             assert_eq!(buf, expected);
         }
+    }
+
+    #[test]
+    fn write_font_3() {
+        use crate::read::Reader;
+
+        let font = Font {
+            version: 3,
+            id: 1,
+            name: SwfStr::from_bytes(b"font"),
+            language: Language::Unknown,
+            layout: None,
+            glyphs: vec![Glyph {
+                shape_records: vec![
+                    ShapeRecord::StraightEdge {
+                        delta: PointDelta::new(Twips::ONE_PX, -Twips::ONE_PX),
+                    },
+                    ShapeRecord::CurvedEdge {
+                        control_delta: PointDelta::new(Twips::ONE_PX, Twips::ONE_PX),
+                        anchor_delta: PointDelta::new(Twips::ONE_PX, -Twips::ONE_PX),
+                    },
+                    ShapeRecord::StraightEdge {
+                        delta: PointDelta::new(Twips::ZERO, Twips::ZERO),
+                    },
+                    ShapeRecord::CurvedEdge {
+                        control_delta: PointDelta::new(Twips::ZERO, Twips::ZERO),
+                        anchor_delta: PointDelta::new(Twips::ZERO, Twips::ZERO),
+                    },
+                ],
+                code: 1,
+                advance: 0,
+                bounds: None,
+            }],
+            flags: FontFlag::empty(),
+        };
+
+        let mut buf = Vec::new();
+        let mut writer = Writer::new(&mut buf, 13);
+        writer.write_define_font_2(&font).unwrap();
+
+        let mut reader = Reader::new(&buf, 13);
+        let tag = reader.read_tag().unwrap();
+
+        assert_eq!(tag, Tag::DefineFont2(Box::new(font)));
+    }
+
+    #[test]
+    fn write_define_button_2() {
+        use crate::read::Reader;
+
+        let button = Button {
+            id: 3,
+            is_track_as_menu: false,
+            records: vec![ButtonRecord {
+                states: ButtonState::UP
+                    | ButtonState::OVER
+                    | ButtonState::DOWN
+                    | ButtonState::HIT_TEST,
+                id: 2,
+                depth: 1,
+                matrix: Matrix::translate(Twips::from_pixels(2.0), Twips::from_pixels(3.0)),
+                color_transform: ColorTransform::default(),
+                filters: vec![],
+                blend_mode: BlendMode::Normal,
+            }],
+            actions: vec![],
+        };
+
+        let mut buf = Vec::new();
+        let mut writer = Writer::new(&mut buf, 15);
+        writer.write_define_button_2(&button).unwrap();
+
+        let mut reader = Reader::new(&buf, 15);
+        let tag = reader.read_tag().unwrap();
+
+        assert_eq!(tag, Tag::DefineButton2(Box::new(button)));
+    }
+
+    #[test]
+    fn write_define_button_2_with_keycode() {
+        use crate::read::Reader;
+
+        let button = Button {
+            id: 3,
+            is_track_as_menu: false,
+            records: vec![ButtonRecord {
+                states: ButtonState::UP
+                    | ButtonState::OVER
+                    | ButtonState::DOWN
+                    | ButtonState::HIT_TEST,
+                id: 2,
+                depth: 1,
+                matrix: Matrix::translate(Twips::from_pixels(2.0), Twips::from_pixels(3.0)),
+                color_transform: ColorTransform::default(),
+                filters: vec![],
+                blend_mode: BlendMode::Normal,
+            }],
+            actions: vec![ButtonAction {
+                conditions: ButtonActionCondition::from_key_code(18),
+                action_data: &[
+                    150, 15, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 116, 104, 105, 115, 0, 28, 150, 12,
+                    0, 0, 116, 97, 98, 72, 97, 110, 100, 108, 101, 114, 0, 82, 23, 0,
+                ],
+            }],
+        };
+
+        let mut buf = Vec::new();
+        let mut writer = Writer::new(&mut buf, 15);
+        writer.write_define_button_2(&button).unwrap();
+
+        let mut reader = Reader::new(&buf, 15);
+        let tag = reader.read_tag().unwrap();
+
+        assert_eq!(tag, Tag::DefineButton2(Box::new(button)));
+    }
+
+    #[test]
+    fn write_bevel_filter() {
+        use crate::read::Reader;
+
+        let filter = Filter::BevelFilter(Box::new(BevelFilter {
+            shadow_color: Color {
+                r: 111,
+                g: 222,
+                b: 33,
+                a: 4,
+            },
+            highlight_color: Color {
+                r: 10,
+                g: 20,
+                b: 30,
+                a: 40,
+            },
+            blur_x: Fixed16::from_f32(3.1),
+            blur_y: Fixed16::from_f32(5.5),
+            angle: Fixed16::from_f32(180.0),
+            distance: Fixed16::from_f32(10.8),
+            strength: Fixed8::from_f32(3.1),
+            flags: BevelFilterFlags::COMPOSITE_SOURCE
+                | BevelFilterFlags::ON_TOP
+                | BevelFilterFlags::from_passes(2),
+        }));
+
+        let mut buf = Vec::new();
+        let mut writer = Writer::new(&mut buf, 15);
+        writer.write_filter(&filter).unwrap();
+
+        let mut reader = Reader::new(&buf, 15);
+        let reread = reader.read_filter().unwrap();
+
+        assert_eq!(reread, filter);
+    }
+
+    #[test]
+    fn write_define_text_2() {
+        use crate::read::Reader;
+
+        let text = Text {
+            id: 60,
+            bounds: Rectangle {
+                x_min: Twips::new(2),
+                x_max: Twips::new(559),
+                y_min: Twips::new(-4),
+                y_max: Twips::new(76),
+            },
+            matrix: Matrix {
+                a: Fixed16::ONE,
+                b: Fixed16::ZERO,
+                c: Fixed16::ZERO,
+                d: Fixed16::ONE,
+                tx: Twips::ZERO,
+                ty: Twips::ZERO,
+            },
+            records: vec![TextRecord {
+                font_id: Some(57),
+                color: Some(Color {
+                    r: 112,
+                    g: 103,
+                    b: 5,
+                    a: 69,
+                }),
+                x_offset: None,
+                y_offset: Some(Twips::new(76)),
+                height: Some(Twips::new(100)),
+                glyphs: vec![
+                    GlyphEntry {
+                        index: 13,
+                        advance: 32,
+                    },
+                    GlyphEntry {
+                        index: 2,
+                        advance: 38,
+                    },
+                    GlyphEntry {
+                        index: 8,
+                        advance: 41,
+                    },
+                    GlyphEntry {
+                        index: 6,
+                        advance: 18,
+                    },
+                    GlyphEntry {
+                        index: 7,
+                        advance: 33,
+                    },
+                    GlyphEntry {
+                        index: 7,
+                        advance: 33,
+                    },
+                    GlyphEntry {
+                        index: 2,
+                        advance: 38,
+                    },
+                    GlyphEntry {
+                        index: 0,
+                        advance: 19,
+                    },
+                    GlyphEntry {
+                        index: 6,
+                        advance: 18,
+                    },
+                    GlyphEntry {
+                        index: 3,
+                        advance: 35,
+                    },
+                    GlyphEntry {
+                        index: 4,
+                        advance: 37,
+                    },
+                    GlyphEntry {
+                        index: 0,
+                        advance: 19,
+                    },
+                    GlyphEntry {
+                        index: 1,
+                        advance: 23,
+                    },
+                    GlyphEntry {
+                        index: 0,
+                        advance: 19,
+                    },
+                    GlyphEntry {
+                        index: 7,
+                        advance: 33,
+                    },
+                    GlyphEntry {
+                        index: 5,
+                        advance: 39,
+                    },
+                    GlyphEntry {
+                        index: 10,
+                        advance: 40,
+                    },
+                ],
+            }],
+        };
+
+        let mut buf = Vec::new();
+        let mut writer = Writer::new(&mut buf, 4);
+        writer.write_define_text(&text, 2).unwrap();
+
+        let mut reader = Reader::new(&buf, 4);
+        let reread = reader.read_tag().unwrap();
+
+        assert_eq!(reread, Tag::DefineText2(Box::new(text)));
+    }
+
+    #[test]
+    fn write_define_font_info() {
+        use crate::read::Reader;
+
+        let font_info = FontInfo {
+            id: 1,
+            version: 1,
+            name: SwfStr::from_bytes(b"Schauer"),
+            flags: FontInfoFlag::HAS_WIDE_CODES | FontInfoFlag::IS_BOLD,
+            language: Language::Unknown,
+            code_table: vec![
+                80, 108, 97, 121, 32, 109, 111, 118, 105, 101, 53, 48, 54, 75, 103, 115, 116, 74,
+                65, 67, 83, 86, 71, 84, 89, 76, 69, 42, 104, 46, 73, 100, 87, 107, 110, 102, 117,
+                99, 114, 63, 79, 39, 119, 44, 112, 33, 120, 72, 122, 58, 77, 45, 98, 40, 41, 70,
+            ],
+        };
+
+        let mut buf = Vec::new();
+        let mut writer = Writer::new(&mut buf, 4);
+        writer.write_define_font_info(&font_info).unwrap();
+
+        let mut reader = Reader::new(&buf, 4);
+        let reread = reader.read_tag().unwrap();
+
+        assert_eq!(reread, Tag::DefineFontInfo(Box::new(font_info)));
     }
 }

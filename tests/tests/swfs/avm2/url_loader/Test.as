@@ -6,18 +6,24 @@
 import flash.net.URLLoader;
 import flash.net.URLRequest;
 import flash.net.URLLoaderDataFormat;
+import flash.events.HTTPStatusEvent;
 import flash.events.IOErrorEvent;
+import flash.events.ProgressEvent;
 import flash.events.Event;
 import flash.utils.setInterval;
 import flash.utils.clearInterval;
+import flash.net.URLVariables;
 
 var txtRequest:URLRequest = new URLRequest("data.txt");
 var binRequest:URLRequest = new URLRequest("data.bin");
 var missingRequest:URLRequest = new URLRequest("missingFile.bin");
+
 var urlLoader:URLLoader = new URLLoader();
 urlLoader.addEventListener(Event.OPEN, on_open);
+urlLoader.addEventListener(ProgressEvent.PROGRESS, on_progress)
 urlLoader.addEventListener(Event.COMPLETE, on_complete);
 urlLoader.addEventListener(IOErrorEvent.IO_ERROR, on_error);
+urlLoader.addEventListener(HTTPStatusEvent.HTTP_STATUS, on_status);
 urlLoader.load(txtRequest);
 
 var state = "first";
@@ -25,6 +31,14 @@ var state = "first";
 function on_open(evt: Event):void {
 	trace("Event.OPEN with: ", evt.target)
 	trace("Got data: " + evt.target.data);
+}
+
+function on_progress(evt: Event):void {
+	trace("Event.PROGRESS: " + evt);
+}
+
+function on_status(evt: HTTPStatusEvent):void {
+	trace("HTTPStatusEvent.HTTP_STATUS: " + evt);
 }
 
 function on_complete(evt:Event):void {
@@ -56,14 +70,12 @@ function on_error(evt:IOErrorEvent):void {
 	
 	// Now, perform a load that's started by the constructor
 	var loader = new URLLoader(txtRequest);
-	// FIXME - setInterval is not currently implemented,
-	// so the rest of this test does not work under Ruffle
-	/*var interval = setInterval(checkData, 100);
+	var interval = setInterval(checkData, 100);
 
 	function checkData() {
 		if (loader.data != null) {
 			trace("Loaded using constructor: " + loader.data);
 			clearInterval(interval);
 		}
-	}*/
+	}
 }

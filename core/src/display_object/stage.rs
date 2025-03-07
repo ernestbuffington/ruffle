@@ -4,29 +4,29 @@ use crate::avm1::Object as Avm1Object;
 use crate::avm2::object::TObject;
 use crate::avm2::{
     Activation as Avm2Activation, Avm2, EventObject as Avm2EventObject, Object as Avm2Object,
-    ScriptObject as Avm2ScriptObject, StageObject as Avm2StageObject, Value as Avm2Value,
+    StageObject as Avm2StageObject, Value as Avm2Value,
 };
+use crate::backend::ui::MouseCursor;
 use crate::config::Letterbox;
 use crate::context::{RenderContext, UpdateContext};
-use crate::display_object::container::{
-    ChildContainer, DisplayObjectContainer, TDisplayObjectContainer,
-};
+use crate::display_object::container::ChildContainer;
 use crate::display_object::interactive::{
     InteractiveObject, InteractiveObjectBase, TInteractiveObject,
 };
-use crate::display_object::{
-    render_base, DisplayObject, DisplayObjectBase, DisplayObjectPtr, TDisplayObject,
-};
+use crate::display_object::{render_base, DisplayObjectBase, DisplayObjectPtr};
 use crate::events::{ClipEvent, ClipEventResult};
+use crate::focus_tracker::FocusTracker;
 use crate::prelude::*;
 use crate::string::{FromWStr, WStr};
 use crate::tag_utils::SwfMovie;
 use crate::vminterface::Instantiator;
 use bitflags::bitflags;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::{Collect, GcCell, Mutation};
+use ruffle_macros::istr;
 use ruffle_render::backend::ViewportDimensions;
 use ruffle_render::commands::CommandHandler;
 use ruffle_render::quality::StageQuality;
+use ruffle_render::transform::Transform;
 use std::cell::{Ref, RefMut};
 use std::fmt::{self, Display, Formatter};
 use std::str::FromStr;
@@ -52,7 +52,7 @@ pub struct StageData<'gc> {
     /// Base properties for interactive display objects.
     ///
     /// This particular base has additional constraints currently not
-    /// expressable by the type system. Notably, this should never have a
+    /// expressible by the type system. Notably, this should never have a
     /// parent, as the stage does not respect it.
     base: InteractiveObjectBase<'gc>,
 
@@ -68,6 +68,7 @@ pub struct StageData<'gc> {
     background_color: Option<Color>,
 
     /// Determines how player content is resized to fit the stage.
+    #[collect(require_static)]
     letterbox: Letterbox,
 
     /// The dimensions of the SWF file.
@@ -75,6 +76,7 @@ pub struct StageData<'gc> {
     movie_size: (u32, u32),
 
     /// The quality settings of the stage.
+    #[collect(require_static)]
     quality: StageQuality,
 
     /// The dimensions of the stage, as reported to ActionScript.
@@ -82,63 +84,83 @@ pub struct StageData<'gc> {
     stage_size: (u32, u32),
 
     /// The scale mode of the stage.
+    #[collect(require_static)]
     scale_mode: StageScaleMode,
 
+    /// Whether to prevent movies from changing the stage scale mode.
+    forced_scale_mode: bool,
+
     /// The display state of the stage.
+    #[collect(require_static)]
     display_state: StageDisplayState,
 
     /// The alignment of the stage.
+    #[collect(require_static)]
     align: StageAlign,
+
+    /// Whether to prevent movies from the changing the stage alignment
+    forced_align: bool,
+
+    /// Whether to allow the stage's displayState to be changed.
+    allow_fullscreen: bool,
 
     /// Whether or not a RENDER event should be dispatched on the next render
     invalidated: bool,
 
     /// Whether to use high quality downsampling for bitmaps.
     ///
-    /// This is usally implied by `quality` being `Best` or higher, but the AVM1
+    /// This is usually implied by `quality` being `Best` or higher, but the AVM1
     /// `ToggleHighQuality` op can adjust stage quality independently of this flag.
     /// This setting is currently ignored in Ruffle.
     use_bitmap_downsampling: bool,
 
     /// The bounds of the current viewport in twips, used for culling.
     #[collect(require_static)]
-    view_bounds: BoundingBox,
+    view_bounds: Rectangle<Twips>,
 
     /// The window mode of the viewport.
     ///
     /// Only used on web to control how the Flash content layers with other content on the page.
+    #[collect(require_static)]
     window_mode: WindowMode,
 
-    /// Whether or not objects display a glowing border when they have focus.
+    /// Whether objects display a glowing border when they have focus.
     stage_focus_rect: bool,
 
     /// Whether to show default context menu items
     show_menu: bool,
 
     /// The AVM2 view of this stage object.
-    avm2_object: Avm2Object<'gc>,
+    avm2_object: Option<Avm2Object<'gc>>,
 
     /// The AVM2 'LoaderInfo' object for this stage object
-    loader_info: Avm2Object<'gc>,
+    loader_info: Option<Avm2Object<'gc>>,
 
     /// An array of AVM2 'Stage3D' instances
     stage3ds: Vec<Avm2Object<'gc>>,
 
     /// The swf that registered this stage
     movie: Arc<SwfMovie>,
+
+    /// The final viewport transformation matrix applied
+    /// when rendering the stage. This includes the HiDPI scale factor,
+    /// and stage alignment translation. Neither of those are included
+    /// in the ActionScript-exposed `Stage.matrix` (which is always the
+    /// identity matrix unless explicitly set from ActionScript)
+    #[collect(require_static)]
+    viewport_matrix: Matrix,
+
+    /// A tracker for the current keyboard focused element
+    focus_tracker: FocusTracker<'gc>,
 }
 
 impl<'gc> Stage<'gc> {
-    pub fn empty(
-        gc_context: MutationContext<'gc, '_>,
-        fullscreen: bool,
-        movie: Arc<SwfMovie>,
-    ) -> Stage<'gc> {
-        let stage = Self(GcCell::allocate(
+    pub fn empty(gc_context: &Mutation<'gc>, fullscreen: bool, movie: Arc<SwfMovie>) -> Stage<'gc> {
+        let stage = Self(GcCell::new(
             gc_context,
             StageData {
                 base: Default::default(),
-                child: Default::default(),
+                child: ChildContainer::new(movie.clone()),
                 background_color: None,
                 letterbox: Letterbox::Fullscreen,
                 // This is updated when we set the root movie
@@ -147,6 +169,7 @@ impl<'gc> Stage<'gc> {
                 // This is updated in `build_matrices`
                 stage_size: (0, 0),
                 scale_mode: Default::default(),
+                forced_scale_mode: false,
                 display_state: if fullscreen {
                     StageDisplayState::FullScreen
                 } else {
@@ -154,15 +177,19 @@ impl<'gc> Stage<'gc> {
                 },
                 invalidated: false,
                 align: Default::default(),
+                forced_align: false,
+                allow_fullscreen: true,
                 use_bitmap_downsampling: false,
                 view_bounds: Default::default(),
                 window_mode: Default::default(),
                 show_menu: true,
                 stage_focus_rect: true,
-                avm2_object: Avm2ScriptObject::custom_object(gc_context, None, None),
-                loader_info: Avm2ScriptObject::custom_object(gc_context, None, None),
+                avm2_object: None,
+                loader_info: None,
                 stage3ds: vec![],
                 movie,
+                viewport_matrix: Matrix::IDENTITY,
+                focus_tracker: FocusTracker::new(gc_context),
             },
         ));
         stage.set_is_root(gc_context, true);
@@ -170,25 +197,31 @@ impl<'gc> Stage<'gc> {
     }
 
     pub fn background_color(self) -> Option<Color> {
-        self.0.read().background_color.clone()
+        self.0.read().background_color
     }
 
-    pub fn set_background_color(self, gc_context: MutationContext<'gc, '_>, color: Option<Color>) {
+    pub fn set_background_color(self, gc_context: &Mutation<'gc>, color: Option<Color>) {
         self.0.write(gc_context).background_color = color;
     }
 
     pub fn inverse_view_matrix(self) -> Matrix {
-        let mut inverse_view_matrix = *(self.base().matrix());
-        inverse_view_matrix.invert();
+        self.0
+            .read()
+            .viewport_matrix
+            .inverse()
+            .unwrap_or(Matrix::ZERO)
+    }
 
-        inverse_view_matrix
+    #[allow(dead_code)]
+    pub fn view_matrix(self) -> Matrix {
+        self.0.read().viewport_matrix
     }
 
     pub fn letterbox(self) -> Letterbox {
         self.0.read().letterbox
     }
 
-    pub fn set_letterbox(self, gc_context: MutationContext<'gc, '_>, letterbox: Letterbox) {
+    pub fn set_letterbox(self, gc_context: &Mutation<'gc>, letterbox: Letterbox) {
         self.0.write(gc_context).letterbox = letterbox
     }
 
@@ -198,20 +231,19 @@ impl<'gc> Stage<'gc> {
     }
 
     /// Set the size of the SWF file.
-    pub fn set_movie_size(self, gc_context: MutationContext<'gc, '_>, width: u32, height: u32) {
+    pub fn set_movie_size(self, gc_context: &Mutation<'gc>, width: u32, height: u32) {
         self.0.write(gc_context).movie_size = (width, height);
     }
 
-    pub fn set_movie(self, gc_context: MutationContext<'gc, '_>, movie: Arc<SwfMovie>) {
-        self.0.write(gc_context).movie = movie;
+    pub fn set_movie(self, gc_context: &Mutation<'gc>, movie: Arc<SwfMovie>) {
+        self.0.write(gc_context).movie = movie.clone();
+
+        // Stage is the only DO that has a fake movie set and then gets the real movie set.
+        self.0.write(gc_context).child.set_movie(movie);
     }
 
-    pub fn set_loader_info(
-        self,
-        gc_context: MutationContext<'gc, '_>,
-        loader_info: Avm2Object<'gc>,
-    ) {
-        self.0.write(gc_context).loader_info = loader_info;
+    pub fn set_loader_info(self, gc_context: &Mutation<'gc>, loader_info: Avm2Object<'gc>) {
+        self.0.write(gc_context).loader_info = Some(loader_info);
     }
 
     // Get the invalidation state
@@ -220,7 +252,7 @@ impl<'gc> Stage<'gc> {
     }
 
     // Set the invalidation state
-    pub fn set_invalidated(self, gc_context: MutationContext<'gc, '_>, value: bool) {
+    pub fn set_invalidated(self, gc_context: &Mutation<'gc>, value: bool) {
         self.0.write(gc_context).invalidated = value;
     }
 
@@ -238,8 +270,8 @@ impl<'gc> Stage<'gc> {
     /// In the Flash Player, the quality setting affects anti-aliasing and smoothing of bitmaps.
     /// This setting is currently ignored in Ruffle.
     /// Used by AVM1 `stage.quality` and AVM2 `Stage.quality` properties.
-    pub fn set_quality(self, context: &mut UpdateContext<'_, 'gc>, quality: StageQuality) {
-        let mut this = self.0.write(context.gc_context);
+    pub fn set_quality(self, context: &mut UpdateContext<'gc>, quality: StageQuality) {
+        let mut this = self.0.write(context.gc());
         this.quality = quality;
         this.use_bitmap_downsampling = matches!(
             quality,
@@ -256,21 +288,16 @@ impl<'gc> Stage<'gc> {
         Ref::map(self.0.read(), |this| &this.stage3ds)
     }
 
-    /// Get the boolean flag which determines whether or not objects display a glowing border
+    /// Get the boolean flag which determines whether objects display a glowing border
     /// when they have focus.
-    ///
-    /// This setting is currently ignored in Ruffle.
     pub fn stage_focus_rect(self) -> bool {
         self.0.read().stage_focus_rect
     }
 
-    /// Set the boolean flag which determines whether or not objects display a glowing border
+    /// Set the boolean flag which determines whether objects display a glowing border
     /// when they have focus.
-    ///
-    /// This setting is currently ignored in Ruffle.
-    pub fn set_stage_focus_rect(self, gc_context: MutationContext<'gc, '_>, fr: bool) {
-        let mut this = self.0.write(gc_context);
-        this.stage_focus_rect = fr
+    pub fn set_stage_focus_rect(self, gc_context: &Mutation<'gc>, value: bool) {
+        self.0.write(gc_context).stage_focus_rect = value
     }
 
     /// Get the size of the stage.
@@ -288,9 +315,38 @@ impl<'gc> Stage<'gc> {
     }
 
     /// Set the stage scale mode.
-    pub fn set_scale_mode(self, context: &mut UpdateContext<'_, 'gc>, scale_mode: StageScaleMode) {
-        self.0.write(context.gc_context).scale_mode = scale_mode;
+    pub fn set_scale_mode(
+        self,
+        context: &mut UpdateContext<'gc>,
+        scale_mode: StageScaleMode,
+        respect_forced: bool,
+    ) {
+        if respect_forced && self.forced_scale_mode() {
+            return;
+        }
+
+        self.0.write(context.gc()).scale_mode = scale_mode;
         self.build_matrices(context);
+    }
+
+    /// Get whether movies are prevented from changing the stage scale mode.
+    pub fn forced_scale_mode(self) -> bool {
+        self.0.read().forced_scale_mode
+    }
+
+    /// Set whether movies are prevented from changing the stage scale mode.
+    pub fn set_forced_scale_mode(self, context: &mut UpdateContext<'gc>, force: bool) {
+        self.0.write(context.gc()).forced_scale_mode = force;
+    }
+
+    /// Get whether the Stage's display state can be changed.
+    pub fn allow_fullscreen(self) -> bool {
+        self.0.read().allow_fullscreen
+    }
+
+    /// Set whether the Stage's display state can be changed.
+    pub fn set_allow_fullscreen(self, context: &mut UpdateContext<'gc>, allow: bool) {
+        self.0.write(context.gc()).allow_fullscreen = allow;
     }
 
     fn is_fullscreen_state(display_state: StageDisplayState) -> bool {
@@ -311,7 +367,7 @@ impl<'gc> Stage<'gc> {
     }
 
     /// Toggles display state between fullscreen and normal
-    pub fn toggle_display_state(self, context: &mut UpdateContext<'_, 'gc>) {
+    pub fn toggle_display_state(self, context: &mut UpdateContext<'gc>) {
         if self.is_fullscreen() {
             self.set_display_state(context, StageDisplayState::Normal);
         } else {
@@ -322,11 +378,12 @@ impl<'gc> Stage<'gc> {
     /// Set the stage display state.
     pub fn set_display_state(
         self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         display_state: StageDisplayState,
     ) {
         if display_state == self.display_state()
             || (Self::is_fullscreen_state(display_state) && self.is_fullscreen())
+            || !self.allow_fullscreen()
         {
             return;
         }
@@ -340,7 +397,7 @@ impl<'gc> Stage<'gc> {
         };
 
         if result.is_ok() {
-            self.0.write(context.gc_context).display_state = display_state;
+            self.0.write(context.gc()).display_state = display_state;
             self.fire_fullscreen_event(context);
         }
     }
@@ -352,9 +409,21 @@ impl<'gc> Stage<'gc> {
 
     /// Set the stage alignment.
     /// This only has an effect if the scale mode is not `StageScaleMode::ExactFit`.
-    pub fn set_align(self, context: &mut UpdateContext<'_, 'gc>, align: StageAlign) {
-        self.0.write(context.gc_context).align = align;
-        self.build_matrices(context);
+    pub fn set_align(self, context: &mut UpdateContext<'gc>, align: StageAlign) {
+        if !self.forced_align() {
+            self.0.write(context.gc()).align = align;
+            self.build_matrices(context);
+        }
+    }
+
+    /// Get whether movies are prevented from changing the stage alignment.
+    pub fn forced_align(self) -> bool {
+        self.0.read().forced_align
+    }
+
+    /// Set whether movies are prevented from changing the stage alignment.
+    pub fn set_forced_align(self, context: &mut UpdateContext<'gc>, force: bool) {
+        self.0.write(context.gc()).forced_align = force;
     }
 
     /// Returns whether bitmaps will use high quality downsampling when scaled down.
@@ -365,7 +434,7 @@ impl<'gc> Stage<'gc> {
 
     /// Sets whether bitmaps will use high quality downsampling when scaled down.
     /// This setting is currently ignored in Ruffle.
-    pub fn set_use_bitmap_downsampling(self, gc_context: MutationContext<'gc, '_>, value: bool) {
+    pub fn set_use_bitmap_downsampling(self, gc_context: &Mutation<'gc>, value: bool) {
         self.0.write(gc_context).use_bitmap_downsampling = value;
     }
 
@@ -377,11 +446,11 @@ impl<'gc> Stage<'gc> {
     }
 
     /// Sets the window mode.
-    pub fn set_window_mode(self, context: &mut UpdateContext<'_, 'gc>, window_mode: WindowMode) {
-        self.0.write(context.gc_context).window_mode = window_mode;
+    pub fn set_window_mode(self, context: &mut UpdateContext<'gc>, window_mode: WindowMode) {
+        self.0.write(context.gc()).window_mode = window_mode;
     }
 
-    pub fn view_bounds(self) -> BoundingBox {
+    pub fn view_bounds(self) -> Rectangle<Twips> {
         self.0.read().view_bounds.clone()
     }
 
@@ -389,8 +458,8 @@ impl<'gc> Stage<'gc> {
         self.0.read().show_menu
     }
 
-    pub fn set_show_menu(self, context: &mut UpdateContext<'_, 'gc>, show_menu: bool) {
-        let mut write = self.0.write(context.gc_context);
+    pub fn set_show_menu(self, context: &mut UpdateContext<'gc>, show_menu: bool) {
+        let mut write = self.0.write(context.gc());
         write.show_menu = show_menu;
     }
 
@@ -408,8 +477,8 @@ impl<'gc> Stage<'gc> {
     }
 
     /// Update the stage's transform matrix in response to a root movie change.
-    pub fn build_matrices(self, context: &mut UpdateContext<'_, 'gc>) {
-        let mut stage = self.0.write(context.gc_context);
+    pub fn build_matrices(self, context: &mut UpdateContext<'gc>) {
+        let mut stage = self.0.write(context.gc());
         let scale_mode = stage.scale_mode;
         let align = stage.align;
         let prev_stage_size = stage.stage_size;
@@ -484,9 +553,8 @@ impl<'gc> Stage<'gc> {
         } else {
             height_delta / 2.0
         };
-        drop(stage);
 
-        *self.base_mut(context.gc_context).matrix_mut() = Matrix {
+        stage.viewport_matrix = Matrix {
             a: scale_x as f32,
             b: 0.0,
             c: 0.0,
@@ -495,14 +563,15 @@ impl<'gc> Stage<'gc> {
             ty: Twips::from_pixels(ty),
         };
 
-        self.0.write(context.gc_context).view_bounds = if self.should_letterbox() {
+        drop(stage);
+
+        self.0.write(context.gc()).view_bounds = if self.should_letterbox() {
             // Letterbox: movie area
-            BoundingBox {
+            Rectangle {
                 x_min: Twips::ZERO,
                 y_min: Twips::ZERO,
                 x_max: Twips::from_pixels(movie_width),
                 y_max: Twips::from_pixels(movie_height),
-                valid: true,
             }
         } else {
             // No letterbox: full visible stage area
@@ -510,12 +579,11 @@ impl<'gc> Stage<'gc> {
             let margin_right = (width_delta - tx) / scale_x;
             let margin_top = ty / scale_y;
             let margin_bottom = (height_delta - ty) / scale_y;
-            BoundingBox {
+            Rectangle {
                 x_min: Twips::from_pixels(-margin_left),
                 y_min: Twips::from_pixels(-margin_top),
                 x_max: Twips::from_pixels(movie_width + margin_right),
                 y_max: Twips::from_pixels(movie_height + margin_bottom),
-                valid: true,
             }
         };
 
@@ -535,8 +603,7 @@ impl<'gc> Stage<'gc> {
         let viewport_width = viewport_width as f32;
         let viewport_height = viewport_height as f32;
 
-        let base = self.base();
-        let view_matrix = base.matrix();
+        let view_matrix = self.0.read().viewport_matrix;
 
         let (movie_width, movie_height) = self.0.read().movie_size;
         let movie_width = movie_width as f32 * view_matrix.a;
@@ -556,7 +623,6 @@ impl<'gc> Stage<'gc> {
                     Matrix::create_box(
                         viewport_width,
                         margin_top,
-                        0.0,
                         Twips::default(),
                         Twips::default(),
                     ),
@@ -568,7 +634,6 @@ impl<'gc> Stage<'gc> {
                     Matrix::create_box(
                         viewport_width,
                         margin_bottom,
-                        0.0,
                         Twips::default(),
                         Twips::from_pixels((viewport_height - margin_bottom) as f64),
                     ),
@@ -582,7 +647,6 @@ impl<'gc> Stage<'gc> {
                     Matrix::create_box(
                         margin_left,
                         viewport_height,
-                        0.0,
                         Twips::default(),
                         Twips::default(),
                     ),
@@ -594,7 +658,6 @@ impl<'gc> Stage<'gc> {
                     Matrix::create_box(
                         margin_right,
                         viewport_height,
-                        0.0,
                         Twips::from_pixels((viewport_width - margin_right) as f64),
                         Twips::default(),
                     ),
@@ -605,29 +668,28 @@ impl<'gc> Stage<'gc> {
 
     /// Obtain the root movie on the stage.
     ///
-    /// `Stage` guarantees that there is always a movie clip at depth 0.
-    pub fn root_clip(self) -> DisplayObject<'gc> {
+    /// It is not a guarantee that the root clip exists, as it can be deliberately removed.
+    pub fn root_clip(self) -> Option<DisplayObject<'gc>> {
         self.child_by_depth(0)
-            .expect("Stage must always have a root movie")
     }
 
     /// Fires `Stage.onResize` in AVM1 or `Event.RESIZE` in AVM2.
-    fn fire_resize_event(self, context: &mut UpdateContext<'_, 'gc>) {
+    fn fire_resize_event(self, context: &mut UpdateContext<'gc>) {
         // This event fires immediately when scaleMode is changed;
         // it doesn't queue up.
-        if !context.is_action_script_3() {
-            crate::avm1::Avm1::notify_system_listeners(
-                self.root_clip(),
-                context,
-                "Stage".into(),
-                "onResize".into(),
-                &[],
-            );
+        if !self.movie().is_action_script_3() {
+            if let Some(root_clip) = self.root_clip() {
+                crate::avm1::Avm1::notify_system_listeners(
+                    root_clip,
+                    istr!(context, "Stage"),
+                    istr!(context, "onResize"),
+                    &[],
+                    context,
+                );
+            }
         } else if let Avm2Value::Object(stage) = self.object2() {
             let resized_event = Avm2EventObject::bare_default_event(context, "resize");
-            if let Err(e) = crate::avm2::Avm2::dispatch_event(context, resized_event, stage) {
-                tracing::error!("Encountered AVM2 error when dispatching event: {}", e);
-            }
+            Avm2::dispatch_event(context, resized_event, stage);
         }
     }
 
@@ -635,51 +697,49 @@ impl<'gc> Stage<'gc> {
     ///
     /// TODO: Need additional check as Flash Player does not
     /// broadcast the 'render' event on the first render
-    pub fn broadcast_render(&self, context: &mut UpdateContext<'_, 'gc>) {
+    pub fn broadcast_render(&self, context: &mut UpdateContext<'gc>) {
         let render_evt = Avm2EventObject::bare_default_event(context, "render");
-
         let dobject_constr = context.avm2.classes().display_object;
+        Avm2::broadcast_event(context, render_evt, dobject_constr);
 
-        if let Err(e) = Avm2::broadcast_event(context, render_evt, dobject_constr) {
-            tracing::error!(
-                "Encountered AVM2 error when broadcasting render event: {}",
-                e
-            );
-        }
-
-        self.set_invalidated(context.gc_context, false);
+        self.set_invalidated(context.gc(), false);
     }
 
     /// Fires `Stage.onFullScreen` in AVM1 or `Event.FULLSCREEN` in AVM2.
-    pub fn fire_fullscreen_event(self, context: &mut UpdateContext<'_, 'gc>) {
-        if !context.is_action_script_3() {
-            crate::avm1::Avm1::notify_system_listeners(
-                self.root_clip(),
-                context,
-                "Stage".into(),
-                "onFullScreen".into(),
-                &[self.is_fullscreen().into()],
-            );
-        } else if let Avm2Value::Object(stage) = self.object2() {
-            let full_screen_event_cls = context.avm2.classes().fullscreenevent;
-            let mut activation = Avm2Activation::from_nothing(context.reborrow());
-            let full_screen_event = full_screen_event_cls
-                .construct(
-                    &mut activation,
-                    &[
-                        "fullScreen".into(),
-                        false.into(),
-                        false.into(),
-                        self.is_fullscreen().into(),
-                        true.into(),
-                    ],
-                )
-                .unwrap(); // we don't expect to break here
-
-            if let Err(e) = crate::avm2::Avm2::dispatch_event(context, full_screen_event, stage) {
-                tracing::error!("Encountered AVM2 error when dispatching event: {}", e);
+    pub fn fire_fullscreen_event(self, context: &mut UpdateContext<'gc>) {
+        if !self.movie().is_action_script_3() {
+            if let Some(root_clip) = self.root_clip() {
+                crate::avm1::Avm1::notify_system_listeners(
+                    root_clip,
+                    istr!(context, "Stage"),
+                    istr!(context, "onFullScreen"),
+                    &[self.is_fullscreen().into()],
+                    context,
+                );
             }
+        } else if let Avm2Value::Object(stage) = self.object2() {
+            let mut activation = Avm2Activation::from_nothing(context);
+
+            let full_screen_event_cls = activation.avm2().classes().fullscreenevent;
+            let full_screen_string = istr!("fullScreen");
+            let full_screen_event = Avm2EventObject::from_class_and_args(
+                &mut activation,
+                full_screen_event_cls,
+                &[
+                    full_screen_string.into(),
+                    false.into(),
+                    false.into(),
+                    self.is_fullscreen().into(),
+                    true.into(),
+                ],
+            );
+
+            Avm2::dispatch_event(context, full_screen_event, stage);
         }
+    }
+
+    pub fn focus_tracker(&self) -> FocusTracker<'gc> {
+        self.0.read().focus_tracker
     }
 }
 
@@ -688,12 +748,12 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
         Ref::map(self.0.read(), |r| &r.base.base)
     }
 
-    fn base_mut<'a>(&'a self, mc: MutationContext<'gc, '_>) -> RefMut<'a, DisplayObjectBase<'gc>> {
+    fn base_mut<'a>(&'a self, mc: &Mutation<'gc>) -> RefMut<'a, DisplayObjectBase<'gc>> {
         RefMut::map(self.0.write(mc), |w| &mut w.base.base)
     }
 
-    fn instantiate(&self, gc_context: MutationContext<'gc, '_>) -> DisplayObject<'gc> {
-        Self(GcCell::allocate(gc_context, self.0.read().clone())).into()
+    fn instantiate(&self, gc_context: &Mutation<'gc>) -> DisplayObject<'gc> {
+        Self(GcCell::new(gc_context, self.0.read().clone())).into()
     }
 
     fn as_ptr(&self) -> *const DisplayObjectPtr {
@@ -701,13 +761,13 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
     }
 
     fn local_to_global_matrix(&self) -> Matrix {
-        // TODO: See comments in DisplayObject::local_to_global_matrix.
+        // The stage is in Stage coordinates by definition
         Default::default()
     }
 
     fn post_instantiation(
         &self,
-        context: &mut UpdateContext<'_, 'gc>,
+        context: &mut UpdateContext<'gc>,
         _init_object: Option<Avm1Object<'gc>>,
         _instantiated_by: Instantiator,
         _run_frame: bool,
@@ -717,26 +777,32 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
         // TODO: Replace this when we have a convenience method for constructing AVM2 native objects.
         // TODO: We should only do this if the movie is actually an AVM2 movie.
         // This is necessary for EventDispatcher super-constructor to run.
-        let mut activation = Avm2Activation::from_nothing(context.reborrow());
+        let global_domain = context.avm2.stage_domain();
+        let mut activation = Avm2Activation::from_domain(context, global_domain);
         let avm2_stage = Avm2StageObject::for_display_object_childless(
             &mut activation,
             (*self).into(),
             stage_constr,
         );
 
-        // Just create a single Stage3D for now
-        let stage3d = activation
-            .avm2()
-            .classes()
-            .stage3d
-            .construct(&mut activation, &[])
-            .expect("Failed to construct Stage3D");
-
         match avm2_stage {
             Ok(avm2_stage) => {
-                let mut write = self.0.write(activation.context.gc_context);
-                write.avm2_object = avm2_stage.into();
-                write.stage3ds = vec![stage3d];
+                // Always create 4 Stage3D instances for now, which matches the flash projector behavior
+                let stage3ds: Vec<_> = (0..4)
+                    .map(|_| {
+                        activation
+                            .avm2()
+                            .classes()
+                            .stage3d
+                            .construct(&mut activation, &[])
+                            .expect("Failed to construct Stage3D")
+                            .as_object()
+                            .expect("Stage3D is an Object")
+                    })
+                    .collect();
+                let mut write = self.0.write(activation.gc());
+                write.avm2_object = Some(avm2_stage.into());
+                write.stage3ds = stage3ds;
             }
             Err(e) => tracing::error!("Unable to construct AVM2 Stage: {}", e),
         }
@@ -746,7 +812,7 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
         u16::MAX
     }
 
-    fn self_bounds(&self) -> BoundingBox {
+    fn self_bounds(&self) -> Rectangle<Twips> {
         Default::default()
     }
 
@@ -767,51 +833,60 @@ impl<'gc> TDisplayObject<'gc> for Stage<'gc> {
     }
 
     fn render(&self, context: &mut RenderContext<'_, 'gc>) {
+        context.transform_stack.push(&Transform {
+            matrix: self.0.read().viewport_matrix,
+            color_transform: Default::default(),
+        });
+
         // All of our Stage3D instances get rendered *underneath* the main stage.
         // Note that the stage background color is actually the lowest possible layer,
         // and get applied when we start the frame (before `render` is called).
         for stage3d in self.stage3ds().iter() {
-            if let Some(context3d) = stage3d.as_stage_3d().unwrap().context3d() {
-                context3d.as_context_3d().unwrap().render(context);
+            let stage3d = stage3d.as_stage_3d().unwrap();
+            if stage3d.visible() {
+                if let Some(context3d) = stage3d.context3d() {
+                    context3d.as_context_3d().unwrap().render(context);
+                }
             }
         }
 
         render_base((*self).into(), context);
 
+        self.focus_tracker().render_highlight(context);
+
         if self.should_letterbox() {
             self.draw_letterbox(context);
         }
+
+        context.transform_stack.pop();
     }
 
-    fn enter_frame(&self, context: &mut UpdateContext<'_, 'gc>) {
+    fn enter_frame(&self, context: &mut UpdateContext<'gc>) {
         for child in self.iter_render_list() {
             child.enter_frame(context);
         }
 
         let enter_frame_evt = Avm2EventObject::bare_default_event(context, "enterFrame");
-
         let dobject_constr = context.avm2.classes().display_object;
-
-        if let Err(e) = Avm2::broadcast_event(context, enter_frame_evt, dobject_constr) {
-            tracing::error!(
-                "Encountered AVM2 error when broadcasting enterFrame event: {}",
-                e
-            );
-        }
+        Avm2::broadcast_event(context, enter_frame_evt, dobject_constr);
     }
 
-    fn construct_frame(&self, context: &mut UpdateContext<'_, 'gc>) {
+    fn construct_frame(&self, context: &mut UpdateContext<'gc>) {
         for child in self.iter_render_list() {
             child.construct_frame(context);
         }
     }
 
     fn object2(&self) -> Avm2Value<'gc> {
-        self.0.read().avm2_object.into()
+        self.0
+            .read()
+            .avm2_object
+            .expect("Attempted to access Stage::object2 before initialization")
+            .into()
     }
 
     fn loader_info(&self) -> Option<Avm2Object<'gc>> {
-        Some(self.0.read().loader_info)
+        self.0.read().loader_info
     }
 
     fn movie(&self) -> Arc<SwfMovie> {
@@ -824,10 +899,7 @@ impl<'gc> TDisplayObjectContainer<'gc> for Stage<'gc> {
         Ref::map(self.0.read(), |this| &this.child)
     }
 
-    fn raw_container_mut(
-        &self,
-        gc_context: MutationContext<'gc, '_>,
-    ) -> RefMut<'_, ChildContainer<'gc>> {
+    fn raw_container_mut(&self, gc_context: &Mutation<'gc>) -> RefMut<'_, ChildContainer<'gc>> {
         RefMut::map(self.0.write(gc_context), |this| &mut this.child)
     }
 }
@@ -837,10 +909,7 @@ impl<'gc> TInteractiveObject<'gc> for Stage<'gc> {
         Ref::map(self.0.read(), |r| &r.base)
     }
 
-    fn raw_interactive_mut(
-        &self,
-        mc: MutationContext<'gc, '_>,
-    ) -> RefMut<InteractiveObjectBase<'gc>> {
+    fn raw_interactive_mut(&self, mc: &Mutation<'gc>) -> RefMut<InteractiveObjectBase<'gc>> {
         RefMut::map(self.0.write(mc), |w| &mut w.base)
     }
 
@@ -848,18 +917,29 @@ impl<'gc> TInteractiveObject<'gc> for Stage<'gc> {
         self.into()
     }
 
-    fn filter_clip_event(self, _event: ClipEvent) -> ClipEventResult {
+    fn filter_clip_event(
+        self,
+        _context: &mut UpdateContext<'gc>,
+        _event: ClipEvent,
+    ) -> ClipEventResult {
         ClipEventResult::Handled
     }
 
     fn event_dispatch(
         self,
-        context: &mut UpdateContext<'_, 'gc>,
-        event: ClipEvent<'gc>,
+        _context: &mut UpdateContext<'gc>,
+        _event: ClipEvent<'gc>,
     ) -> ClipEventResult {
-        self.event_dispatch_to_avm2(context, event);
+        ClipEventResult::NotHandled
+    }
 
-        ClipEventResult::Handled
+    fn mouse_cursor(self, _context: &mut UpdateContext<'gc>) -> MouseCursor {
+        MouseCursor::Arrow
+    }
+
+    fn is_highlightable(&self, _context: &mut UpdateContext<'gc>) -> bool {
+        // Stage cannot be highlighted.
+        false
     }
 }
 
@@ -867,8 +947,8 @@ pub struct ParseEnumError;
 
 /// The scale mode of a stage.
 /// This controls the behavior when the player viewport size differs from the SWF size.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Collect)]
-#[collect(require_static)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageScaleMode {
     /// The movie will be stretched to fit the container.
     ExactFit,
@@ -904,11 +984,11 @@ impl FromStr for StageScaleMode {
     type Err = ParseEnumError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let scale_mode = match s.to_ascii_lowercase().as_str() {
-            "exactfit" => StageScaleMode::ExactFit,
-            "noborder" => StageScaleMode::NoBorder,
-            "noscale" => StageScaleMode::NoScale,
-            "showall" => StageScaleMode::ShowAll,
+        let scale_mode = match s {
+            "exact_fit" => StageScaleMode::ExactFit,
+            "no_border" => StageScaleMode::NoBorder,
+            "no_scale" => StageScaleMode::NoScale,
+            "show_all" => StageScaleMode::ShowAll,
             _ => return Err(ParseEnumError),
         };
         Ok(scale_mode)
@@ -935,8 +1015,7 @@ impl FromWStr for StageScaleMode {
 
 /// The scale mode of a stage.
 /// This controls the behavior when the player viewport size differs from the SWF size.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Collect)]
-#[collect(require_static)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageDisplayState {
     /// Sets AIR application or content in Flash Player to expand the stage over the user's entire screen.
     /// Keyboard input is disabled, with the exception of a limited set of non-printing keys.
@@ -1000,8 +1079,7 @@ bitflags! {
     ///
     /// This is a bitflags instead of an enum to mimic Flash Player behavior.
     /// You can theoretically have both TOP and BOTTOM bits set, for example.
-    #[derive(Default, Collect)]
-    #[collect(require_static)]
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct StageAlign: u8 {
         /// Align to the top of the viewport.
         const TOP    = 1 << 0;
@@ -1018,21 +1096,21 @@ bitflags! {
 }
 
 impl FromStr for StageAlign {
-    type Err = std::convert::Infallible;
+    type Err = ParseEnumError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // Chars get converted into flags.
-        // This means "tbbtlbltblbrllrbltlrtbl" is valid, resulting in "TBLR".
-        let mut align = StageAlign::default();
-        for c in s.bytes().map(|c| c.to_ascii_uppercase()) {
-            match c {
-                b'T' => align.insert(StageAlign::TOP),
-                b'B' => align.insert(StageAlign::BOTTOM),
-                b'L' => align.insert(StageAlign::LEFT),
-                b'R' => align.insert(StageAlign::RIGHT),
-                _ => (),
-            }
-        }
+        let align = match s {
+            "bottom" => StageAlign::BOTTOM,
+            "bottom_left" => StageAlign::BOTTOM | StageAlign::LEFT,
+            "bottom_right" => StageAlign::BOTTOM | StageAlign::RIGHT,
+            "left" => StageAlign::LEFT,
+            "right" => StageAlign::RIGHT,
+            "top" => StageAlign::TOP,
+            "top_left" => StageAlign::TOP | StageAlign::LEFT,
+            "top_right" => StageAlign::TOP | StageAlign::RIGHT,
+            "center" => StageAlign::empty(),
+            _ => return Err(ParseEnumError),
+        };
         Ok(align)
     }
 }
@@ -1063,8 +1141,7 @@ impl FromWStr for StageAlign {
 /// the page. This setting is only used on web.
 ///
 /// [Apply OBJECT and EMBED tag attributes in Adobe Flash Professional](https://helpx.adobe.com/flash/kb/flash-object-embed-tag-attributes.html)
-#[derive(Default, Clone, Collect, Copy, Debug, Eq, PartialEq)]
-#[collect(require_static)]
+#[derive(Default, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowMode {
     /// The Flash content is rendered in its own window and layering is done with the browser's
     /// default behavior.

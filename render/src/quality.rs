@@ -1,4 +1,3 @@
-use gc_arena::Collect;
 use ruffle_wstr::{FromWStr, WStr};
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -10,8 +9,7 @@ use std::str::FromStr;
 /// These settings currently have no effect in Ruffle, but the active setting is still stored.
 /// [StageQuality in the AS3 Reference](https://help.adobe.com/en_US/FlashPlatform/reference/actionscript/3/flash/display/StageQuality.html)
 #[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
-#[derive(Default, Clone, Collect, Copy, Debug, Eq, PartialEq)]
-#[collect(require_static)]
+#[derive(Default, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StageQuality {
     /// No anti-aliasing, and bitmaps are never smoothed.
     Low,
@@ -101,15 +99,10 @@ impl FromStr for StageQuality {
     type Err = StageQualityError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let quality = match s.to_ascii_lowercase().as_str() {
+        let quality = match s {
             "low" => StageQuality::Low,
             "medium" => StageQuality::Medium,
             "high" => StageQuality::High,
-            "best" => StageQuality::Best,
-            "8x8" => StageQuality::High8x8,
-            "8x8linear" => StageQuality::High8x8Linear,
-            "16x16" => StageQuality::High16x16,
-            "16x16linear" => StageQuality::High16x16Linear,
             _ => return Err(StageQualityError),
         };
         Ok(quality)

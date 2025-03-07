@@ -2,14 +2,53 @@
     "settings_ruffle_enable": {
         "message": "RuffleでFlashコンテンツを再生する"
     },
-    "settings_page_ignore_optout": {
-        "message": "Ruffleを無効にしたサイトでもFlashコンテンツを再生する"
-    },
     "settings_ignore_optout": {
-        "message": "Webサイトの互換性に関する警告を無視する"
+        "message": "Ruffleを許可していないサイトでもFlashコンテンツを再生する"
+    },
+    "settings_show_swf_download": {
+        "message": "SWFのダウンロードをコンテキストメニューに表示する"
+    },
+    "settings_autostart": {
+        "message": "Flashを自動再生(クリックでミュートを解除)"
+    },
+    "settings_swf_takeover": {
+        "message": "SWFをダウンロードせずにブラウザで再生する"
+    },
+    "settings_log_level": {
+        "message": "ログレベル"
+    },
+    "settings_log_level_error": {
+        "message": "エラー"
+    },
+    "settings_log_level_warn": {
+        "message": "警告"
+    },
+    "settings_log_level_info": {
+        "message": "情報"
+    },
+    "settings_max_execution_duration": {
+        "message": "ActionScriptの最長実行時間(秒)"
+    },
+    "settings_player_version": {
+        "message": "エミュレートするFlashプレーヤーのバージョン(1~32)"
+    },
+    "settings_preferred_renderer": {
+        "message": "優先するレンダラー"
+    },
+    "settings_preferred_renderer_auto": {
+        "message": "自動"
+    },
+    "settings_advanced_options": {
+        "message": "詳細設定"
+    },
+    "settings_reset": {
+        "message": "設定をリセット"
+    },
+    "settings_reset_confirm": {
+        "message": "Ruffleの設定をデフォルトの状態に復元します。よろしいですか？"
     },
     "status_init": {
-        "message": "現在のタブを読み取る..."
+        "message": "現在のタブを読み込み中..."
     },
     "status_no_tabs": {
         "message": "アクティブなタブはありません。"
@@ -18,31 +57,37 @@
         "message": "現在のタブを検索中にエラーが発生しました。"
     },
     "status_message_init": {
-        "message": "現在のタブでRuffleの状態を確認..."
+        "message": "Ruffleの状態を確認しています..."
     },
     "status_result_running": {
-        "message": "Ruffleは、現在のタブでFlashコンテンツが読み込まれ、実行されています。"
+        "message": "RuffleでFlashを実行する準備が整いました。"
+    },
+    "status_result_running_protected": {
+        "message": "RuffleはリクエストされたFlashコンテンツを実行する準備ができました。"
     },
     "status_result_optout": {
-        "message": "Ruffleは、現在のページが互換性がないとマークされているため、ロードされません。"
+        "message": "現在のサイトは互換性がないため、Ruffleをロードできません。"
     },
     "status_result_disabled": {
-        "message": "Ruffleはユーザーが無効化しているため、ロードされません。"
+        "message": "Ruffleは無効化されています。"
     },
     "status_result_error": {
-        "message": "現在のタブのRuffleインスタンスを照会するときにエラーが発生しました。"
+        "message": "現在のページでRuffleインスタンスの照会中にエラーが発生しました。"
     },
     "status_result_protected": {
-        "message": "保護されたブラウザのページではRuffleをロードできません。"
+        "message": "Ruffleは、ブラウザの保護されたページでは読み込まれません。"
     },
     "action_reload": {
-        "message": "タブをリロードして適用"
+        "message": "タブをリロードして変更を適用する"
+    },
+    "open_player_page": {
+        "message": "SWFプレーヤーを開く"
     },
     "open_settings_page": {
-        "message": "設定ページを開く"
+        "message": "設定を開く"
     },
     "settings_page": {
-        "message": "設定ページ"
+        "message": "設定"
     },
     "description": {
         "message": "Flashを元の場所に戻します。"
@@ -51,6 +96,24 @@
         "message": "設定を保存"
     },
     "settings_saved": {
-        "message": "保存完了"
+        "message": "設定を保存しました"
+    },
+    "onboarding_page": {
+        "message": "オンボーディング ページ"
+    },
+    "permissions_grant": {
+        "message": "Ruffleにすべてのウェブサイトでデータへのアクセスを許可"
+    },
+    "permissions_not_granted": {
+        "message": "Ruffleを使用したいサイトそれぞれでRuffle拡張機能のアイコンをクリックする必要があります"
+    },
+    "grant_single_site_permission": {
+        "message": "このサイトに対して永続的に有効化する"
+    },
+    "permissions_explanation": {
+        "message": "Ruffle拡張機能を最適に動作させるには、すべてのWebサイトへのアクセス権を付与する必要があります。これにより、サイトの読み込み時にRuffleが実行され、Flashコンテンツを即座に実行することができます。また、URLで直接SWFファイルを指定してRuffleの組み込みプレーヤーで実行することが可能になります。アクセス権を付与しない場合は、Ruffleを使用したいWebサイトで拡張機能アイコンより手動でアクセス権の付与が必要になります。"
+    },
+    "swf_player_permissions": {
+        "message": "このURLオリジンからSWFを読み込むには、URLオリジンにアクセス許可を与える必要があります。"
     }
 }

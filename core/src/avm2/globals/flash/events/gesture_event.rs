@@ -1,23 +1,25 @@
 use crate::avm2::activation::Activation;
 use crate::avm2::globals::flash::events::mouse_event;
-use crate::avm2::object::Object;
+use crate::avm2::globals::slots::flash_events_gesture_event as slots;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 
-// Borrow mouse_event's `stageX` getter
 pub fn get_stage_x<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
-    args: &[Value<'gc>],
+    this: Value<'gc>,
+    _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    mouse_event::get_stage_x(activation, this, args)
+    let this = this.as_object().unwrap();
+
+    mouse_event::local_to_stage_x(activation, this, slots::LOCAL_X, slots::LOCAL_Y)
 }
 
-// Borrow mouse_event's `stageY` getter
 pub fn get_stage_y<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
-    args: &[Value<'gc>],
+    this: Value<'gc>,
+    _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    mouse_event::get_stage_y(activation, this, args)
+    let this = this.as_object().unwrap();
+
+    mouse_event::local_to_stage_y(activation, this, slots::LOCAL_X, slots::LOCAL_Y)
 }

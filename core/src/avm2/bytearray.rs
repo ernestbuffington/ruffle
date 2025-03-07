@@ -1,4 +1,4 @@
-use crate::avm2::error::eof_error;
+use crate::avm2::error::{eof_error, make_error_2006};
 use crate::avm2::Activation;
 use crate::avm2::Error;
 use crate::string::{FromWStr, WStr};
@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::cmp;
 use std::fmt::{self, Display, Formatter};
 use std::io::prelude::*;
-use std::io::{self, Read, SeekFrom};
+use std::io::{self, SeekFrom};
 
 #[derive(Clone, Collect, Debug, Copy, PartialEq, Eq)]
 #[collect(no_drop)]
@@ -25,14 +25,25 @@ pub enum CompressionAlgorithm {
     Lzma,
 }
 
-pub struct EofError;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteArrayError {
+    EndOfFile,
+    IndexOutOfBounds,
+}
 
-impl EofError {
+impl ByteArrayError {
     #[inline(never)]
-    pub fn to_avm<'gc>(&self, activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
-        match eof_error(activation, "End of file was encountered.", 2030) {
-            Ok(e) => Error::AvmError(e),
-            Err(e) => e,
+    pub fn to_avm<'gc>(self, activation: &mut Activation<'_, 'gc>) -> Error<'gc> {
+        match self {
+            ByteArrayError::EndOfFile => match eof_error(
+                activation,
+                "Error #2030: End of file was encountered.",
+                2030,
+            ) {
+                Ok(e) => Error::AvmError(e),
+                Err(e) => e,
+            },
+            ByteArrayError::IndexOutOfBounds => make_error_2006(activation),
         }
     }
 }
@@ -72,8 +83,7 @@ pub enum ObjectEncoding {
     Amf3 = 3,
 }
 
-#[derive(Clone, Collect, Debug)]
-#[collect(no_drop)]
+#[derive(Clone, Debug)]
 pub struct ByteArrayStorage {
     /// Underlying ByteArray
     bytes: Vec<u8>,
@@ -111,14 +121,14 @@ impl ByteArrayStorage {
 
     /// Write bytes at the next position in the ByteArray, growing if needed.
     #[inline]
-    pub fn write_bytes<'gc>(&mut self, buf: &[u8]) -> Result<(), Error<'gc>> {
+    pub fn write_bytes(&mut self, buf: &[u8]) -> Result<(), ByteArrayError> {
         self.write_at(buf, self.position.get())?;
         self.position.set(self.position.get() + buf.len());
         Ok(())
     }
 
     #[inline]
-    pub fn write_bytes_within<'gc>(&mut self, start: usize, amnt: usize) -> Result<(), Error<'gc>> {
+    pub fn write_bytes_within(&mut self, start: usize, amnt: usize) -> Result<(), ByteArrayError> {
         self.write_at_within(start, amnt, self.position.get())?;
         self.position.set(self.position.get() + amnt);
         Ok(())
@@ -126,27 +136,44 @@ impl ByteArrayStorage {
 
     /// Reads any amount of bytes from the current position in the ByteArray
     #[inline]
-    pub fn read_bytes(&self, amnt: usize) -> Result<&[u8], EofError> {
+    pub fn read_bytes(&self, amnt: usize) -> Result<&[u8], ByteArrayError> {
         let bytes = self.read_at(amnt, self.position.get())?;
         self.position.set(self.position.get() + amnt);
         Ok(bytes)
     }
 
+    /// Same as `read_bytes`, but:
+    /// - cuts the result at the first null byte to recreate a bug in FP
+    /// - strips off an optional UTF8 BOM at the beginning
+    pub fn read_utf_bytes(&self, amnt: usize) -> Result<&[u8], ByteArrayError> {
+        let mut bytes = self.read_bytes(amnt)?;
+        if let Some(without_bom) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+            bytes = without_bom;
+        }
+        if let Some(null) = bytes.iter().position(|b| *b == b'\0') {
+            bytes = &bytes[..null];
+        }
+        Ok(bytes)
+    }
+
     /// Reads any amount of bytes at any offset in the ByteArray
     #[inline]
-    pub fn read_at(&self, amnt: usize, offset: usize) -> Result<&[u8], EofError> {
+    pub fn read_at(&self, amnt: usize, offset: usize) -> Result<&[u8], ByteArrayError> {
         self.bytes
             .get(offset..)
             .and_then(|bytes| bytes.get(..amnt))
-            .ok_or(EofError)
+            .ok_or(ByteArrayError::EndOfFile)
     }
 
     /// Write bytes at any offset in the ByteArray
     /// Will automatically grow the ByteArray to fit the new buffer
-    pub fn write_at<'gc>(&mut self, buf: &[u8], offset: usize) -> Result<(), Error<'gc>> {
-        let new_len = offset
-            .checked_add(buf.len())
-            .ok_or("RangeError: Cannot overflow usize")?;
+    pub fn write_at(&mut self, buf: &[u8], offset: usize) -> Result<(), ByteArrayError> {
+        if offset.saturating_add(buf.len()) > u32::MAX as usize {
+            return Err(ByteArrayError::IndexOutOfBounds);
+        }
+
+        // We know this is safe as we've already checked it's u32::MAX or lower
+        let new_len = offset + buf.len();
         if self.len() < new_len {
             self.set_length(new_len);
         }
@@ -159,37 +186,36 @@ impl ByteArrayStorage {
 
     /// Write bytes at any offset in the ByteArray
     /// Will return an error if the new buffer does not fit the ByteArray
-    pub fn write_at_nongrowing<'gc>(
-        &mut self,
-        buf: &[u8],
-        offset: usize,
-    ) -> Result<(), Error<'gc>> {
+    pub fn write_at_nongrowing(&mut self, buf: &[u8], offset: usize) -> Result<(), ByteArrayError> {
         self.bytes
             .get_mut(offset..)
             .and_then(|bytes| bytes.get_mut(..buf.len()))
-            .ok_or("RangeError: The specified range is invalid")?
+            .ok_or(ByteArrayError::IndexOutOfBounds)?
             .copy_from_slice(buf);
         Ok(())
     }
 
     /// Write bytes at any offset in the ByteArray from within the current ByteArray using a memmove.
     /// Will automatically grow the ByteArray to fit the new buffer
-    pub fn write_at_within<'gc>(
+    pub fn write_at_within(
         &mut self,
         start: usize,
         amnt: usize,
         offset: usize,
-    ) -> Result<(), Error<'gc>> {
+    ) -> Result<(), ByteArrayError> {
         // First verify that reading from `start` to `amnt` is valid
         let end = start
             .checked_add(amnt)
             .filter(|result| *result <= self.len())
-            .ok_or("RangeError: Reached EOF")?;
+            .ok_or(ByteArrayError::EndOfFile)?;
 
         // Second we resize our underlying buffer to ensure that writing `amnt` from `offset` is valid.
-        let new_len = offset
-            .checked_add(amnt)
-            .ok_or("RangeError: Cannot overflow usize")?;
+        if offset.saturating_add(amnt) > u32::MAX as usize {
+            return Err(ByteArrayError::IndexOutOfBounds);
+        }
+
+        // We know this is safe as we've already checked it's u32::MAX or lower
+        let new_len = offset + amnt;
         if self.len() < new_len {
             self.set_length(new_len);
         }
@@ -203,11 +229,13 @@ impl ByteArrayStorage {
         let mut buffer = Vec::new();
         let error: Option<Box<dyn std::error::Error>> = match algorithm {
             CompressionAlgorithm::Zlib => {
-                let mut encoder = ZlibEncoder::new(&*self.bytes, Compression::fast());
+                // Note: some content is sensitive to compression type
+                // (as it's visible in the header)
+                let mut encoder = ZlibEncoder::new(&*self.bytes, Compression::best());
                 encoder.read_to_end(&mut buffer).err().map(|e| e.into())
             }
             CompressionAlgorithm::Deflate => {
-                let mut encoder = DeflateEncoder::new(&*self.bytes, Compression::fast());
+                let mut encoder = DeflateEncoder::new(&*self.bytes, Compression::best());
                 encoder.read_to_end(&mut buffer).err().map(|e| e.into())
             }
             #[cfg(feature = "lzma")]
@@ -252,27 +280,27 @@ impl ByteArrayStorage {
         }
     }
 
-    pub fn read_utf(&self) -> Result<&[u8], EofError> {
+    pub fn read_utf(&self) -> Result<&[u8], ByteArrayError> {
         let len = self.read_unsigned_short()?;
-        let val = self.read_bytes(len.into())?;
+        let val = self.read_utf_bytes(len.into())?;
         Ok(val)
     }
 
-    pub fn write_boolean<'gc>(&mut self, val: bool) -> Result<(), Error<'gc>> {
+    pub fn write_boolean(&mut self, val: bool) -> Result<(), ByteArrayError> {
         self.write_bytes(&[val as u8; 1])
     }
 
-    pub fn read_boolean(&self) -> Result<bool, EofError> {
+    pub fn read_boolean(&self) -> Result<bool, ByteArrayError> {
         Ok(self.read_bytes(1)? != [0])
     }
 
     // Writes a UTF String into the buffer, with its length as a prefix
-    pub fn write_utf<'gc>(&mut self, utf_string: &str) -> Result<(), Error<'gc>> {
+    pub fn write_utf(&mut self, utf_string: &str) -> Result<(), ByteArrayError> {
         if let Ok(str_size) = u16::try_from(utf_string.len()) {
             self.write_unsigned_short(str_size)?;
             self.write_bytes(utf_string.as_bytes())
         } else {
-            Err("RangeError: UTF String length must fit into a short".into())
+            Err(ByteArrayError::IndexOutOfBounds)
         }
     }
 
@@ -290,6 +318,7 @@ impl ByteArrayStorage {
     #[inline]
     pub fn set_length(&mut self, new_len: usize) {
         self.bytes.resize(new_len, 0);
+        self.position.set(self.position().min(new_len));
     }
 
     pub fn get(&self, pos: usize) -> Option<u8> {
@@ -302,6 +331,11 @@ impl ByteArrayStorage {
         }
 
         *self.bytes.get_mut(item).unwrap() = value;
+    }
+
+    /// Write a single byte at any offset in the bytearray, panicking if out of bounds.
+    pub fn set_nongrowing(&mut self, item: usize, value: u8) {
+        self.bytes[item] = value;
     }
 
     pub fn delete(&mut self, item: usize) {
@@ -422,7 +456,7 @@ macro_rules! impl_write{
     =>
     {
         impl ByteArrayStorage {
-            $( pub fn $method_name<'gc> (&mut self, val: $data_type) -> Result<(), Error<'gc>> {
+            $( pub fn $method_name (&mut self, val: $data_type) -> Result<(), ByteArrayError> {
                 let val_bytes = match self.endian {
                     Endian::Big => val.to_be_bytes(),
                     Endian::Little => val.to_le_bytes(),
@@ -438,14 +472,14 @@ macro_rules! impl_read{
     =>
     {
         impl ByteArrayStorage {
-            $( pub fn $method_name<'gc> (&self) -> Result<$data_type, EofError> {
+            $( pub fn $method_name (&self) -> Result<$data_type, ByteArrayError> {
                 Ok(match self.endian {
                     Endian::Big => <$data_type>::from_be_bytes(self.read_bytes($size)?.try_into().unwrap()),
                     Endian::Little => <$data_type>::from_le_bytes(self.read_bytes($size)?.try_into().unwrap())
                 })
              } )*
 
-             $( pub fn $at_method_name<'gc> (&self, offset: usize) -> Result<$data_type, EofError> {
+             $( pub fn $at_method_name (&self, offset: usize) -> Result<$data_type, ByteArrayError> {
                 Ok(match self.endian {
                     Endian::Big => <$data_type>::from_be_bytes(self.read_at($size, offset)?.try_into().unwrap()),
                     Endian::Little => <$data_type>::from_le_bytes(self.read_at($size, offset)?.try_into().unwrap())

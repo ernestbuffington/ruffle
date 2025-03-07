@@ -2,11 +2,50 @@
     "settings_ruffle_enable": {
         "message": "Flash tartalom lejátszása Ruffle-lel"
     },
-    "settings_page_ignore_optout": {
-        "message": "Flash tartalom lejátszása Ruffle-lel azon oldalakon is, amik nem akarják azt"
-    },
     "settings_ignore_optout": {
-        "message": "Eltekintés a weboldalak kompatibilitási figyelmeztetéseitől"
+        "message": "Flash tartalom lejátszása Ruffle-lel még azon oldalakon is, amelyek letiltják"
+    },
+    "settings_show_swf_download": {
+        "message": "SWF letöltése opció a helyi menüben"
+    },
+    "settings_autostart": {
+        "message": "Automatikus lejátszás (hang kattintásra)"
+    },
+    "settings_swf_takeover": {
+        "message": "Az SWF fájlokat játssza le a böngészőben letöltés helyett"
+    },
+    "settings_log_level": {
+        "message": "Naplózási szint"
+    },
+    "settings_log_level_error": {
+        "message": "Hibák"
+    },
+    "settings_log_level_warn": {
+        "message": "Figyelmeztetések"
+    },
+    "settings_log_level_info": {
+        "message": "Információk"
+    },
+    "settings_max_execution_duration": {
+        "message": "ActionScript futtatás maximális megengedett időtartama (másodpercben)"
+    },
+    "settings_player_version": {
+        "message": "Az emulálandó Flash lejátszó verziószám (tartomány: 1-32)"
+    },
+    "settings_preferred_renderer": {
+        "message": "Preferált megjelenítő"
+    },
+    "settings_preferred_renderer_auto": {
+        "message": "Automatikus"
+    },
+    "settings_advanced_options": {
+        "message": "Haladó beállítások"
+    },
+    "settings_reset": {
+        "message": "Alapbeállítások"
+    },
+    "settings_reset_confirm": {
+        "message": "Biztos, hogy vissza szeretnéd állítani a Ruffle beállításait az eredeti értékeikre?"
     },
     "status_init": {
         "message": "Jelenlegi fül olvasása…"
@@ -21,13 +60,16 @@
         "message": "A Ruffle állapotának ellenőrzése a jelenlegi fülön…"
     },
     "status_result_running": {
-        "message": "A Ruffle be van töltve és futtat Flash tartalmat a jelenlegi fülön."
+        "message": "A Ruffle Flash tartalom futtatására kész a jelenlegi fülön."
+    },
+    "status_result_running_protected": {
+        "message": "A Ruffle kész a kért Flash tartalmak futtatására."
     },
     "status_result_optout": {
         "message": "A Ruffle nincs betöltve, mivel az oldal nem kompatibilisnek jelezte magát."
     },
     "status_result_disabled": {
-        "message": "A Ruffle nem töltődött be, mert a felhasználó kikapcsolta."
+        "message": "A Ruffle ki van kapcsolva."
     },
     "status_result_error": {
         "message": "Hiba történt a Ruffle-lel a jelenlegi fülön."
@@ -37,6 +79,9 @@
     },
     "action_reload": {
         "message": "Töltsd újra a lapot, hogy mentsd a beállításokat."
+    },
+    "open_player_page": {
+        "message": "SWF lejátszó megnyitása"
     },
     "open_settings_page": {
         "message": "Beállítások megnyitása"
@@ -51,6 +96,24 @@
         "message": "Beállítások mentése"
     },
     "settings_saved": {
-        "message": "Beállítások mentve"
+        "message": "Beállítások elmentve"
+    },
+    "onboarding_page": {
+        "message": "Bevezető oldal"
+    },
+    "permissions_grant": {
+        "message": "Engedélyezem a Ruffle-nek, hogy hozzáférjen az adataimhoz az összes webhelyen"
+    },
+    "permissions_not_granted": {
+        "message": "A Ruffle ikonra kell kattintanod minden olyan webhelyen, ahol a Ruffle-t használni szeretnéd"
+    },
+    "grant_single_site_permission": {
+        "message": "Végleges engedélyezés ezen a webhelyen"
+    },
+    "permissions_explanation": {
+        "message": "A Ruffle bővítmény akkor működik a legjobban, ha az összes weboldal adataihoz hozzá tud férni. Ez lehetővé teszi, hogy bármely weboldalnak már az első betöltésekor fusson, így meggyőzheti a Flash Player meglétét rögtön észelő weboldalakat, hogy futtassák a Flash tartalmat. Ez azt is lehetővé teszi számára, hogy SWF-fájlokat töltsön be a belső lejátszó oldalára más webhelyekről, valamintt hogy a közvetlenül hivatkozott SWF-fájlokat is automatikusan ott játssza le. Ha nem adod meg ezt az engedélyt, akkor a Ruffle-t kézzel kell engedélyezned minden olyan weboldalon, amelyen használni szeretnéd, a bővítmény ikonjára kattintva és az adott weboldalon engedélyezve."
+    },
+    "swf_player_permissions": {
+        "message": "Engedélyt kell adnia ennek az URL-eredetnek, hogy SWF-eket tölthessen be róla."
     }
 }

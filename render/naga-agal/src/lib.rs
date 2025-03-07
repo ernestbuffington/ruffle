@@ -2,14 +2,16 @@ use naga::Module;
 
 mod builder;
 mod types;
+mod varying;
 
 use builder::NagaBuilder;
 
-const ENTRY_POINT: &str = "main";
+pub const SHADER_ENTRY_POINT: &str = "main";
 
 pub const MAX_VERTEX_ATTRIBUTES: usize = 8;
+pub const MAX_TEXTURES: usize = 8;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum VertexAttributeFormat {
     Float1,
     Float2,
@@ -26,6 +28,12 @@ pub enum Error {
     Unimplemented(String),
     ReadError(std::io::Error),
     InvalidOpcode(u32),
+    InvalidVersion(u32),
+    SamplerConfigMismatch {
+        texture: usize,
+        old: SamplerConfig,
+        new: SamplerConfig,
+    },
 }
 
 impl From<std::io::Error> for Error {
@@ -39,6 +47,9 @@ pub enum ShaderType {
     Vertex,
     Fragment,
 }
+
+pub use builder::{TEXTURE_SAMPLER_START_BIND_INDEX, TEXTURE_START_BIND_INDEX};
+pub use types::{Filter, Mipmap, SamplerConfig, Wrapping};
 
 /**
  * Compiles an Adobe AGAL shader to a Naga Module.
@@ -88,6 +99,13 @@ pub enum ShaderType {
 pub fn agal_to_naga(
     agal: &[u8],
     vertex_attributes: &[Option<VertexAttributeFormat>; MAX_VERTEX_ATTRIBUTES],
+    sampler_configs: &[SamplerConfig; MAX_TEXTURES],
 ) -> Result<Module, Error> {
-    NagaBuilder::process_agal(agal, vertex_attributes)
+    NagaBuilder::build_module(agal, vertex_attributes, sampler_configs)
+}
+
+pub fn extract_sampler_configs(
+    agal: &[u8],
+) -> Result<[Option<SamplerConfig>; MAX_TEXTURES], Error> {
+    NagaBuilder::extract_sampler_configs(agal)
 }

@@ -4,8 +4,9 @@ use crate::avm1::object::Object;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{ScriptObject, Value};
 use crate::avm1_stub;
-use crate::string::AvmString;
-use gc_arena::MutationContext;
+use crate::prelude::TDisplayObject;
+use crate::sandbox::SandboxType;
+use crate::string::{AvmString, StringContext};
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "PolicyFileResolver" => method(policy_file_resolver);
@@ -58,9 +59,15 @@ fn get_sandbox_type<'gc>(
     _this: Object<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let movie = activation.base_clip().movie();
     Ok(AvmString::new_utf8(
-        activation.context.gc_context,
-        activation.context.system.sandbox_type.to_string(),
+        activation.gc(),
+        match movie.sandbox_type() {
+            SandboxType::Remote => "remote",
+            SandboxType::LocalWithFile => "localWithFile",
+            SandboxType::LocalWithNetwork => "localWithNetwork",
+            SandboxType::LocalTrusted | SandboxType::Application => "localTrusted",
+        },
     )
     .into())
 }
@@ -84,11 +91,11 @@ fn policy_file_resolver<'gc>(
 }
 
 pub fn create<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let security = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(OBJECT_DECLS, gc_context, security, fn_proto);
+    let security = ScriptObject::new(context, Some(proto));
+    define_properties_on(OBJECT_DECLS, context, security, fn_proto);
     security.into()
 }

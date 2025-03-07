@@ -1,6 +1,7 @@
 ﻿package {
 	import flash.net.SharedObject;
-	public class Test {
+	import flash.display.Sprite;
+	public class Test extends Sprite {
 
 		static function storeData(data: Object) {
 			
@@ -15,6 +16,9 @@
 			dense[1] = 2;
 			dense[2] = 3;
 			
+			var nonNumberPropertyArray = new Array();
+			nonNumberPropertyArray.aPropertyThatIsNotANumber = "strange property";
+
 			// Store everything in an array to work around Ruffle's incorrect
 			// object property serialization order
 			data.props = [
@@ -27,6 +31,7 @@
 				-5.1,
 				sparse,
 				dense,
+				nonNumberPropertyArray,
 				new Date(2147483647),
 				// FIXME - enable this when Ruffle fully implements AVM2 XML
 				// new XML("<test>Test</test>")
@@ -58,6 +63,7 @@
 		
 			if(obj.data.props === undefined) {
 				trace("No data found. Initializing...");
+				trace("sizes: obj = " + obj.size + ", otherObj = " + otherObj.size);
 				
 				storeData(obj.data)
 				storeData(otherObj.data)
@@ -69,8 +75,10 @@
 				trace("otherObj.data.props:")
 				dump(otherObj.data.props);
 			
-				obj.flush();
-				otherObj.flush();
+				trace("sizes: obj = " + obj.size + ", otherObj = " + otherObj.size);
+				trace("obj status: " + obj.flush());
+				trace("otherObj status: " + otherObj.flush());
+				trace("sizes: obj = " + obj.size + ", otherObj = " + otherObj.size);
 			} else {		
 				trace("obj.data.hidden: " + obj.data.hidden);
 				trace("otherObj.data.hidden: " + otherObj.data.hidden);
@@ -82,6 +90,28 @@
 				trace()
 				trace("otherObj dump:")
 				dump(otherObj.data.props)
+
+				trace();
+				trace("sizes: obj = " + obj.size + ", otherObj = " + otherObj.size);
+				
+				// Test SharedObject.clear()
+				trace();
+				var previousData = obj.data;
+				trace("obj.clear()");
+				obj.clear();
+				trace("obj == previousData: " + (obj.data == previousData));
+				
+				trace();
+				trace("obj dump:");
+				dump(obj.data);
+
+				trace();
+				trace("sizes: obj = " + obj.size + ", otherObj = " + otherObj.size);
+				
+				trace();
+				trace("obj dump again:");
+				obj = SharedObject.getLocal("RuffleTest", "/");
+				dump(obj.data);
 			}
 		}
 	}	
@@ -100,7 +130,12 @@ function dump(obj:Object) {
 			// Printing 'val.toString()' depends on the system time zone,
 			// so use UTC to make the output reproducible 
 			trace(k, "= (UTC) ", val.toUTCString());
-		} else {
+		}
+		else if (val instanceof Array && val.hasOwnProperty("aPropertyThatIsNotANumber")) {
+			trace(k, "=", val.toString(), "type", typeof val);
+			trace("val.aPropertyThatIsNotANumber: " + val.aPropertyThatIsNotANumber);
+		}
+		else {
 			trace(k, "=", val.toString(), "type", typeof val);
 		}
 

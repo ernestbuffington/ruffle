@@ -11,6 +11,10 @@
 			super();
 			addFrameScript(0,this.frame1);
 		}
+	
+		function urlPrefix(url: String): String {
+			return url ? url.substring(0, 8) : url;
+		}
 		
 		function frame1() {
 			import flash.display.Loader;
@@ -20,6 +24,7 @@
 			import flash.events.Event;
 			import flash.events.ProgressEvent;
 			
+			var self = this;
 			var loader = new Loader();
 			this.stage.addChild(loader);
 			trace("loader.content = " + loader.content);
@@ -27,21 +32,18 @@
 			trace("loader.contentLoaderInfo.bytesLoaded = " + loader.contentLoaderInfo.bytesLoaded);
 			trace("loader.contentLoaderInfo.bytesTotal = " + loader.contentLoaderInfo.bytesTotal);
 			trace("loader.contentLoaderInfo.bytes = " + loader.contentLoaderInfo.bytes); 
-			trace("loader.contentLoaderInfo.url = " + loader.contentLoaderInfo.url);
+			trace("loader.contentLoaderInfo.url = " + this.urlPrefix(loader.contentLoaderInfo.url));
+
+			var bytes = ByteArray(new loadableSwf);
 			
 			function dump(event:Event) {
-				var url = loader.contentLoaderInfo.url;
-				if (url) {
-					// This truncates the path to 'file:///' to make the output
-					// reproducible across deifferent machines 
-					url = url.substr(0, 8);
-				}
 				trace("Event " + event + ": "
 					+ "loader.numChildren = " + loader.numChildren
 					+ ", loader.content = " + loader.content 
 					+ ", loader.contentLoaderInfo.bytesLoaded = " + loader.contentLoaderInfo.bytesLoaded
 					+ ", loader.contentLoaderInfo.bytesTotal = " + loader.contentLoaderInfo.bytesTotal
-					+ ", loader.contentLoaderInfo.url = " + url);	
+					+ ", loader.contentLoaderInfo.url = " + self.urlPrefix(loader.contentLoaderInfo.url));	
+				trace("bytes.position = " + bytes.position);
 			}
 			
 			loader.contentLoaderInfo.addEventListener(Event.OPEN, function(e) {
@@ -63,9 +65,16 @@
 			
 			loader.contentLoaderInfo.addEventListener(Event.COMPLETE, function(e) {
 				dump(e);
+				trace("Stage children before addChild attempt: " + self.stage.numChildren);
+				trace("loader.numChildren before addChild attempt: " + loader.numChildren);
+				trace("loader.content before addChild attempt: " + loader.content);
+				self.stage.addChild(loader.content);
+				trace("Stage children after addChild attempt: " + self.stage.numChildren);
+				trace("loader.numChildren after addChild attempt: " + loader.numChildren);
+				trace("loader.content after addChild attempt: " + loader.content);
 			});
 			
-			loader.loadBytes(ByteArray(new loadableSwf));
+			loader.loadBytes(bytes);
 		}
 	}
 }

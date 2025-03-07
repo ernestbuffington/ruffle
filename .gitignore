@@ -10,3 +10,9 @@ target/
 
 # Flash recovery files
 RECOVER_*.fla
+
+# Jetbrains tools (CLion, IntelliJ, etc)
+/.idea
+
+# Mac junk
+.DS_Store

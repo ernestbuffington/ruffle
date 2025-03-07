@@ -20,7 +20,7 @@ const testMatrix = [
         "1-alpha",
     ],
     ["0.1.2", "0.1.1-dev", "0.1"],
-    ["0.0.2", "0.0.2-dev", "0.0.2+build"],
+    ["0.0.2+build", "0.0.2+124", "0.0.2+123", "0.0.2", "0.0.2-dev"],
     ["0.0.1", "0.0.1-dev", "0.0.1-5", "0.0.1-2"],
 ];
 
@@ -33,35 +33,35 @@ describe("Version", function () {
         it("should parse valid semver strings", function () {
             assert.deepEqual(
                 Version.fromSemver("1.2"),
-                new Version(1, 2, 0, null, null)
+                new Version(1, 2, 0, null, null),
             );
             assert.deepEqual(
                 Version.fromSemver("1.2.3"),
-                new Version(1, 2, 3, null, null)
+                new Version(1, 2, 3, null, null),
             );
             assert.deepEqual(
                 Version.fromSemver("1.09.3"),
-                new Version(1, 9, 3, null, null)
+                new Version(1, 9, 3, null, null),
             );
             assert.deepEqual(
                 Version.fromSemver("1.2.3-pr"),
-                new Version(1, 2, 3, ["pr"], null)
+                new Version(1, 2, 3, ["pr"], null),
             );
             assert.deepEqual(
                 Version.fromSemver("1.2.3-pr1.pr2"),
-                new Version(1, 2, 3, ["pr1", "pr2"], null)
+                new Version(1, 2, 3, ["pr1", "pr2"], null),
             );
             assert.deepEqual(
                 Version.fromSemver("1.2.3+build"),
-                new Version(1, 2, 3, null, ["build"])
+                new Version(1, 2, 3, null, ["build"]),
             );
             assert.deepEqual(
                 Version.fromSemver("1.2.3+build1.build2"),
-                new Version(1, 2, 3, null, ["build1", "build2"])
+                new Version(1, 2, 3, null, ["build1", "build2"]),
             );
             assert.deepEqual(
                 Version.fromSemver("1-pr1.pr2+build1.build2"),
-                new Version(1, 0, 0, ["pr1", "pr2"], ["build1", "build2"])
+                new Version(1, 0, 0, ["pr1", "pr2"], ["build1", "build2"]),
             );
         });
     });
@@ -73,9 +73,9 @@ describe("Version", function () {
                     for (const b of test) {
                         assert(
                             Version.fromSemver(a).isCompatibleWith(
-                                Version.fromSemver(b)
+                                Version.fromSemver(b),
                             ),
-                            `${a} is compatible with ${b}`
+                            `${a} is compatible with ${b}`,
                         );
                     }
                 }
@@ -85,13 +85,15 @@ describe("Version", function () {
             for (const test of testMatrix) {
                 for (const a of test) {
                     for (const otherTest of testMatrix) {
-                        if (test === otherTest) continue;
+                        if (test === otherTest) {
+                            continue;
+                        }
                         for (const b of otherTest) {
                             assert(
                                 !Version.fromSemver(a).isCompatibleWith(
-                                    Version.fromSemver(b)
+                                    Version.fromSemver(b),
                                 ),
-                                `${a} is not compatible with ${b}`
+                                `${a} is not compatible with ${b}`,
                             );
                         }
                     }
@@ -105,18 +107,11 @@ describe("Version", function () {
             const tests = flatten(testMatrix);
             for (let a = 0; a < tests.length; a++) {
                 for (let b = a + 1; b < tests.length; b++) {
-                    if (
-                        tests[a].indexOf("+") > -1 ||
-                        tests[b].indexOf("+") > -1
-                    ) {
-                        // Skip "builds" for purposes of this test.
-                        continue;
-                    }
                     assert(
-                        Version.fromSemver(tests[a]).hasPrecedenceOver(
-                            Version.fromSemver(tests[b])
+                        Version.fromSemver(tests[a]!).hasPrecedenceOver(
+                            Version.fromSemver(tests[b]!),
                         ),
-                        `${tests[a]} has precedence over ${tests[b]}`
+                        `${tests[a]} has precedence over ${tests[b]}`,
                     );
                 }
             }
@@ -125,18 +120,11 @@ describe("Version", function () {
             const tests = flatten(testMatrix).reverse();
             for (let a = 0; a < tests.length; a++) {
                 for (let b = a + 1; b < tests.length; b++) {
-                    if (
-                        tests[a].indexOf("+") > -1 ||
-                        tests[b].indexOf("+") > -1
-                    ) {
-                        // Skip "builds" for purposes of this test.
-                        continue;
-                    }
                     assert(
-                        !Version.fromSemver(tests[a]).hasPrecedenceOver(
-                            Version.fromSemver(tests[b])
+                        !Version.fromSemver(tests[a]!).hasPrecedenceOver(
+                            Version.fromSemver(tests[b]!),
                         ),
-                        `${tests[a]} doesn't have precedence over ${tests[b]}`
+                        `${tests[a]} doesn't have precedence over ${tests[b]}`,
                     );
                 }
             }
@@ -149,9 +137,9 @@ describe("Version", function () {
             for (const version of tests) {
                 assert(
                     Version.fromSemver(version).isEqual(
-                        Version.fromSemver(version)
+                        Version.fromSemver(version),
                     ),
-                    `${version} is equal to itself`
+                    `${version} is equal to itself`,
                 );
             }
         });
@@ -160,19 +148,19 @@ describe("Version", function () {
             for (let a = 0; a < tests.length; a++) {
                 for (let b = a + 1; b < tests.length; b++) {
                     if (
-                        tests[a].indexOf("+") > -1 ||
-                        tests[b].indexOf("+") > -1 ||
-                        tests[a].indexOf("-") > -1 ||
-                        tests[b].indexOf("-") > -1
+                        tests[a]!.indexOf("+") > -1 ||
+                        tests[b]!.indexOf("+") > -1 ||
+                        tests[a]!.indexOf("-") > -1 ||
+                        tests[b]!.indexOf("-") > -1
                     ) {
                         // Skip "builds" and "identifiers" for purposes of this test.
                         continue;
                     }
                     assert(
-                        !Version.fromSemver(tests[a]).isEqual(
-                            Version.fromSemver(tests[b])
+                        !Version.fromSemver(tests[a]!).isEqual(
+                            Version.fromSemver(tests[b]!),
                         ),
-                        `${tests[a]} does not equal ${tests[b]}`
+                        `${tests[a]} does not equal ${tests[b]}`,
                     );
                 }
             }
@@ -185,9 +173,9 @@ describe("Version", function () {
             for (const version of tests) {
                 assert(
                     Version.fromSemver(version).isStableOrCompatiblePrerelease(
-                        Version.fromSemver(version)
+                        Version.fromSemver(version),
                     ),
-                    `${version} is compatible with itself`
+                    `${version} is compatible with itself`,
                 );
             }
         });
@@ -197,9 +185,9 @@ describe("Version", function () {
                 for (const b of tests) {
                     assert(
                         Version.fromSemver(a).isStableOrCompatiblePrerelease(
-                            Version.fromSemver(b)
+                            Version.fromSemver(b),
                         ),
-                        `${a} is compatible with ${b}`
+                        `${a} is compatible with ${b}`,
                     );
                 }
             }
@@ -208,12 +196,14 @@ describe("Version", function () {
             const tests = ["1-dev", "1.2-alpha", "1.2.3-beta1.build2"];
             for (const a of tests) {
                 for (const b of tests) {
-                    if (a === b) continue;
+                    if (a === b) {
+                        continue;
+                    }
                     assert(
                         !Version.fromSemver(a).isStableOrCompatiblePrerelease(
-                            Version.fromSemver(b)
+                            Version.fromSemver(b),
                         ),
-                        `${a} is not compatible with ${b}`
+                        `${a} is not compatible with ${b}`,
                     );
                 }
             }

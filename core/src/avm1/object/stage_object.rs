@@ -1,23 +1,29 @@
 //! AVM1 object type to represent objects on the stage.
 
 use crate::avm1::activation::Activation;
+use crate::avm1::clamp::Clamp;
 use crate::avm1::error::Error;
 use crate::avm1::property_map::PropertyMap;
 use crate::avm1::{Object, ObjectPtr, ScriptObject, TObject, Value};
 use crate::avm_warn;
 use crate::context::UpdateContext;
 use crate::display_object::{
-    DisplayObject, EditText, MovieClip, TDisplayObject, TDisplayObjectContainer,
+    DisplayObject, EditText, MovieClip, TDisplayObject, TDisplayObjectContainer, TInteractiveObject,
 };
-use crate::string::{AvmString, WStr};
+use crate::string::{AvmString, StringContext, WStr};
 use crate::types::Percent;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::barrier::unlock;
+use gc_arena::lock::RefLock;
+use gc_arena::{Collect, Gc, GcWeak, Mutation};
+use ruffle_macros::istr;
+use std::cell::RefMut;
 use std::fmt;
+use swf::Twips;
 
 /// A ScriptObject that is inherently tied to a display node.
 #[derive(Clone, Copy, Collect)]
 #[collect(no_drop)]
-pub struct StageObject<'gc>(GcCell<'gc, StageObjectData<'gc>>);
+pub struct StageObject<'gc>(Gc<'gc, StageObjectData<'gc>>);
 
 #[derive(Collect)]
 #[collect(no_drop)]
@@ -29,39 +35,54 @@ pub struct StageObjectData<'gc> {
     base: ScriptObject<'gc>,
 
     /// The display node this stage object
-    display_object: DisplayObject<'gc>,
+    pub display_object: DisplayObject<'gc>,
 
-    text_field_bindings: Vec<TextFieldBinding<'gc>>,
+    text_field_bindings: RefLock<Vec<TextFieldBinding<'gc>>>,
 }
 
 impl<'gc> StageObject<'gc> {
+    /// Create a weak reference to the underlying data of this `StageObject`
+    pub fn as_weak(self) -> GcWeak<'gc, StageObjectData<'gc>> {
+        Gc::downgrade(self.0)
+    }
+
     /// Create a stage object for a given display node.
     pub fn for_display_object(
-        gc_context: MutationContext<'gc, '_>,
+        context: &StringContext<'gc>,
         display_object: DisplayObject<'gc>,
         proto: Object<'gc>,
     ) -> Self {
-        Self(GcCell::allocate(
-            gc_context,
+        Self(Gc::new(
+            context.gc(),
             StageObjectData {
-                base: ScriptObject::new(gc_context, Some(proto)),
+                base: ScriptObject::new(context, Some(proto)),
                 display_object,
-                text_field_bindings: Vec::new(),
+                text_field_bindings: RefLock::new(Vec::new()),
             },
         ))
+    }
+
+    fn text_field_bindings_mut(
+        self,
+        gc_context: &Mutation<'gc>,
+    ) -> RefMut<'gc, Vec<TextFieldBinding<'gc>>> {
+        unlock!(
+            Gc::write(gc_context, self.0),
+            StageObjectData,
+            text_field_bindings
+        )
+        .borrow_mut()
     }
 
     /// Registers a text field variable binding for this stage object.
     /// Whenever a property with the given name is changed, we should change the text in the text field.
     pub fn register_text_field_binding(
         self,
-        gc_context: MutationContext<'gc, '_>,
+        gc_context: &Mutation<'gc>,
         text_field: EditText<'gc>,
         variable_name: AvmString<'gc>,
     ) {
-        self.0
-            .write(gc_context)
-            .text_field_bindings
+        self.text_field_bindings_mut(gc_context)
             .push(TextFieldBinding {
                 text_field,
                 variable_name,
@@ -71,26 +92,15 @@ impl<'gc> StageObject<'gc> {
     /// Removes a text field binding for the given text field.
     /// Does not place the text field on the unbound list.
     /// Caller is responsible for placing the text field on the unbound list, if necessary.
-    pub fn clear_text_field_binding(
-        self,
-        gc_context: MutationContext<'gc, '_>,
-        text_field: EditText<'gc>,
-    ) {
-        self.0
-            .write(gc_context)
-            .text_field_bindings
+    pub fn clear_text_field_binding(self, gc_context: &Mutation<'gc>, text_field: EditText<'gc>) {
+        self.text_field_bindings_mut(gc_context)
             .retain(|binding| !DisplayObject::ptr_eq(text_field.into(), binding.text_field.into()));
     }
 
     /// Clears all text field bindings from this stage object, and places the textfields on the unbound list.
     /// This is called when the object is removed from the stage.
-    pub fn unregister_text_field_bindings(self, context: &mut UpdateContext<'_, 'gc>) {
-        for binding in self
-            .0
-            .write(context.gc_context)
-            .text_field_bindings
-            .drain(..)
-        {
+    pub fn unregister_text_field_bindings(self, context: &mut UpdateContext<'gc>) {
+        for binding in self.text_field_bindings_mut(context.gc()).drain(..) {
             binding.text_field.clear_bound_stage_object(context);
             context.unbound_text_fields.push(binding.text_field);
         }
@@ -107,7 +117,6 @@ impl<'gc> StageObject<'gc> {
         } else if name.eq_with_case(b"_parent", case_sensitive) {
             return Some(
                 self.0
-                    .read()
                     .display_object
                     .avm1_parent()
                     .map(|dn| dn.object().coerce_to_object(activation))
@@ -126,9 +135,7 @@ impl<'gc> StageObject<'gc> {
             {
                 let level_id = Self::parse_level_id(&name[6..]);
                 let level = activation
-                    .context
-                    .stage
-                    .child_by_depth(level_id)
+                    .get_level(level_id)
                     .map(|o| o.object())
                     .unwrap_or(Value::Undefined);
                 return Some(level);
@@ -169,31 +176,33 @@ struct TextFieldBinding<'gc> {
 
 impl fmt::Debug for StageObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let this = self.0.read();
         f.debug_struct("StageObject")
-            .field("ptr", &self.0.as_ptr())
-            .field("display_object", &this.display_object)
+            .field("ptr", &Gc::as_ptr(self.0))
+            .field("display_object", &self.0.display_object)
             .finish()
     }
 }
 
 impl<'gc> TObject<'gc> for StageObject<'gc> {
     fn raw_script_object(&self) -> ScriptObject<'gc> {
-        self.0.read().base
+        self.0.base
     }
 
     fn get_local_stored(
         &self,
         name: impl Into<AvmString<'gc>>,
         activation: &mut Activation<'_, 'gc>,
+        is_slash_path: bool,
     ) -> Option<Value<'gc>> {
         let name = name.into();
-        let obj = self.0.read();
-        let props = activation.context.avm1.display_properties();
 
         // Property search order for DisplayObjects:
         // 1) Actual properties on the underlying object
-        if let Some(value) = obj.base.get_local_stored(name, activation) {
+        if let Some(value) = self
+            .0
+            .base
+            .get_local_stored(name, activation, is_slash_path)
+        {
             return Some(value);
         }
 
@@ -206,18 +215,33 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         }
 
         // 3) Child display objects with the given instance name
-        if let Some(child) = obj
+        if let Some(child) = self
+            .0
             .display_object
             .as_container()
             .and_then(|o| o.child_by_name(&name, activation.is_case_sensitive()))
         {
-            return Some(child.object());
+            return if is_slash_path {
+                Some(child.object())
+            // If an object doesn't have an object representation, e.g. Graphic, then trying to access it
+            // Returns the parent instead
+            } else if let crate::display_object::DisplayObject::Graphic(_) = child {
+                child.parent().map(|p| p.object())
+            } else {
+                Some(child.object())
+            };
         }
 
         // 4) Display object properties such as `_x`, `_y` (never case sensitive)
         if magic_property {
-            if let Some(property) = props.read().get_by_name(name) {
-                return Some(property.get(activation, obj.display_object));
+            if let Some(property) = activation
+                .context
+                .avm1
+                .display_properties()
+                .get_by_name(name)
+                .copied()
+            {
+                return Some(property.get(activation, self.0.display_object));
             }
         }
 
@@ -231,35 +255,41 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         activation: &mut Activation<'_, 'gc>,
         this: Object<'gc>,
     ) -> Result<(), Error<'gc>> {
-        let obj = self.0.read();
-        let props = activation.context.avm1.display_properties();
-
         // Check if a text field is bound to this property and update the text if so.
         let case_sensitive = activation.is_case_sensitive();
-        for binding in obj.text_field_bindings.iter().filter(|binding| {
-            if case_sensitive {
-                binding.variable_name == name
-            } else {
-                binding.variable_name.eq_ignore_case(&name)
-            }
-        }) {
-            binding.text_field.set_html_text(
-                &value.coerce_to_string(activation)?,
-                &mut activation.context,
-            );
+        for binding in self
+            .0
+            .text_field_bindings
+            .borrow()
+            .iter()
+            .filter(|binding| {
+                if case_sensitive {
+                    binding.variable_name == name
+                } else {
+                    binding.variable_name.eq_ignore_case(&name)
+                }
+            })
+        {
+            binding
+                .text_field
+                .set_html_text(&value.coerce_to_string(activation)?, activation.context);
         }
 
-        let base = obj.base;
-        let display_object = obj.display_object;
-        drop(obj);
+        let base = self.0.base;
+        let display_object = self.0.display_object;
 
         if base.has_own_property(activation, name) {
             // 1) Actual properties on the underlying object
             base.set_local(name, value, activation, this)
-        } else if let Some(property) = props.read().get_by_name(name) {
+        } else if let Some(property) = activation
+            .context
+            .avm1
+            .display_properties()
+            .get_by_name(name)
+            .copied()
+        {
             // 2) Display object properties such as _x, _y
-            property.set(activation, display_object, value)?;
-            Ok(())
+            property.set(activation, display_object, value)
         } else {
             // 3) TODO: Prototype
             base.set_local(name, value, activation, this)
@@ -272,13 +302,12 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         this: Object<'gc>,
     ) -> Result<Object<'gc>, Error<'gc>> {
         //TODO: Create a StageObject of some kind
-        self.0.read().base.create_bare_object(activation, this)
+        self.0.base.create_bare_object(activation, this)
     }
 
     // Note that `hasOwnProperty` does NOT return true for child display objects.
     fn has_property(&self, activation: &mut Activation<'_, 'gc>, name: AvmString<'gc>) -> bool {
-        let obj = self.0.read();
-        if obj.base.has_property(activation, name) {
+        if !self.0.display_object.avm1_removed() && self.0.base.has_property(activation, name) {
             return true;
         }
 
@@ -288,7 +317,6 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
                 .context
                 .avm1
                 .display_properties()
-                .read()
                 .get_by_name(name)
                 .is_some()
         {
@@ -296,11 +324,14 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         }
 
         let case_sensitive = activation.is_case_sensitive();
-        if obj
-            .display_object
-            .as_container()
-            .and_then(|o| o.child_by_name(&name, case_sensitive))
-            .is_some()
+
+        if !self.0.display_object.avm1_removed()
+            && self
+                .0
+                .display_object
+                .as_container()
+                .and_then(|o| o.child_by_name(&name, case_sensitive))
+                .is_some()
         {
             return true;
         }
@@ -312,14 +343,22 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
         false
     }
 
-    fn get_keys(&self, activation: &mut Activation<'_, 'gc>) -> Vec<AvmString<'gc>> {
+    fn get_keys(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        include_hidden: bool,
+    ) -> Vec<AvmString<'gc>> {
         // Keys from the underlying object are listed first, followed by
         // child display objects in order from highest depth to lowest depth.
-        let obj = self.0.read();
-        let mut keys = obj.base.get_keys(activation);
+        let mut keys = self.0.base.get_keys(activation, include_hidden);
 
-        if let Some(ctr) = obj.display_object.as_container() {
-            keys.extend(ctr.iter_render_list().rev().map(|child| child.name()));
+        if let Some(ctr) = self.0.display_object.as_container() {
+            // Button/MovieClip children are included in key list.
+            for child in ctr.iter_render_list().rev() {
+                if child.as_interactive().is_some() {
+                    keys.push(child.name().expect("Interactive DisplayObjects have names"));
+                }
+            }
         }
 
         keys
@@ -331,11 +370,11 @@ impl<'gc> TObject<'gc> for StageObject<'gc> {
     }
 
     fn as_display_object(&self) -> Option<DisplayObject<'gc>> {
-        Some(self.0.read().display_object)
+        Some(self.0.display_object)
     }
 
     fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.read().base.as_ptr() as *const ObjectPtr
+        self.0.base.as_ptr()
     }
 }
 
@@ -376,6 +415,10 @@ impl<'gc> DisplayProperty {
         }
         Ok(())
     }
+
+    pub fn is_read_only(&self) -> bool {
+        self.set.is_none()
+    }
 }
 
 /// The map from key/index to function pointers for special display object properties.
@@ -385,40 +428,44 @@ pub struct DisplayPropertyMap<'gc>(PropertyMap<'gc, DisplayProperty>);
 
 impl<'gc> DisplayPropertyMap<'gc> {
     /// Creates the display property map.
-    pub fn new(gc_context: MutationContext<'gc, '_>) -> GcCell<'gc, DisplayPropertyMap<'gc>> {
-        let mut property_map = DisplayPropertyMap(PropertyMap::new());
+    pub fn new(context: &mut StringContext<'gc>) -> Self {
+        let mut property_map = Self(PropertyMap::new());
 
-        // Order is important:
-        // should match the SWF specs for GetProperty/SetProperty.
-        property_map.add_property("_x".into(), x, Some(set_x));
-        property_map.add_property("_y".into(), y, Some(set_y));
-        property_map.add_property("_xscale".into(), x_scale, Some(set_x_scale));
-        property_map.add_property("_yscale".into(), y_scale, Some(set_y_scale));
-        property_map.add_property("_currentframe".into(), current_frame, None);
-        property_map.add_property("_totalframes".into(), total_frames, None);
-        property_map.add_property("_alpha".into(), alpha, Some(set_alpha));
-        property_map.add_property("_visible".into(), visible, Some(set_visible));
-        property_map.add_property("_width".into(), width, Some(set_width));
-        property_map.add_property("_height".into(), height, Some(set_height));
-        property_map.add_property("_rotation".into(), rotation, Some(set_rotation));
-        property_map.add_property("_target".into(), target, None);
-        property_map.add_property("_framesloaded".into(), frames_loaded, None);
-        property_map.add_property("_name".into(), name, Some(set_name));
-        property_map.add_property("_droptarget".into(), drop_target, None);
-        property_map.add_property("_url".into(), url, None);
-        property_map.add_property("_highquality".into(), high_quality, Some(set_high_quality));
-        property_map.add_property("_focusrect".into(), focus_rect, Some(set_focus_rect));
-        property_map.add_property(
-            "_soundbuftime".into(),
-            sound_buf_time,
-            Some(set_sound_buf_time),
-        );
-        property_map.add_property("_quality".into(), quality, Some(set_quality));
-        property_map.add_property("_xmouse".into(), x_mouse, None);
-        property_map.add_property("_ymouse".into(), y_mouse, None);
+        // Don't use `istr!` here, this is only done once during AVM1 initialization.
+        for &(name, getter, setter) in Self::PROPERTIES {
+            let name = context.intern_static(WStr::from_units(name));
+            property_map.add_property(name.into(), getter, setter);
+        }
 
-        GcCell::allocate(gc_context, property_map)
+        property_map
     }
+
+    // Order is important:
+    // should match the SWF specs for GetProperty/SetProperty.
+    const PROPERTIES: &'static [(&'static [u8], DisplayGetter, Option<DisplaySetter>)] = &[
+        (b"_x", x, Some(set_x)),
+        (b"_y", y, Some(set_y)),
+        (b"_xscale", x_scale, Some(set_x_scale)),
+        (b"_yscale", y_scale, Some(set_y_scale)),
+        (b"_currentframe", current_frame, None),
+        (b"_totalframes", total_frames, None),
+        (b"_alpha", alpha, Some(set_alpha)),
+        (b"_visible", visible, Some(set_visible)),
+        (b"_width", width, Some(set_width)),
+        (b"_height", height, Some(set_height)),
+        (b"_rotation", rotation, Some(set_rotation)),
+        (b"_target", target, None),
+        (b"_framesloaded", frames_loaded, None),
+        (b"_name", name, Some(set_name)),
+        (b"_droptarget", drop_target, None),
+        (b"_url", url, None),
+        (b"_highquality", high_quality, Some(set_high_quality)),
+        (b"_focusrect", focus_rect, Some(set_focus_rect)),
+        (b"_soundbuftime", sound_buf_time, Some(set_sound_buf_time)),
+        (b"_quality", quality, Some(set_quality)),
+        (b"_xmouse", x_mouse, None),
+        (b"_ymouse", y_mouse, None),
+    ];
 
     /// Gets a property slot by name.
     /// Used by `GetMember`, `GetVariable`, `SetMember`, and `SetVariable`.
@@ -448,7 +495,7 @@ impl<'gc> DisplayPropertyMap<'gc> {
 }
 
 fn x<'gc>(_activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.x().into()
+    this.x().to_pixels().into()
 }
 
 fn set_x<'gc>(
@@ -456,14 +503,14 @@ fn set_x<'gc>(
     this: DisplayObject<'gc>,
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_x(activation.context.gc_context, val);
+    if let Some(x) = property_coerce_to_number(activation, val)? {
+        this.set_x(activation.gc(), Twips::from_pixels(x));
     }
     Ok(())
 }
 
 fn y<'gc>(_activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.y().into()
+    this.y().to_pixels().into()
 }
 
 fn set_y<'gc>(
@@ -471,14 +518,14 @@ fn set_y<'gc>(
     this: DisplayObject<'gc>,
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_y(activation.context.gc_context, val);
+    if let Some(y) = property_coerce_to_number(activation, val)? {
+        this.set_y(activation.gc(), Twips::from_pixels(y));
     }
     Ok(())
 }
 
 fn x_scale<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.scale_x(activation.context.gc_context).percent().into()
+    this.scale_x(activation.gc()).percent().into()
 }
 
 fn set_x_scale<'gc>(
@@ -487,13 +534,13 @@ fn set_x_scale<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_scale_x(activation.context.gc_context, Percent::from(val));
+        this.set_scale_x(activation.gc(), Percent::from(val));
     }
     Ok(())
 }
 
 fn y_scale<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.scale_y(activation.context.gc_context).percent().into()
+    this.scale_y(activation.gc()).percent().into()
 }
 
 fn set_y_scale<'gc>(
@@ -502,7 +549,7 @@ fn set_y_scale<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_scale_y(activation.context.gc_context, Percent::from(val));
+        this.set_scale_y(activation.gc(), Percent::from(val));
     }
     Ok(())
 }
@@ -535,7 +582,7 @@ fn set_alpha<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_alpha(activation.context.gc_context, val / 100.0);
+        this.set_alpha(activation.gc(), val / 100.0);
     }
     Ok(())
 }
@@ -552,7 +599,7 @@ fn set_visible<'gc>(
     // Because this property dates to the era of Flash 4, this is actually coerced to an integer.
     // `_visible = "false";` coerces to NaN and has no effect.
     if let Some(n) = property_coerce_to_number(activation, val)? {
-        this.set_visible(activation.context.gc_context, n != 0.0);
+        this.set_visible(activation.context, n != 0.0);
     }
     Ok(())
 }
@@ -567,7 +614,7 @@ fn set_width<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_width(activation.context.gc_context, val);
+        this.set_width(activation.context, val);
     }
     Ok(())
 }
@@ -582,13 +629,13 @@ fn set_height<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     if let Some(val) = property_coerce_to_number(activation, val)? {
-        this.set_height(activation.context.gc_context, val);
+        this.set_height(activation.context, val);
     }
     Ok(())
 }
 
 fn rotation<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    let degrees: f64 = this.rotation(activation.context.gc_context).into();
+    let degrees: f64 = this.rotation(activation.gc()).into();
     degrees.into()
 }
 
@@ -605,13 +652,13 @@ fn set_rotation<'gc>(
         } else if degrees > 180.0 {
             degrees -= 360.0
         }
-        this.set_rotation(activation.context.gc_context, degrees.into());
+        this.set_rotation(activation.gc(), degrees.into());
     }
     Ok(())
 }
 
 fn target<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    AvmString::new(activation.context.gc_context, this.slash_path()).into()
+    AvmString::new(activation.gc(), this.slash_path()).into()
 }
 
 fn frames_loaded<'gc>(
@@ -623,8 +670,8 @@ fn frames_loaded<'gc>(
         .map_or(Value::Undefined, Value::from)
 }
 
-fn name<'gc>(_activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.name().into()
+fn name<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
+    this.name().unwrap_or_else(|| istr!("")).into()
 }
 
 fn set_name<'gc>(
@@ -633,35 +680,23 @@ fn set_name<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     let name = val.coerce_to_string(activation)?;
-    this.set_name(activation.context.gc_context, name);
+    this.set_name(activation.gc(), name);
     Ok(())
 }
 
 fn drop_target<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.as_movie_clip()
-        .and_then(|mc| mc.drop_target())
-        .map_or_else(
-            || {
-                if activation.swf_version() < 6 {
-                    Value::Undefined
-                } else {
-                    "".into()
-                }
-            },
-            |drop_target| {
-                AvmString::new(activation.context.gc_context, drop_target.slash_path()).into()
-            },
-        )
+    match this.as_movie_clip().and_then(|mc| mc.drop_target()) {
+        Some(target) => AvmString::new(activation.gc(), target.slash_path()).into(),
+        None if activation.swf_version() < 6 => Value::Undefined,
+        None => istr!("").into(),
+    }
 }
 
 fn url<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    this.as_movie_clip()
-        .map(|mc| mc.movie())
-        .and_then(|mov| mov.url().map(|url| url.to_string()))
-        .map_or_else(
-            || "".into(),
-            |s| AvmString::new_utf8(activation.context.gc_context, s).into(),
-        )
+    match this.as_movie_clip() {
+        Some(mc) => AvmString::new_utf8(activation.gc(), mc.movie().url()).into(),
+        None => istr!("").into(),
+    }
 }
 
 fn high_quality<'gc>(
@@ -696,22 +731,61 @@ fn set_high_quality<'gc>(
         activation
             .context
             .stage
-            .set_quality(&mut activation.context, quality);
+            .set_quality(activation.context, quality);
     }
     Ok(())
 }
 
-fn focus_rect<'gc>(activation: &mut Activation<'_, 'gc>, _this: DisplayObject<'gc>) -> Value<'gc> {
-    avm_warn!(activation, "Unimplemented property _focusrect");
-    Value::Null
+fn refers_to_stage_focus_rect<'gc>(
+    activation: &mut Activation<'_, 'gc>,
+    this: DisplayObject<'gc>,
+) -> bool {
+    activation.swf_version() <= 5 || this.parent().is_some_and(|p| p.as_stage().is_some())
+}
+
+fn focus_rect<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
+    if refers_to_stage_focus_rect(activation, this) {
+        let val = activation.context.stage.stage_focus_rect();
+        if activation.swf_version() <= 5 {
+            Value::Number(if val { 1.0 } else { 0.0 })
+        } else {
+            Value::Bool(val)
+        }
+    } else if let Some(obj) = this.as_interactive() {
+        match obj.focus_rect() {
+            Some(val) => Value::Bool(val),
+            None => Value::Null,
+        }
+    } else {
+        Value::Undefined
+    }
 }
 
 fn set_focus_rect<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: DisplayObject<'gc>,
-    _val: Value<'gc>,
+    this: DisplayObject<'gc>,
+    val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
-    avm_warn!(activation, "Unimplemented property _focusrect");
+    if refers_to_stage_focus_rect(activation, this) {
+        let val = match val {
+            Value::Undefined | Value::Null => {
+                // undefined & null are ignored
+                return Ok(());
+            }
+            Value::Object(_) => false,
+            _ => val.coerce_to_f64(activation)? != 0.0,
+        };
+        activation
+            .context
+            .stage
+            .set_stage_focus_rect(activation.gc(), val);
+    } else if let Some(obj) = this.as_interactive() {
+        let val = match val {
+            Value::Undefined | Value::Null => None,
+            _ => Some(val.as_bool(activation.swf_version())),
+        };
+        obj.set_focus_rect(activation.gc(), val);
+    }
     Ok(())
 }
 
@@ -728,8 +802,13 @@ fn set_sound_buf_time<'gc>(
     val: Value<'gc>,
 ) -> Result<(), Error<'gc>> {
     avm_warn!(activation, "_soundbuftime is currently ignored by Ruffle");
-    if let Some(val) = property_coerce_to_i32(activation, val)? {
-        activation.context.audio_manager.set_stream_buffer_time(val);
+    let val = val.coerce_to_f64(activation)?;
+    // NaN/undefined/null are invalid values; do not set.
+    if !val.is_nan() {
+        activation
+            .context
+            .audio_manager
+            .set_stream_buffer_time(val.clamp_to_i32());
     }
     Ok(())
 }
@@ -748,19 +827,19 @@ fn set_quality<'gc>(
         activation
             .context
             .stage
-            .set_quality(&mut activation.context, quality);
+            .set_quality(activation.context, quality);
     }
     Ok(())
 }
 
 fn x_mouse<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    let (local_x, _) = this.global_to_local(*activation.context.mouse_position);
-    local_x.to_pixels().into()
+    let local = this.local_mouse_position(activation.context);
+    local.x.to_pixels().into()
 }
 
 fn y_mouse<'gc>(activation: &mut Activation<'_, 'gc>, this: DisplayObject<'gc>) -> Value<'gc> {
-    let (_, local_y) = this.global_to_local(*activation.context.mouse_position);
-    local_y.to_pixels().into()
+    let local = this.local_mouse_position(activation.context);
+    local.y.to_pixels().into()
 }
 
 fn property_coerce_to_number<'gc>(
@@ -773,29 +852,35 @@ fn property_coerce_to_number<'gc>(
             return Ok(Some(n));
         }
     }
-
     // Invalid value; do not set.
     Ok(None)
 }
 
-/// Coerces `value` to `i32` for use by a stage object property.
-///
-/// Values out of range of `i32` will be clamped to `i32::MIN`. Returns `None` if the value is
-/// invalid (NaN, null, or undefined).
-fn property_coerce_to_i32<'gc>(
+/// Coerces a value according to the property index.
+/// Used by `SetProperty`.
+pub fn action_property_coerce<'gc>(
     activation: &mut Activation<'_, 'gc>,
+    index: usize,
     value: Value<'gc>,
-) -> Result<Option<i32>, Error<'gc>> {
-    let n = value.coerce_to_f64(activation)?;
-    let ret = if n.is_nan() {
-        // NaN/undefined/null are invalid values; do not set.
-        None
-    } else if n >= i32::MIN as f64 && n <= i32::MAX as f64 {
-        Some(n as i32)
-    } else {
-        // Out of range of i32; snaps to `i32::MIN`.
-        Some(i32::MIN)
-    };
-
-    Ok(ret)
+) -> Result<Value<'gc>, Error<'gc>> {
+    Ok(match index {
+        // Coerce to a number. This affects the following properties (including some which have no setter):
+        // _x, _y, _xscale, _yscale, _currentframe, _totalframes, _alpha, _visible, _width, _height, _rotation, _framesloaded.
+        0..=10 | 12 => {
+            if let Some(value_to_number) = property_coerce_to_number(activation, value)? {
+                value_to_number.into()
+            } else {
+                value
+            }
+        }
+        // Coerce to a f64. This affects the following properties (including some which have no setter):
+        // _highquality, _soundbuftime, _xmouse, _ymouse.
+        16 | 18 | 20..=21 => value.coerce_to_f64(activation)?.into(),
+        // Coerce to a string. This affects the following properties:
+        // _name, _quality.
+        13 | 19 => value.coerce_to_string(activation)?.into(),
+        // No coercion. This affects the following properties:
+        // _target, _droptarget, _url, _focusrect.
+        _ => value,
+    })
 }

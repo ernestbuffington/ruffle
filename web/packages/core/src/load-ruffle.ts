@@ -9,13 +9,10 @@ import {
     signExtensions,
     referenceTypes,
 } from "wasm-feature-detect";
+import type { RuffleInstanceBuilder, ZipWriter } from "../dist/ruffle_web";
 import { setPolyfillsOnLoad } from "./js-polyfills";
-import { publicPath } from "./public-path";
-import type { Config } from "./config";
 
-declare global {
-    let __webpack_public_path__: string;
-}
+import { internalSourceApi } from "./internal/internal-source-api";
 
 type ProgressCallback = (bytesLoaded: number, bytesTotal: number) => void;
 
@@ -26,15 +23,13 @@ type ProgressCallback = (bytesLoaded: number, bytesTotal: number) => void;
  * You should not use it directly; this module will memoize the resource
  * download.
  *
- * @param config The `window.RufflePlayer.config` object.
  * @param progressCallback The callback that will be run with Ruffle's download progress.
- * @returns A ruffle constructor that may be used to create new Ruffle
+ * @returns A ruffle-builder constructor that may be used to create new RuffleInstanceBuilder
  * instances.
  */
 async function fetchRuffle(
-    config: Config,
-    progressCallback?: ProgressCallback
-): Promise<typeof Ruffle> {
+    progressCallback?: ProgressCallback,
+): Promise<[typeof RuffleInstanceBuilder, typeof ZipWriter]> {
     // Apply some pure JavaScript polyfills to prevent conflicts with external
     // libraries, if needed.
     setPolyfillsOnLoad();
@@ -50,26 +45,41 @@ async function fetchRuffle(
         ])
     ).every(Boolean);
 
-    if (!extensionsSupported) {
+    // @ts-expect-error TS2367 %FALLBACK_WASM% gets replaced in set_version.ts.
+    // %FALLBACK_WASM% is "ruffle_web-wasm_mvp" if this is a dual-wasm build.
+    // We don't say we're falling back if we have only an extension build.
+    if (!extensionsSupported && "%FALLBACK_WASM%" === "ruffle_web-wasm_mvp") {
         console.log(
-            "Some WebAssembly extensions are NOT available, falling back to the vanilla WebAssembly module"
+            "Some WebAssembly extensions are NOT available, falling back to the vanilla WebAssembly module",
         );
     }
 
-    __webpack_public_path__ = publicPath(config);
+    // Easy "on first load": just set it to something else after the call.
+    internalSourceApi.options.onFirstLoad?.();
+    internalSourceApi.options.onFirstLoad = () => {};
 
     // Note: The argument passed to import() has to be a simple string literal,
     // otherwise some bundler will get confused and won't include the module?
-    const { default: init, Ruffle } = await (extensionsSupported
-        ? import("../pkg/ruffle_web-wasm_extensions")
-        : import("../pkg/ruffle_web"));
+    const {
+        default: init,
+        RuffleInstanceBuilder,
+        ZipWriter,
+    } = await (extensionsSupported
+        ? import("../dist/ruffle_web")
+        : // @ts-expect-error TS2307 TypeScript compiler is trying to do the import.
+          import("../dist/%FALLBACK_WASM%"));
     let response;
     const wasmUrl = extensionsSupported
-        ? new URL("../pkg/ruffle_web-wasm_extensions_bg.wasm", import.meta.url)
-        : new URL("../pkg/ruffle_web_bg.wasm", import.meta.url);
+        ? new URL("../dist/ruffle_web_bg.wasm", import.meta.url)
+        : new URL("../dist/%FALLBACK_WASM%_bg.wasm", import.meta.url);
     const wasmResponse = await fetch(wasmUrl);
-    if (progressCallback) {
-        const contentLength = wasmResponse.headers.get("content-length") || "";
+    // The Pale Moon browser lacks full support for ReadableStream.
+    // However, ReadableStream itself is defined.
+    const readableStreamProperlyDefined =
+        typeof ReadableStreamDefaultController === "function";
+    if (progressCallback && readableStreamProperlyDefined) {
+        const contentLength =
+            wasmResponse?.headers?.get("content-length") || "";
         let bytesLoaded = 0;
         // Use parseInt rather than Number so the empty string is coerced to NaN instead of 0
         const bytesTotal = parseInt(contentLength);
@@ -83,15 +93,19 @@ async function fetchRuffle(
                     progressCallback(bytesLoaded, bytesTotal);
                     for (;;) {
                         const { done, value } = await reader.read();
-                        if (done) break;
-                        if (value?.byteLength) bytesLoaded += value?.byteLength;
+                        if (done) {
+                            break;
+                        }
+                        if (value?.byteLength) {
+                            bytesLoaded += value?.byteLength;
+                        }
                         controller.enqueue(value);
                         progressCallback(bytesLoaded, bytesTotal);
                     }
                     controller.close();
                 },
             }),
-            wasmResponse
+            wasmResponse,
         );
     } else {
         response = wasmResponse;
@@ -99,32 +113,28 @@ async function fetchRuffle(
 
     await init(response);
 
-    return Ruffle;
+    return [RuffleInstanceBuilder, ZipWriter];
 }
 
-type Ruffle =
-    | typeof import("../pkg/ruffle_web")["Ruffle"]
-    | typeof import("../pkg/ruffle_web-wasm_extensions")["Ruffle"];
-
-let lastLoaded: Promise<Ruffle> | null = null;
+let nativeConstructors: Promise<
+    [typeof RuffleInstanceBuilder, typeof ZipWriter]
+> | null = null;
 
 /**
  * Obtain an instance of `Ruffle`.
  *
- * This function returns a promise which yields `Ruffle` asynchronously.
+ * This function returns a promise which yields a new `RuffleInstanceBuilder` asynchronously.
  *
- * @param config The `window.RufflePlayer.config` object.
  * @param progressCallback The callback that will be run with Ruffle's download progress.
- * @returns A ruffle constructor that may be used to create new Ruffle
- * instances.
+ * @returns A ruffle instance builder.
  */
-export function loadRuffle(
-    config: Config,
-    progressCallback?: ProgressCallback
-): Promise<Ruffle> {
-    if (lastLoaded === null) {
-        lastLoaded = fetchRuffle(config, progressCallback);
+export async function createRuffleBuilder(
+    progressCallback?: ProgressCallback,
+): Promise<[RuffleInstanceBuilder, () => ZipWriter]> {
+    if (nativeConstructors === null) {
+        nativeConstructors = fetchRuffle(progressCallback);
     }
 
-    return lastLoaded;
+    const constructors = await nativeConstructors;
+    return [new constructors[0](), () => new constructors[1]()];
 }

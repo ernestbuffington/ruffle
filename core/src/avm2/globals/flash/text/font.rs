@@ -1,214 +1,168 @@
 //! `flash.text.Font` builtin/prototype
 
 use crate::avm2::activation::Activation;
-use crate::avm2::class::{Class, ClassAttributes};
-use crate::avm2::method::{Method, NativeMethodImpl};
-use crate::avm2::object::{Object, TObject};
+use crate::avm2::error::make_error_1508;
+use crate::avm2::object::{FontObject, TObject};
+use crate::avm2::parameters::ParametersExt;
 use crate::avm2::value::Value;
-use crate::avm2::Multiname;
-use crate::avm2::Namespace;
-use crate::avm2::QName;
 use crate::avm2::{ArrayObject, ArrayStorage, Error};
-use crate::avm2_stub_getter;
-use crate::character::Character;
+use crate::avm2_stub_method;
 use crate::string::AvmString;
-use gc_arena::{GcCell, MutationContext};
 
-/// Implements `flash.text.Font`'s instance constructor.
-pub fn instance_init<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some(this) = this {
-        activation.super_init(this, &[])?;
-    }
+pub use crate::avm2::object::font_allocator;
+use crate::character::Character;
+use crate::font::{Font, FontType};
 
-    Ok(Value::Undefined)
-}
-
-/// Implements `flash.text.Font`'s class constructor.
-pub fn class_init<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(Value::Undefined)
-}
+use ruffle_macros::istr;
 
 /// Implements `Font.fontName`
-pub fn font_name<'gc>(
+pub fn get_font_name<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some((movie, character_id)) = this.and_then(|this| this.instance_of()).and_then(|this| {
-        activation
-            .context
-            .library
-            .avm2_class_registry()
-            .class_symbol(this)
-    }) {
-        if let Some(Character::Font(font)) = activation
-            .context
-            .library
-            .library_for_movie_mut(movie)
-            .character_by_id(character_id)
-        {
-            return Ok(AvmString::new_utf8(
-                activation.context.gc_context,
-                font.descriptor().class(),
-            )
-            .into());
-        }
+    let this = this.as_object().unwrap();
+
+    if let Some(font) = this.as_font() {
+        return Ok(AvmString::new_utf8(activation.gc(), font.descriptor().name()).into());
     }
 
-    Ok(Value::Undefined)
+    Ok(Value::Null)
 }
 
 /// Implements `Font.fontStyle`
-pub fn font_style<'gc>(
+pub fn get_font_style<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some((movie, character_id)) = this.and_then(|this| this.instance_of()).and_then(|this| {
-        activation
-            .context
-            .library
-            .avm2_class_registry()
-            .class_symbol(this)
-    }) {
-        if let Some(Character::Font(font)) = activation
-            .context
-            .library
-            .library_for_movie_mut(movie)
-            .character_by_id(character_id)
-        {
-            return match (font.descriptor().bold(), font.descriptor().italic()) {
-                (false, false) => Ok("regular".into()),
-                (false, true) => Ok("italic".into()),
-                (true, false) => Ok("bold".into()),
-                (true, true) => Ok("boldItalic".into()),
-            };
-        }
+    let this = this.as_object().unwrap();
+
+    if let Some(font) = this.as_font() {
+        let font_style = match (font.descriptor().bold(), font.descriptor().italic()) {
+            (false, false) => istr!("regular"),
+            (false, true) => istr!("italic"),
+            (true, false) => istr!("bold"),
+            (true, true) => istr!("boldItalic"),
+        };
+
+        return Ok(font_style.into());
     }
 
-    Ok(Value::Undefined)
+    Ok(Value::Null)
 }
 
 /// Implements `Font.fontType`
-pub fn font_type<'gc>(
+pub fn get_font_type<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some((movie, character_id)) = this.and_then(|this| this.instance_of()).and_then(|this| {
-        activation
-            .context
-            .library
-            .avm2_class_registry()
-            .class_symbol(this)
-    }) {
-        if let Some(Character::Font(_)) = activation
-            .context
-            .library
-            .library_for_movie_mut(movie)
-            .character_by_id(character_id)
-        {
-            //TODO: How do we distinguish between CFF and non-CFF embedded fonts?
-            return Ok("embedded".into());
-        }
+    let this = this.as_object().unwrap();
+
+    if let Some(font) = this.as_font() {
+        let font_type = match font.font_type() {
+            FontType::Embedded => istr!("embedded"),
+            FontType::EmbeddedCFF => istr!("embeddedCFF"),
+            FontType::Device => istr!("device"),
+        };
+
+        return Ok(font_type.into());
     }
 
-    Ok(Value::Undefined)
+    Ok(Value::Null)
 }
 
 /// Implements `Font.hasGlyphs`
 pub fn has_glyphs<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Option<Object<'gc>>,
+    this: Value<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    if let Some((movie, character_id)) = this.and_then(|this| this.instance_of()).and_then(|this| {
-        activation
-            .context
-            .library
-            .avm2_class_registry()
-            .class_symbol(this)
-    }) {
-        let my_str = args
-            .get(0)
-            .cloned()
-            .unwrap_or(Value::Undefined)
-            .coerce_to_string(activation)?;
+    let this = this.as_object().unwrap();
 
-        if let Some(Character::Font(font)) = activation
-            .context
-            .library
-            .library_for_movie_mut(movie)
-            .character_by_id(character_id)
-        {
-            return Ok(font.has_glyphs_for_str(&my_str).into());
-        }
+    if let Some(font) = this.as_font() {
+        let my_str = args.get_string(activation, 0)?;
+        return Ok(font.has_glyphs_for_str(&my_str).into());
     }
 
-    Ok(Value::Undefined)
+    Ok(Value::Bool(false))
 }
 
 /// `Font.enumerateFonts`
 pub fn enumerate_fonts<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
+    _this: Value<'gc>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_getter!(activation, "flash.text.Font", "enumerateFonts");
-    Ok(ArrayObject::from_storage(activation, ArrayStorage::new(0))?.into())
+    let mut fonts: Vec<Font<'gc>> = Vec::new();
+
+    if args.get_bool(0) {
+        // We could include the ones we know about, but what to do for the ones that weren't eagerly loaded?
+        avm2_stub_method!(
+            activation,
+            "flash.text.Font",
+            "enumerateFonts",
+            "with device fonts"
+        );
+    }
+
+    fonts.append(&mut activation.context.library.global_fonts());
+
+    if let Some(library) = activation
+        .context
+        .library
+        .library_for_movie(activation.caller_movie_or_root())
+    {
+        for font in library.embedded_fonts() {
+            // TODO: EmbeddedCFF isn't supposed to show until it's been used (some kind of internal initialization method?)
+            // Device is only supposed to show when arg0 is true - but that's supposed to be "all known" device fonts, not just loaded ones
+            if font.has_layout() && font.font_type() == FontType::Embedded {
+                fonts.push(font);
+            }
+        }
+    }
+
+    // The output from Flash is sorted by font name (case insensitive).
+    // If two fonts have the same name (e.g. bold/italic variants),
+    // the order is nondeterministic.
+    fonts.sort_unstable_by(|a, b| {
+        a.descriptor()
+            .lowercase_name()
+            .cmp(b.descriptor().lowercase_name())
+    });
+
+    let font_class = activation.avm2().classes().font;
+    let mut storage = ArrayStorage::new(fonts.len());
+    for font in fonts {
+        storage.push(FontObject::for_font(activation.gc(), font_class, font).into());
+    }
+    Ok(ArrayObject::from_storage(activation, storage).into())
 }
 
 /// `Font.registerFont`
 pub fn register_font<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Option<Object<'gc>>,
-    _args: &[Value<'gc>],
+    _this: Value<'gc>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    avm2_stub_getter!(activation, "flash.text.Font", "registerFont");
-    Ok(Value::Undefined)
-}
+    let object = args.get_object(activation, 0, "font")?;
 
-/// Construct `Font`'s class.
-pub fn create_class<'gc>(mc: MutationContext<'gc, '_>) -> GcCell<'gc, Class<'gc>> {
-    let class = Class::new(
-        QName::new(Namespace::package("flash.text"), "Font"),
-        Some(Multiname::public("Object")),
-        Method::from_builtin(instance_init, "<Font instance initializer>", mc),
-        Method::from_builtin(class_init, "<Font class initializer>", mc),
-        mc,
-    );
+    if let Some(class) = object.as_class_object() {
+        if let Some((movie, id)) = activation
+            .context
+            .library
+            .avm2_class_registry()
+            .class_symbol(class.inner_class_definition())
+        {
+            if let Some(lib) = activation.context.library.library_for_movie(movie) {
+                if let Some(Character::Font(font)) = lib.character_by_id(id) {
+                    activation.context.library.register_global_font(*font);
+                    return Ok(Value::Undefined);
+                }
+            }
+        }
+    }
 
-    let mut write = class.write(mc);
-
-    write.set_attributes(ClassAttributes::SEALED);
-
-    const PUBLIC_INSTANCE_PROPERTIES: &[(
-        &str,
-        Option<NativeMethodImpl>,
-        Option<NativeMethodImpl>,
-    )] = &[
-        ("fontName", Some(font_name), None),
-        ("fontStyle", Some(font_style), None),
-        ("fontType", Some(font_type), None),
-    ];
-    write.define_public_builtin_instance_properties(mc, PUBLIC_INSTANCE_PROPERTIES);
-
-    const PUBLIC_INSTANCE_METHODS: &[(&str, NativeMethodImpl)] = &[("hasGlyphs", has_glyphs)];
-    write.define_public_builtin_instance_methods(mc, PUBLIC_INSTANCE_METHODS);
-
-    const PUBLIC_CLASS_METHODS: &[(&str, NativeMethodImpl)] = &[
-        ("enumerateFonts", enumerate_fonts),
-        ("registerFont", register_font),
-    ];
-    write.define_public_builtin_class_methods(mc, PUBLIC_CLASS_METHODS);
-
-    class
+    Err(make_error_1508(activation, "font"))
 }

@@ -1,4 +1,5 @@
-///! Utilities for operating on strings in SWF files.
+//! Utilities for operating on strings in SWF files.
+
 use super::tables::{LOWERCASE_TABLE, UPPERCASE_TABLE};
 use super::Units;
 use alloc::vec::Vec;
@@ -41,18 +42,25 @@ pub fn next_char_boundary(slice: &super::WStr, pos: usize) -> usize {
     }
 }
 
-/// Returns `true` if the given utf16 code unit is an whitespace
+/// Returns `true` if the given utf16 code unit is a whitespace
 /// according to the Flash Player.
 #[inline]
 pub fn swf_is_whitespace(c: u16) -> bool {
     matches!(u8::try_from(c), Ok(b' ' | b'\t' | b'\n' | b'\r'))
 }
 
+/// Returns `true` if the given utf16 code unit is a newline
+/// according to the Flash Player.
+#[inline]
+pub fn swf_is_newline(c: u16) -> bool {
+    matches!(u8::try_from(c), Ok(b'\n' | b'\r'))
+}
+
 /// Finds the longest prefix of `slice` that is entirely ASCII,
 /// and returns it as an UTF8 string, together with the remaining tail.
 pub fn split_ascii_prefix_bytes(slice: &[u8]) -> (&str, &[u8]) {
     let first_non_ascii = slice.iter().position(|c| *c >= 0x80);
-    let (head, tail) = slice.split_at(first_non_ascii.unwrap_or(0));
+    let (head, tail) = slice.split_at(first_non_ascii.unwrap_or(slice.len()));
     // SAFETY: `head` only contains ASCII.
     let head = unsafe { core::str::from_utf8_unchecked(head) };
     (head, tail)
@@ -123,7 +131,7 @@ impl<'a> DecodeAvmUtf8<'a> {
     }
 }
 
-impl<'a> Iterator for DecodeAvmUtf8<'a> {
+impl Iterator for DecodeAvmUtf8<'_> {
     type Item = u32;
     fn next(&mut self) -> Option<Self::Item> {
         let first = *self.src.get(self.index)?;

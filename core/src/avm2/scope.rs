@@ -1,13 +1,16 @@
 //! Represents AVM2 scope chain resolution.
 
 use crate::avm2::activation::Activation;
+use crate::avm2::class::Class;
 use crate::avm2::domain::Domain;
-use crate::avm2::object::{Object, TObject};
+use crate::avm2::object::TObject;
 use crate::avm2::value::Value;
 use crate::avm2::Error;
 use crate::avm2::{Multiname, Namespace};
 use core::fmt;
-use gc_arena::{Collect, GcCell, MutationContext};
+use gc_arena::barrier::field;
+use gc_arena::lock::RefLock;
+use gc_arena::{Collect, Gc, Mutation};
 
 use super::property_map::PropertyMap;
 
@@ -16,7 +19,7 @@ use super::property_map::PropertyMap;
 #[collect(no_drop)]
 pub struct Scope<'gc> {
     /// The underlying object of this Scope
-    values: Object<'gc>,
+    values: Value<'gc>,
 
     /// Indicates whether or not this is a `with` scope.
     ///
@@ -26,16 +29,22 @@ pub struct Scope<'gc> {
 }
 
 impl<'gc> Scope<'gc> {
-    /// Creates a new regular Scope
-    pub fn new(values: Object<'gc>) -> Self {
+    /// Creates a new regular Scope.
+    ///
+    /// It is the caller's responsibility to ensure that the `values` passed
+    /// to this method is not Value::Null or Value::Undefined.
+    pub fn new(values: Value<'gc>) -> Self {
         Self {
             values,
             with: false,
         }
     }
 
-    /// Creates a new `with` Scope
-    pub fn new_with(values: Object<'gc>) -> Self {
+    /// Creates a new `with` Scope.
+    ///
+    /// It is the caller's responsibility to ensure that the `values` passed
+    /// to this method is not Value::Null or Value::Undefined.
+    pub fn new_with(values: Value<'gc>) -> Self {
         Self { values, with: true }
     }
 
@@ -43,7 +52,7 @@ impl<'gc> Scope<'gc> {
         self.with
     }
 
-    pub fn values(&self) -> Object<'gc> {
+    pub fn values(&self) -> Value<'gc> {
         self.values
     }
 }
@@ -57,17 +66,22 @@ struct ScopeContainer<'gc> {
 
     /// The cache of this ScopeChain. A value of None indicates that caching is disabled
     /// for this ScopeChain.
-    cache: Option<PropertyMap<'gc, Object<'gc>>>,
+    cache: Option<RefLock<PropertyMap<'gc, Value<'gc>>>>,
 }
 
 impl<'gc> ScopeContainer<'gc> {
     fn new(scopes: Vec<Scope<'gc>>) -> Self {
-        let cache = (!scopes.iter().any(|scope| scope.with)).then(PropertyMap::default);
+        let cache = (!scopes.iter().any(|scope| scope.with)).then(RefLock::default);
         Self { scopes, cache }
     }
 
     fn get(&self, index: usize) -> Option<Scope<'gc>> {
         self.scopes.get(index).cloned()
+    }
+
+    /// Like `get`, but panics if the scope index is out of bounds.
+    pub fn get_unchecked(&self, index: usize) -> Scope<'gc> {
+        self.scopes[index]
     }
 
     fn is_empty(&self) -> bool {
@@ -82,7 +96,7 @@ impl<'gc> ScopeContainer<'gc> {
 /// initial creation.
 ///
 /// A ScopeChain is either created by chaining new scopes on top of an already existing
-/// ScopeChain, or if we havn't created one yet (like during script initialization), you can
+/// ScopeChain, or if we haven't created one yet (like during script initialization), you can
 /// create an empty ScopeChain with only a Domain. A ScopeChain should **always** have a Domain.
 ///
 /// ScopeChain's are copy-on-write, meaning when we chain new scopes on top of a ScopeChain, we
@@ -91,7 +105,7 @@ impl<'gc> ScopeContainer<'gc> {
 #[derive(Collect, Clone, Copy)]
 #[collect(no_drop)]
 pub struct ScopeChain<'gc> {
-    container: Option<GcCell<'gc, ScopeContainer<'gc>>>,
+    container: Option<Gc<'gc, ScopeContainer<'gc>>>,
     domain: Domain<'gc>,
 }
 
@@ -113,7 +127,7 @@ impl<'gc> ScopeChain<'gc> {
     }
 
     /// Creates a new ScopeChain by chaining new scopes on top of this ScopeChain
-    pub fn chain(&self, mc: MutationContext<'gc, '_>, new_scopes: &[Scope<'gc>]) -> Self {
+    pub fn chain(&self, mc: &Mutation<'gc>, new_scopes: &[Scope<'gc>]) -> Self {
         if new_scopes.is_empty() {
             // If we are not actually adding any new scopes, we don't need to do anything.
             return *self;
@@ -123,10 +137,10 @@ impl<'gc> ScopeChain<'gc> {
             Some(container) => {
                 // The new ScopeChain is created by cloning the scopes of this ScopeChain,
                 // and pushing the new scopes on top of that.
-                let mut cloned = container.read().scopes.clone();
+                let mut cloned = container.scopes.clone();
                 cloned.extend_from_slice(new_scopes);
                 Self {
-                    container: Some(GcCell::allocate(mc, ScopeContainer::new(cloned))),
+                    container: Some(Gc::new(mc, ScopeContainer::new(cloned))),
                     domain: self.domain,
                 }
             }
@@ -134,10 +148,7 @@ impl<'gc> ScopeChain<'gc> {
                 // We are chaining on top of an empty ScopeChain, so we don't actually
                 // need to chain anything.
                 Self {
-                    container: Some(GcCell::allocate(
-                        mc,
-                        ScopeContainer::new(new_scopes.to_vec()),
-                    )),
+                    container: Some(Gc::new(mc, ScopeContainer::new(new_scopes.to_vec()))),
                     domain: self.domain,
                 }
             }
@@ -145,13 +156,18 @@ impl<'gc> ScopeChain<'gc> {
     }
 
     pub fn get(&self, index: usize) -> Option<Scope<'gc>> {
-        self.container
-            .and_then(|container| container.read().get(index))
+        self.container.and_then(|container| container.get(index))
+    }
+
+    /// Like `get`, but panics if the container doesn't exist or
+    /// the scope index is out of bounds.
+    pub fn get_unchecked(&self, index: usize) -> Scope<'gc> {
+        self.container.unwrap().get_unchecked(index)
     }
 
     pub fn is_empty(&self) -> bool {
         self.container
-            .map(|container| container.read().is_empty())
+            .map(|container| container.is_empty())
             .unwrap_or(true)
     }
 
@@ -164,37 +180,32 @@ impl<'gc> ScopeChain<'gc> {
         &self,
         multiname: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
-    ) -> Result<Option<(Option<Namespace<'gc>>, Object<'gc>)>, Error<'gc>> {
+    ) -> Result<Option<(Option<Namespace<'gc>>, Value<'gc>)>, Error<'gc>> {
         if let Some(container) = self.container {
-            for (depth, scope) in container.read().scopes.iter().enumerate().rev() {
-                // We search the dynamic properties if either conditions are met:
-                // 1. Scope is a `with` scope
-                // 2. We are at depth 0 (global scope)
-                //
-                // But no matter what, we always search traits first.
-
+            // We skip the scope at depth 0 (the global scope). The global scope will be checked in a different phase.
+            for scope in container.scopes.iter().skip(1).rev() {
                 // NOTE: We are manually searching the vtable's traits so we can figure out which namespace the trait
                 // belongs to.
                 let values = scope.values();
-                if let Some(vtable) = values.vtable() {
-                    if let Some((namespace, _)) = vtable.get_trait_with_ns(multiname) {
-                        return Ok(Some((Some(namespace), values)));
-                    }
+                let vtable = values.vtable(activation);
+                if let Some((namespace, _)) = vtable.get_trait_with_ns(multiname) {
+                    return Ok(Some((Some(namespace), values)));
                 }
 
-                // Wasn't in the objects traits, let's try dynamic properties if the conditions are right.
-                if (scope.with() || depth == 0) && values.has_own_property(multiname) {
+                // Wasn't in the objects traits, let's try dynamic properties if this is a with scope.
+                if scope.with() && values.has_own_property(activation, multiname) {
                     // NOTE: We return the QName as `None` to indicate that we should never cache this result.
-                    // We NEVER cache the result of dynamic properties.
+                    // We NEVER cache the result of dynamic properties (and can't anyway because of the check
+                    // in ScopeContainer::new).
                     return Ok(Some((None, values)));
                 }
             }
         }
         // That didn't work... let's try searching the domain now.
-        if let Some((qname, mut script)) = self.domain.get_defining_script(multiname)? {
+        if let Some((qname, script)) = self.domain.get_defining_script(multiname) {
             return Ok(Some((
                 Some(qname.namespace()),
-                script.globals(&mut activation.context)?,
+                script.globals(activation.context)?.into(),
             )));
         }
         Ok(None)
@@ -204,31 +215,55 @@ impl<'gc> ScopeChain<'gc> {
         &self,
         multiname: &Multiname<'gc>,
         activation: &mut Activation<'_, 'gc>,
-    ) -> Result<Option<Object<'gc>>, Error<'gc>> {
+    ) -> Result<Option<Value<'gc>>, Error<'gc>> {
         // First we check the cache of our container
         if let Some(container) = self.container {
-            if let Some(cache) = &container.read().cache {
-                let cached = cache.get_for_multiname(multiname);
-                if cached.is_some() {
-                    return Ok(cached.cloned());
+            if let Some(cache) = &container.cache {
+                if let Some(cached) = cache.borrow().get_for_multiname(multiname) {
+                    return Ok(Some(*cached));
                 }
             }
         }
         let found = self.find_internal(multiname, activation)?;
         if let (Some((Some(ns), obj)), Some(container)) = (found, self.container) {
             // We found a value that hasn't been cached yet, so let's try to cache it now
-            let mut write = container.write(activation.context.gc_context);
-            if let Some(ref mut cache) = write.cache {
-                cache.insert_with_namespace(
-                    ns,
-                    multiname
-                        .local_name()
-                        .expect("Resolvable multinames should always have a local name"),
-                    obj,
-                );
+            let cache = field!(Gc::write(activation.gc(), container), ScopeContainer, cache);
+            if let Some(cache) = cache.as_write() {
+                let name = multiname
+                    .local_name()
+                    .expect("Resolvable multinames should always have a local name");
+                cache
+                    .unlock()
+                    .borrow_mut()
+                    .insert_with_namespace(ns, name, obj);
             }
         }
         Ok(found.map(|o| o.1))
+    }
+
+    pub fn get_entry_for_multiname(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        multiname: &Multiname<'gc>,
+    ) -> Option<Option<(Class<'gc>, u32)>> {
+        if let Some(container) = self.container {
+            for (index, scope) in container.scopes.iter().enumerate().skip(1).rev() {
+                if scope.with() {
+                    // If this is a `with` scope, stop here because
+                    // dynamic properties could be added at any time
+                    return Some(None);
+                }
+
+                let values = scope.values();
+                if values.has_trait(activation, multiname) {
+                    return Some(Some((values.instance_class(activation), index as u32)));
+                }
+            }
+        }
+
+        // Nothing was found, and we can be sure that nothing will be
+        // found here at all (there were no `with` scopes).
+        None
     }
 
     pub fn resolve(
@@ -247,26 +282,75 @@ impl<'gc> ScopeChain<'gc> {
 /// Searches for a scope in the scope stack by a multiname.
 ///
 /// The `global` parameter indicates whether we are on global$init (script initializer).
-/// When the `global` parameter is true, the scope at depth 0 is considered the global scope, and is
-/// searched for dynamic properties.
+/// When the `global` parameter is true, the scope at depth 0 is considered the global scope, and is skipped.
 pub fn search_scope_stack<'gc>(
-    scopes: &[Scope<'gc>],
+    activation: &mut Activation<'_, 'gc>,
     multiname: &Multiname<'gc>,
     global: bool,
-) -> Result<Option<Object<'gc>>, Error<'gc>> {
+) -> Result<Option<Value<'gc>>, Error<'gc>> {
+    let classes = activation.context.avm2.classes();
+
+    let scopes = activation.scope_frame();
+
     for (depth, scope) in scopes.iter().enumerate().rev() {
+        if depth == 0 && global {
+            continue;
+        }
         let values = scope.values();
 
-        if values.has_trait(multiname) {
+        if value_has_trait(classes, values, multiname) {
             return Ok(Some(values));
-        } else if scope.with() || (global && depth == 0) {
-            // We search the dynamic properties if either conditions are met:
-            // 1. Scope is a `with` scope
-            // 2. We are at depth 0 AND we are at global$init (script initializer).
-            if values.has_own_property(multiname) {
+        } else if scope.with() {
+            // We search the dynamic properties if this is a with scope.
+            if value_has_own_property(classes, values, multiname) {
                 return Ok(Some(values));
             }
         }
     }
     Ok(None)
+}
+
+use crate::avm2::globals::SystemClasses;
+
+// Check if a Value has a trait without using an Activation. Used only in `search_scope_stack`.
+fn value_has_trait<'gc>(
+    classes: &SystemClasses<'gc>,
+    value: Value<'gc>,
+    multiname: &Multiname<'gc>,
+) -> bool {
+    let vtable = match value {
+        Value::Bool(_) => classes.boolean.instance_vtable(),
+        Value::Number(_) | Value::Integer(_) => classes.number.instance_vtable(),
+        Value::String(_) => classes.string.instance_vtable(),
+        Value::Object(obj) => obj.vtable(),
+
+        Value::Undefined | Value::Null => {
+            unreachable!("Should not have Undefined or Null scope")
+        }
+    };
+
+    vtable.has_trait(multiname)
+}
+
+// Check if a Value has a property without using an Activation. Used only in `search_scope_stack`.
+fn value_has_own_property<'gc>(
+    classes: &SystemClasses<'gc>,
+    value: Value<'gc>,
+    multiname: &Multiname<'gc>,
+) -> bool {
+    let vtable = match value {
+        Value::Bool(_) => classes.boolean.instance_vtable(),
+        Value::Number(_) | Value::Integer(_) => classes.number.instance_vtable(),
+        Value::String(_) => classes.string.instance_vtable(),
+        Value::Object(obj) => obj.vtable(),
+
+        Value::Undefined | Value::Null => {
+            unreachable!("Should not have Undefined or Null scope")
+        }
+    };
+
+    match value {
+        Value::Object(object) => object.has_own_property(multiname),
+        _ => vtable.has_trait(multiname),
+    }
 }

@@ -29,7 +29,7 @@ function polyfillArrayPrototypeReduce() {
             const callback = args[0];
             if (this === null) {
                 throw new TypeError(
-                    "Array.prototype.reduce called on null or undefined"
+                    "Array.prototype.reduce called on null or undefined",
                 );
             }
             if (typeof callback !== "function") {
@@ -49,7 +49,7 @@ function polyfillArrayPrototypeReduce() {
                 }
                 if (k >= len) {
                     throw new TypeError(
-                        "Reduce of empty array with no initial value"
+                        "Reduce of empty array with no initial value",
                     );
                 }
                 value = o[k++];
@@ -132,7 +132,7 @@ function tryPolyfillReflect(): void {
  * @param func The function to test.
  * @returns True if the function hasn't been overridden.
  */
-// eslint-disable-next-line @typescript-eslint/ban-types
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
 function isNativeFunction(func: Function): boolean {
     const val =
         typeof Function.prototype.toString === "function"

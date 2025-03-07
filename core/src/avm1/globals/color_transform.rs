@@ -3,10 +3,10 @@
 use crate::avm1::object::NativeObject;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::{Activation, Error, Object, ScriptObject, TObject, Value};
-use crate::string::AvmString;
-use gc_arena::{Collect, GcCell, MutationContext};
-use ruffle_render::color_transform::ColorTransform;
-use swf::Fixed8;
+use crate::string::{AvmString, StringContext};
+use gc_arena::{Collect, GcCell};
+use ruffle_macros::istr;
+use swf::{ColorTransform, Fixed8};
 
 #[derive(Clone, Debug, Collect)]
 #[collect(require_static)]
@@ -35,13 +35,13 @@ impl<'gc> ColorTransformObject {
 
     pub fn construct(
         activation: &mut Activation<'_, 'gc>,
-        color_transform: ColorTransform,
+        color_transform: &ColorTransform,
     ) -> Result<Value<'gc>, Error<'gc>> {
         let args = [
-            color_transform.r_mult.to_f64().into(),
-            color_transform.g_mult.to_f64().into(),
-            color_transform.b_mult.to_f64().into(),
-            color_transform.a_mult.to_f64().into(),
+            color_transform.r_multiply.to_f64().into(),
+            color_transform.g_multiply.to_f64().into(),
+            color_transform.b_multiply.to_f64().into(),
+            color_transform.a_multiply.to_f64().into(),
             color_transform.r_add.into(),
             color_transform.g_add.into(),
             color_transform.b_add.into(),
@@ -68,10 +68,10 @@ impl<'gc> ColorTransformObject {
 impl From<ColorTransformObject> for ColorTransform {
     fn from(object: ColorTransformObject) -> Self {
         Self {
-            r_mult: Fixed8::from_f64(object.red_multiplier),
-            g_mult: Fixed8::from_f64(object.green_multiplier),
-            b_mult: Fixed8::from_f64(object.blue_multiplier),
-            a_mult: Fixed8::from_f64(object.alpha_multiplier),
+            r_multiply: Fixed8::from_f64(object.red_multiplier),
+            g_multiply: Fixed8::from_f64(object.green_multiplier),
+            b_multiply: Fixed8::from_f64(object.blue_multiplier),
+            a_multiply: Fixed8::from_f64(object.alpha_multiplier),
             r_add: object.red_offset as i16,
             g_add: object.green_offset as i16,
             b_add: object.blue_offset as i16,
@@ -128,11 +128,8 @@ pub fn constructor<'gc>(
         _ => ColorTransformObject::IDENTITY,
     };
     this.set_native(
-        activation.context.gc_context,
-        NativeObject::ColorTransform(GcCell::allocate(
-            activation.context.gc_context,
-            color_transform,
-        )),
+        activation.gc(),
+        NativeObject::ColorTransform(GcCell::new(activation.gc(), color_transform)),
     );
     Ok(this.into())
 }
@@ -162,7 +159,7 @@ fn set_rgb<'gc>(
         if let [rgb, ..] = args {
             let rgb = rgb.coerce_to_u32(activation)?;
             let [b, g, r, _] = rgb.to_le_bytes();
-            let mut color_transform = color_transform.write(activation.context.gc_context);
+            let mut color_transform = color_transform.write(activation.gc());
             color_transform.red_multiplier = 0.0;
             color_transform.green_multiplier = 0.0;
             color_transform.blue_multiplier = 0.0;
@@ -198,7 +195,7 @@ macro_rules! color_transform_value_accessor {
                 if let Some(color_transform) = ColorTransformObject::cast(this.into()) {
                     if let [value, ..] = args {
                         let value = value.coerce_to_f64(activation)?;
-                        color_transform.write(activation.context.gc_context).$field = value;
+                        color_transform.write(activation.gc()).$field = value;
                     }
                 }
                 Ok(Value::Undefined.into())
@@ -224,17 +221,17 @@ fn to_string<'gc>(
     _args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     let formatted = format!("(redMultiplier={}, greenMultiplier={}, blueMultiplier={}, alphaMultiplier={}, redOffset={}, greenOffset={}, blueOffset={}, alphaOffset={})",
-            this.get("redMultiplier", activation)?.coerce_to_string(activation)?,
-            this.get("greenMultiplier", activation)?.coerce_to_string(activation)?,
-            this.get("blueMultiplier", activation)?.coerce_to_string(activation)?,
-            this.get("alphaMultiplier", activation)?.coerce_to_string(activation)?,
-            this.get("redOffset", activation)?.coerce_to_string(activation)?,
-            this.get("greenOffset", activation)?.coerce_to_string(activation)?,
-            this.get("blueOffset", activation)?.coerce_to_string(activation)?,
-            this.get("alphaOffset", activation)?.coerce_to_string(activation)?
+            this.get(istr!("redMultiplier"), activation)?.coerce_to_string(activation)?,
+            this.get(istr!("greenMultiplier"), activation)?.coerce_to_string(activation)?,
+            this.get(istr!("blueMultiplier"), activation)?.coerce_to_string(activation)?,
+            this.get(istr!("alphaMultiplier"), activation)?.coerce_to_string(activation)?,
+            this.get(istr!("redOffset"), activation)?.coerce_to_string(activation)?,
+            this.get(istr!("greenOffset"), activation)?.coerce_to_string(activation)?,
+            this.get(istr!("blueOffset"), activation)?.coerce_to_string(activation)?,
+            this.get(istr!("alphaOffset"), activation)?.coerce_to_string(activation)?
     );
 
-    Ok(AvmString::new_utf8(activation.context.gc_context, formatted).into())
+    Ok(AvmString::new_utf8(activation.gc(), formatted).into())
 }
 
 fn concat<'gc>(
@@ -251,7 +248,7 @@ fn concat<'gc>(
             _ => return Ok(Value::Undefined),
         };
 
-        let mut this = this.write(activation.context.gc_context);
+        let mut this = this.write(activation.gc());
         *this = ColorTransformObject {
             red_multiplier: other.red_multiplier * this.red_multiplier,
             green_multiplier: other.green_multiplier * this.green_multiplier,
@@ -268,11 +265,11 @@ fn concat<'gc>(
 }
 
 pub fn create_proto<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
 ) -> Object<'gc> {
-    let object = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(PROTO_DECLS, gc_context, object, fn_proto);
+    let object = ScriptObject::new(context, Some(proto));
+    define_properties_on(PROTO_DECLS, context, object, fn_proto);
     object.into()
 }

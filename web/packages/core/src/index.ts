@@ -1,16 +1,7 @@
-export * from "./load-ruffle";
-export * from "./plugin-polyfill";
-export * from "./polyfills";
-export * from "./public-api";
-export * from "./public-path";
-export * from "./register-element";
-export * from "./ruffle-embed";
-export * from "./ruffle-imports";
-export * from "./ruffle-object";
-export * from "./ruffle-player";
-export * from "./shadow-template";
-export * from "./version";
-export * from "./version-range";
-export * from "./config";
-export * from "./load-options";
+export * as Setup from "./public/setup";
+
+export * as Config from "./public/config";
+
+export * as Player from "./public/player";
+
 export * from "./build-info";

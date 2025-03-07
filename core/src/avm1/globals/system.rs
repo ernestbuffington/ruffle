@@ -1,14 +1,14 @@
 use crate::avm1::activation::Activation;
 use crate::avm1::error::Error;
 use crate::avm1::object::Object;
-use crate::avm1::property::Attribute;
 use crate::avm1::property_decl::{define_properties_on, Declaration};
 use crate::avm1::runtime::Avm1;
-use crate::avm1::{ScriptObject, TObject, Value};
+use crate::avm1::{ScriptObject, Value};
 use crate::avm1_stub;
+use crate::context::UpdateContext;
+use crate::string::StringContext;
 use bitflags::bitflags;
 use core::fmt;
-use gc_arena::MutationContext;
 
 const OBJECT_DECLS: &[Declaration] = declare_properties! {
     "exactSettings" => property(get_exact_settings, set_exact_settings);
@@ -35,26 +35,6 @@ impl fmt::Display for CpuArchitecture {
             CpuArchitecture::X86 => "x86",
             CpuArchitecture::Sparc => "SPARC",
             CpuArchitecture::Arm => "ARM",
-        })
-    }
-}
-
-/// Available type of sandbox for a given SWF
-#[allow(dead_code)]
-pub enum SandboxType {
-    Remote,
-    LocalWithFile,
-    LocalWithNetwork,
-    LocalTrusted,
-}
-
-impl fmt::Display for SandboxType {
-    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt.write_str(match self {
-            SandboxType::Remote => "remote",
-            SandboxType::LocalWithFile => "localWithFile",
-            SandboxType::LocalWithNetwork => "localWithNetwork",
-            SandboxType::LocalTrusted => "localTrusted",
         })
     }
 }
@@ -265,8 +245,8 @@ pub struct SystemProperties {
     /// If true then settings should be saved and read from the exact same domain of the player
     /// If false then they should be saved to the super domain
     pub exact_settings: bool,
-    /// If true then the system codepage should be used instead of unicode for text files
-    /// If false then unicode should be used
+    /// If true, the system codepage should be used for text files
+    /// If false, UTF-8 should be used for SWF version >= 6 and ISO Latin-1 for SWF version <= 5
     pub use_codepage: bool,
     /// The capabilities of the player
     pub capabilities: SystemCapabilities,
@@ -274,27 +254,50 @@ pub struct SystemProperties {
     pub player_type: PlayerType,
     /// The type of screen available to the player
     pub screen_color: ScreenColor,
-    /// The language of the host os
-    pub language: Language,
-    /// The resolution of the available screen
-    pub screen_resolution: (u32, u32),
     /// The aspect ratio of the screens pixels
-    pub aspect_ratio: f32,
+    pub pixel_aspect_ratio: f32,
     /// The dpi of the screen
     pub dpi: f32,
+    /// The language of the host os
+    pub language: Language,
     /// The manufacturer of the player
     pub manufacturer: Manufacturer,
     /// The os of the host
     pub os: OperatingSystem,
-    /// The type of the player sandbox
-    pub sandbox_type: SandboxType,
     /// The cpu architecture of the platform
     pub cpu_architecture: CpuArchitecture,
     /// The highest supported h264 decoder level
     pub idc_level: String,
 }
 
+impl Default for SystemProperties {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemProperties {
+    pub fn new() -> Self {
+        SystemProperties {
+            //TODO: default to true on fp>=7, false <= 6
+            exact_settings: true,
+            //TODO: default to false on fp>=7, true <= 6
+            use_codepage: false,
+            capabilities: SystemCapabilities::empty(),
+            player_type: PlayerType::StandAlone,
+            screen_color: ScreenColor::Color,
+            // TODO: note for fp <7 this should be the locale and the ui lang for >= 7, on windows
+            language: Language::English,
+            // source: https://web.archive.org/web/20230611050355/https://flylib.com/books/en/4.13.1.272/1/
+            pixel_aspect_ratio: 1_f32,
+            // source: https://tracker.adobe.com/#/view/FP-3949775
+            dpi: 72_f32,
+            manufacturer: Manufacturer::Linux,
+            os: OperatingSystem::Linux,
+            cpu_architecture: CpuArchitecture::X86,
+            idc_level: "5.1".into(),
+        }
+    }
     pub fn get_version_string(&self, avm: &mut Avm1) -> String {
         format!(
             "{} {},0,0,0",
@@ -327,7 +330,8 @@ impl SystemProperties {
         percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
     }
 
-    pub fn get_server_string(&self, avm: &mut Avm1) -> String {
+    pub fn get_server_string(&self, context: &UpdateContext) -> String {
+        let viewport_dimensions = context.renderer.viewport_dimensions();
         url::form_urlencoded::Serializer::new(String::new())
             .append_pair("A", self.encode_capability(SystemCapabilities::AUDIO))
             .append_pair(
@@ -369,18 +373,25 @@ impl SystemProperties {
                 "M",
                 &self.encode_string(
                     self.manufacturer
-                        .get_manufacturer_string(avm.player_version())
+                        .get_manufacturer_string(context.avm1.player_version())
                         .as_str(),
                 ),
             )
             .append_pair(
                 "R",
-                &format!("{}x{}", self.screen_resolution.0, self.screen_resolution.1),
+                &format!(
+                    "{}x{}",
+                    viewport_dimensions.width, viewport_dimensions.height
+                ),
             )
             .append_pair("COL", &self.screen_color.to_string())
-            .append_pair("AR", &self.aspect_ratio.to_string())
+            .append_pair("AR", &self.pixel_aspect_ratio.to_string())
             .append_pair("OS", &self.encode_string(&self.os.to_string()))
-            .append_pair("L", self.language.get_language_code(avm.player_version()))
+            .append_pair(
+                "L",
+                self.language
+                    .get_language_code(context.avm1.player_version()),
+            )
             .append_pair("IME", self.encode_capability(SystemCapabilities::IME))
             .append_pair("PT", &self.player_type.to_string())
             .append_pair(
@@ -393,30 +404,6 @@ impl SystemProperties {
             )
             .append_pair("DP", &self.dpi.to_string())
             .finish()
-    }
-}
-
-impl Default for SystemProperties {
-    fn default() -> Self {
-        SystemProperties {
-            //TODO: default to true on fp>=7, false <= 6
-            exact_settings: true,
-            //TODO: default to false on fp>=7, true <= 6
-            use_codepage: false,
-            capabilities: SystemCapabilities::empty(),
-            player_type: PlayerType::StandAlone,
-            screen_color: ScreenColor::Color,
-            // TODO: note for fp <7 this should be the locale and the ui lang for >= 7, on windows
-            language: Language::English,
-            screen_resolution: (0, 0),
-            aspect_ratio: 1_f32,
-            dpi: 1_f32,
-            manufacturer: Manufacturer::Linux,
-            os: OperatingSystem::Linux,
-            sandbox_type: SandboxType::LocalTrusted,
-            cpu_architecture: CpuArchitecture::X86,
-            idc_level: "5.1".into(),
-        }
     }
 }
 
@@ -513,22 +500,11 @@ pub fn on_status<'gc>(
 }
 
 pub fn create<'gc>(
-    gc_context: MutationContext<'gc, '_>,
+    context: &mut StringContext<'gc>,
     proto: Object<'gc>,
     fn_proto: Object<'gc>,
-    security: Object<'gc>,
-    capabilities: Object<'gc>,
-    ime: Object<'gc>,
-) -> Object<'gc> {
-    let system = ScriptObject::new(gc_context, Some(proto));
-    define_properties_on(OBJECT_DECLS, gc_context, system, fn_proto);
-    system.define_value(gc_context, "IME", ime.into(), Attribute::empty());
-    system.define_value(gc_context, "security", security.into(), Attribute::empty());
-    system.define_value(
-        gc_context,
-        "capabilities",
-        capabilities.into(),
-        Attribute::empty(),
-    );
-    system.into()
+) -> ScriptObject<'gc> {
+    let system = ScriptObject::new(context, Some(proto));
+    define_properties_on(OBJECT_DECLS, context, system, fn_proto);
+    system
 }

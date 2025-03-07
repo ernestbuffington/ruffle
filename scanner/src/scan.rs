@@ -43,7 +43,7 @@ pub fn scan_file<P: AsRef<OsStr>>(exec_path: P, file: &DirEntry, name: &str) -> 
     let mut file_results = FileResults::new(name);
 
     let subproc = Command::new(exec_path)
-        .args(&["execute-report", &file.path().to_string_lossy()])
+        .args(["execute-report", &file.path().to_string_lossy()])
         .output();
     match subproc {
         Ok(output) => {
@@ -143,12 +143,10 @@ pub fn scan_main(opt: ScanOpt) -> Result<(), std::io::Error> {
             result
         })
         .ser_bridge()
-        .map(|result| {
+        .inspect(|result| {
             if let Err(e) = writer.serialize(result.clone()) {
                 eprintln!("{e}");
             };
-
-            result
         });
 
     analyze(result_iter);

@@ -7,10 +7,11 @@ use crate::avm1::error::Error;
 use crate::avm1::function::ExecutionReason;
 use crate::avm1::object::{search_prototype, ExecutionName};
 use crate::avm1::property::Attribute;
-use crate::avm1::{Object, ObjectPtr, ScriptObject, TObject, Value};
+use crate::avm1::{NativeObject, Object, ObjectPtr, ScriptObject, TObject, Value};
 use crate::display_object::DisplayObject;
 use crate::string::AvmString;
-use gc_arena::{Collect, Gc, MutationContext};
+use gc_arena::{Collect, Gc, Mutation};
+use ruffle_macros::istr;
 
 /// Implementation of the `super` object in AS2.
 ///
@@ -42,10 +43,7 @@ pub struct SuperObjectData<'gc> {
 impl<'gc> SuperObject<'gc> {
     /// Construct a `super` for an incoming stack frame.
     pub fn new(activation: &mut Activation<'_, 'gc>, this: Object<'gc>, depth: u8) -> Self {
-        Self(Gc::allocate(
-            activation.context.gc_context,
-            SuperObjectData { this, depth },
-        ))
+        Self(Gc::new(activation.gc(), SuperObjectData { this, depth }))
     }
 
     pub fn this(&self) -> Object<'gc> {
@@ -75,6 +73,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
         &self,
         _name: impl Into<AvmString<'gc>>,
         _activation: &mut Activation<'_, 'gc>,
+        _is_slash_path: bool,
     ) -> Option<Value<'gc>> {
         None
     }
@@ -92,18 +91,18 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
 
     fn call(
         &self,
-        name: AvmString<'gc>,
+        name: impl Into<ExecutionName<'gc>>,
         activation: &mut Activation<'_, 'gc>,
         _this: Value<'gc>,
         args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
         let constructor = self
             .base_proto(activation)
-            .get("__constructor__", activation)?
+            .get(istr!("__constructor__"), activation)?
             .coerce_to_object(activation);
         match constructor.as_executable() {
             Some(exec) => exec.exec(
-                ExecutionName::Dynamic(name),
+                name.into(),
                 activation,
                 self.0.this.into(),
                 self.0.depth + 1,
@@ -124,7 +123,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
     ) -> Result<Value<'gc>, Error<'gc>> {
         let this = self.0.this;
         let (method, depth) =
-            match search_prototype(self.proto(activation), name, activation, this)? {
+            match search_prototype(self.proto(activation), name, activation, this, false)? {
                 Some((Value::Object(method), depth)) => (method, depth),
                 _ => return Ok(Value::Undefined),
             };
@@ -168,7 +167,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
 
     fn define_value(
         &self,
-        _gc_context: MutationContext<'gc, '_>,
+        _gc_context: &Mutation<'gc>,
         _name: impl Into<AvmString<'gc>>,
         _value: Value<'gc>,
         _attributes: Attribute,
@@ -178,7 +177,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
 
     fn set_attributes(
         &self,
-        _gc_context: MutationContext<'gc, '_>,
+        _gc_context: &Mutation<'gc>,
         _name: Option<AvmString<'gc>>,
         _set_attributes: Attribute,
         _clear_attributes: Attribute,
@@ -188,7 +187,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
 
     fn add_property(
         &self,
-        _gc_context: MutationContext<'gc, '_>,
+        _gc_context: &Mutation<'gc>,
         _name: AvmString<'gc>,
         _get: Object<'gc>,
         _set: Option<Object<'gc>>,
@@ -223,7 +222,11 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
         false
     }
 
-    fn get_keys(&self, _activation: &mut Activation<'_, 'gc>) -> Vec<AvmString<'gc>> {
+    fn get_keys(
+        &self,
+        _activation: &mut Activation<'_, 'gc>,
+        _include_hidden: bool,
+    ) -> Vec<AvmString<'gc>> {
         vec![]
     }
 
@@ -265,7 +268,7 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
         vec![]
     }
 
-    fn set_interfaces(&self, _gc_context: MutationContext<'gc, '_>, _iface_list: Vec<Object<'gc>>) {
+    fn set_interfaces(&self, _gc_context: &Mutation<'gc>, _iface_list: Vec<Object<'gc>>) {
         //`super` probably cannot have interfaces set on it
     }
 
@@ -276,5 +279,13 @@ impl<'gc> TObject<'gc> for SuperObject<'gc> {
     fn as_display_object(&self) -> Option<DisplayObject<'gc>> {
         //`super` actually can be used to invoke MovieClip methods
         self.0.this.as_display_object()
+    }
+
+    fn native(&self) -> NativeObject<'gc> {
+        self.0.this.native()
+    }
+
+    fn set_native(&self, gc_context: &Mutation<'gc>, native: NativeObject<'gc>) {
+        self.0.this.set_native(gc_context, native);
     }
 }

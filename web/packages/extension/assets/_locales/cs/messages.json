@@ -1,0 +1,119 @@
+{
+    "settings_ruffle_enable": {
+        "message": "Spustit Flash obsah v Ruffle"
+    },
+    "settings_ignore_optout": {
+        "message": "Spustit Flash obsah i na stránkách, které nepovolují Ruffle"
+    },
+    "settings_show_swf_download": {
+        "message": "Zobrazit možnost stáhnout SWF v kontextové nabídce"
+    },
+    "settings_autostart": {
+        "message": "Spustit automaticky bez úvodní obrazovky (pak kliknutím zrušíte ztlumení)"
+    },
+    "settings_swf_takeover": {
+        "message": "Přehrát SWF soubory v prohlížeči namísto stahování"
+    },
+    "settings_log_level": {
+        "message": "Úroveň logu"
+    },
+    "settings_log_level_error": {
+        "message": "Chyby"
+    },
+    "settings_log_level_warn": {
+        "message": "Varování"
+    },
+    "settings_log_level_info": {
+        "message": "Info"
+    },
+    "settings_max_execution_duration": {
+        "message": "Maximální povolená doba spuštění ActionScript (v sekundách)"
+    },
+    "settings_player_version": {
+        "message": "Číslo verze přehrávače Flash pro emulaci (rozsah 1-32)"
+    },
+    "settings_preferred_renderer": {
+        "message": "Preferovaný vykreslovací modul"
+    },
+    "settings_preferred_renderer_auto": {
+        "message": "Automatický"
+    },
+    "settings_advanced_options": {
+        "message": "Pokročilá nastavení"
+    },
+    "settings_reset": {
+        "message": "Obnovit nastavení"
+    },
+    "settings_reset_confirm": {
+        "message": "Opravdu chcete obnovit nastavení Ruffle na původní výchozí hodnoty?"
+    },
+    "status_init": {
+        "message": "Čte se aktuální karta…"
+    },
+    "status_no_tabs": {
+        "message": "Neexistuje žádná aktivní karta."
+    },
+    "status_tabs_error": {
+        "message": "Při prohlížení aktuální karty se vyskytla chyba."
+    },
+    "status_message_init": {
+        "message": "Kontroluje se stav Ruffle na aktuální kartě…"
+    },
+    "status_result_running": {
+        "message": "Ruffle je načten a připraven ke spuštění Flash obsahu na aktuální kartě."
+    },
+    "status_result_running_protected": {
+        "message": "Ruffle je načten a spouští Flash obsah, který jste požadovali."
+    },
+    "status_result_optout": {
+        "message": "Ruffle nebyl načten, protože aktuální stránka se označila jako nekompatibilní."
+    },
+    "status_result_disabled": {
+        "message": "Ruffle není načten, protože je vypnutý."
+    },
+    "status_result_error": {
+        "message": "Při dotazování na instanci Ruffle na aktuální kartě se vyskytla chyba."
+    },
+    "status_result_protected": {
+        "message": "Ruffle se nemůže načítat na chráněných stránkách prohlížeče."
+    },
+    "action_reload": {
+        "message": "Chcete-li použít změny, znovu načtěte kartu"
+    },
+    "open_player_page": {
+        "message": "Otevřít SWF přehrávač"
+    },
+    "open_settings_page": {
+        "message": "Otevřít stránku s nastaveními"
+    },
+    "settings_page": {
+        "message": "Stránka nastavení"
+    },
+    "description": {
+        "message": "Vrátit Flash zpět na web, kam patří."
+    },
+    "save_settings": {
+        "message": "Uložit nastavení"
+    },
+    "settings_saved": {
+        "message": "Nastavení uložena"
+    },
+    "onboarding_page": {
+        "message": "Vstupní stránka"
+    },
+    "permissions_grant": {
+        "message": "Udělit Ruffle povolení k přístupu k mým údajům na všech stránkách"
+    },
+    "permissions_not_granted": {
+        "message": "Budete muset kliknout na ikonu Ruffle na každé stránce, na které chcete Ruffle použít"
+    },
+    "grant_single_site_permission": {
+        "message": "Trvale povolit pro tuto stránku"
+    },
+    "permissions_explanation": {
+        "message": "Rozšíření Ruffle funguje nejlépe s možností přístupu k datům na všech webových stránkách. To mu umožňuje se spustit při prvním načtení libovolné webové stránky, a proto může přesvědčit webové stránky, které provádějí detekci Flash Playeru, aby okamžitě nechaly spustit obsah Flash. Dává mu to také možnost načítat soubory SWF do své interní stránky přehrávače z jiných míst na webu a umožňuje mu to automaticky načítat přímé odkazy SWF do této stránky. Pokud toto oprávnění neudělíte, budete muset Ruffle povolit ručně na každé webové stránce, na které jej chcete používat, kliknutím na ikonu rozšíření a jeho povolením pro danou webovou stránku."
+    },
+    "swf_player_permissions": {
+        "message": "Chcete-li z této URL adresy načíst soubory typu SWF, musíte jí udělit oprávnění."
+    }
+}

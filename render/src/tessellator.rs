@@ -1,6 +1,6 @@
 use crate::bitmap::BitmapSource;
-use crate::shape_utils::{DistilledShape, DrawCommand, DrawPath};
-use enum_map::Enum;
+use crate::shape_utils::{DistilledShape, DrawCommand, DrawPath, GradientType};
+use indexmap::IndexSet;
 use lyon::path::Path;
 use lyon::tessellation::{
     self,
@@ -8,12 +8,14 @@ use lyon::tessellation::{
     FillTessellator, FillVertex, StrokeTessellator, StrokeVertex, StrokeVertexConstructor,
 };
 use lyon::tessellation::{FillOptions, StrokeOptions};
+use swf::GradientRecord;
 use tracing::instrument;
 
 pub struct ShapeTessellator {
     fill_tess: FillTessellator,
     stroke_tess: StrokeTessellator,
     mesh: Vec<Draw>,
+    gradients: IndexSet<Gradient>,
     lyon_mesh: VertexBuffers<Vertex, u32>,
     mask_index_count: Option<u32>,
     is_stroke: bool,
@@ -25,6 +27,7 @@ impl ShapeTessellator {
             fill_tess: FillTessellator::new(),
             stroke_tess: StrokeTessellator::new(),
             mesh: Vec::new(),
+            gradients: IndexSet::new(),
             lyon_mesh: VertexBuffers::new(),
             mask_index_count: None,
             is_stroke: false,
@@ -38,12 +41,16 @@ impl ShapeTessellator {
         bitmap_source: &dyn BitmapSource,
     ) -> Mesh {
         self.mesh = Vec::new();
+        self.gradients = IndexSet::new();
         self.lyon_mesh = VertexBuffers::new();
+
         for path in shape.paths {
             let (fill_style, lyon_path, next_is_stroke) = match &path {
-                DrawPath::Fill { style, commands } => {
-                    (*style, ruffle_path_to_lyon_path(commands, true), false)
-                }
+                DrawPath::Fill {
+                    style,
+                    commands,
+                    winding_rule: _,
+                } => (*style, ruffle_path_to_lyon_path(commands, true), false),
                 DrawPath::Stroke {
                     style,
                     commands,
@@ -56,37 +63,50 @@ impl ShapeTessellator {
             };
 
             let (draw, color, needs_flush) = match fill_style {
-                swf::FillStyle::Color(color) => (DrawType::Color, color.clone(), false),
-                swf::FillStyle::LinearGradient(gradient) => (
-                    DrawType::Gradient(swf_gradient_to_uniforms(
-                        GradientType::Linear,
-                        gradient,
-                        swf::Fixed8::ZERO,
-                    )),
-                    swf::Color::WHITE,
-                    true,
-                ),
-                swf::FillStyle::RadialGradient(gradient) => (
-                    DrawType::Gradient(swf_gradient_to_uniforms(
-                        GradientType::Radial,
-                        gradient,
-                        swf::Fixed8::ZERO,
-                    )),
-                    swf::Color::WHITE,
-                    true,
-                ),
+                swf::FillStyle::Color(color) => (DrawType::Color, *color, false),
+                swf::FillStyle::LinearGradient(gradient) => {
+                    let uniform =
+                        swf_gradient_to_uniforms(GradientType::Linear, gradient, swf::Fixed8::ZERO);
+                    let (gradient_index, _) = self.gradients.insert_full(uniform);
+
+                    (
+                        DrawType::Gradient {
+                            matrix: swf_to_gl_matrix(gradient.matrix.into()),
+                            gradient: gradient_index,
+                        },
+                        swf::Color::WHITE,
+                        true,
+                    )
+                }
+                swf::FillStyle::RadialGradient(gradient) => {
+                    let uniform =
+                        swf_gradient_to_uniforms(GradientType::Radial, gradient, swf::Fixed8::ZERO);
+                    let (gradient_index, _) = self.gradients.insert_full(uniform);
+                    (
+                        DrawType::Gradient {
+                            matrix: swf_to_gl_matrix(gradient.matrix.into()),
+                            gradient: gradient_index,
+                        },
+                        swf::Color::WHITE,
+                        true,
+                    )
+                }
                 swf::FillStyle::FocalGradient {
                     gradient,
                     focal_point,
-                } => (
-                    DrawType::Gradient(swf_gradient_to_uniforms(
-                        GradientType::Focal,
-                        gradient,
-                        *focal_point,
-                    )),
-                    swf::Color::WHITE,
-                    true,
-                ),
+                } => {
+                    let uniform =
+                        swf_gradient_to_uniforms(GradientType::Focal, gradient, *focal_point);
+                    let (gradient_index, _) = self.gradients.insert_full(uniform);
+                    (
+                        DrawType::Gradient {
+                            matrix: swf_to_gl_matrix(gradient.matrix.into()),
+                            gradient: gradient_index,
+                        },
+                        swf::Color::WHITE,
+                        true,
+                    )
+                }
                 swf::FillStyle::Bitmap {
                     id,
                     matrix,
@@ -124,7 +144,7 @@ impl ShapeTessellator {
             } else if !self.is_stroke && next_is_stroke {
                 // Bake solid color fills followed by strokes into a single draw call, and adjust
                 // the index count to omit the strokes when rendering this shape as a mask.
-                debug_assert!(self.mask_index_count.is_none());
+                assert!(self.mask_index_count.is_none());
                 self.mask_index_count = Some(self.lyon_mesh.indices.len() as u32);
             }
             self.is_stroke = next_is_stroke;
@@ -132,9 +152,9 @@ impl ShapeTessellator {
             let mut buffers_builder =
                 BuffersBuilder::new(&mut self.lyon_mesh, RuffleVertexCtor { color });
             let result = match path {
-                DrawPath::Fill { .. } => self.fill_tess.tessellate_path(
+                DrawPath::Fill { winding_rule, .. } => self.fill_tess.tessellate_path(
                     &lyon_path,
-                    &FillOptions::even_odd(),
+                    &FillOptions::default().with_fill_rule(winding_rule.into()),
                     &mut buffers_builder,
                 ),
                 DrawPath::Stroke { style, .. } => {
@@ -193,12 +213,17 @@ impl ShapeTessellator {
         self.flush_draw(DrawType::Color);
 
         self.lyon_mesh = VertexBuffers::new();
-        std::mem::take(&mut self.mesh)
+        Mesh {
+            draws: std::mem::take(&mut self.mesh),
+            gradients: std::mem::take(&mut self.gradients).into_iter().collect(),
+        }
     }
 
     fn flush_draw(&mut self, draw: DrawType) {
         if self.lyon_mesh.vertices.is_empty() || self.lyon_mesh.indices.len() < 3 {
             // Ignore degenerate fills
+            self.lyon_mesh = VertexBuffers::new();
+            self.mask_index_count = None;
             return;
         }
         let draw_mesh = std::mem::replace(&mut self.lyon_mesh, VertexBuffers::new());
@@ -220,7 +245,10 @@ impl Default for ShapeTessellator {
     }
 }
 
-type Mesh = Vec<Draw>;
+pub struct Mesh {
+    pub draws: Vec<Draw>,
+    pub gradients: Vec<Gradient>,
+}
 
 pub struct Draw {
     pub draw_type: DrawType,
@@ -231,7 +259,10 @@ pub struct Draw {
 
 pub enum DrawType {
     Color,
-    Gradient(Gradient),
+    Gradient {
+        matrix: [[f32; 3]; 3],
+        gradient: usize,
+    },
     Bitmap(Bitmap),
 }
 
@@ -245,16 +276,13 @@ impl DrawType {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Gradient {
-    pub matrix: [[f32; 3]; 3],
     pub gradient_type: GradientType,
-    pub ratios: Vec<f32>,
-    pub colors: Vec<[f32; 4]>,
-    pub num_colors: usize,
     pub repeat_mode: swf::GradientSpread,
     pub focal_point: swf::Fixed8,
     pub interpolation: swf::GradientInterpolation,
+    pub records: Vec<GradientRecord>,
 }
 
 #[derive(Clone, Debug)]
@@ -327,36 +355,46 @@ fn swf_bitmap_to_gl_matrix(
 }
 
 fn ruffle_path_to_lyon_path(commands: &[DrawCommand], is_closed: bool) -> Path {
-    fn point(x: swf::Twips, y: swf::Twips) -> lyon::math::Point {
-        lyon::math::Point::new(x.to_pixels() as f32, y.to_pixels() as f32)
+    fn point(point: swf::Point<swf::Twips>) -> lyon::math::Point {
+        lyon::math::Point::new(point.x.to_pixels() as f32, point.y.to_pixels() as f32)
     }
 
     let mut builder = Path::builder();
-    let mut move_to = Some((swf::Twips::default(), swf::Twips::default()));
-    for cmd in commands {
-        match *cmd {
-            DrawCommand::MoveTo { x, y } => {
-                if move_to.is_none() {
+    let mut cursor = Some(swf::Point::ZERO);
+    for command in commands {
+        match command {
+            DrawCommand::MoveTo(move_to) => {
+                if cursor.is_none() {
                     builder.end(false);
                 }
-                move_to = Some((x, y));
+                cursor = Some(*move_to);
             }
-            DrawCommand::LineTo { x, y } => {
-                if let Some((x, y)) = move_to.take() {
-                    builder.begin(point(x, y));
+            DrawCommand::LineTo(line_to) => {
+                if let Some(cursor) = cursor.take() {
+                    builder.begin(point(cursor));
                 }
-                builder.line_to(point(x, y));
+                builder.line_to(point(*line_to));
             }
-            DrawCommand::CurveTo { x1, y1, x2, y2 } => {
-                if let Some((x, y)) = move_to.take() {
-                    builder.begin(point(x, y));
+            DrawCommand::QuadraticCurveTo { control, anchor } => {
+                if let Some(cursor) = cursor.take() {
+                    builder.begin(point(cursor));
                 }
-                builder.quadratic_bezier_to(point(x1, y1), point(x2, y2));
+                builder.quadratic_bezier_to(point(*control), point(*anchor));
+            }
+            DrawCommand::CubicCurveTo {
+                control_a,
+                control_b,
+                anchor,
+            } => {
+                if let Some(cursor) = cursor.take() {
+                    builder.begin(point(cursor));
+                }
+                builder.cubic_bezier_to(point(*control_a), point(*control_b), point(*anchor));
             }
         }
     }
 
-    if move_to.is_none() {
+    if cursor.is_none() {
         if is_closed {
             builder.close();
         } else {
@@ -367,55 +405,18 @@ fn ruffle_path_to_lyon_path(commands: &[DrawCommand], is_closed: bool) -> Path {
     builder.build()
 }
 
-const MAX_GRADIENT_COLORS: usize = 15;
-
 /// Converts a gradient to the uniforms used by the shader.
 fn swf_gradient_to_uniforms(
     gradient_type: GradientType,
     gradient: &swf::Gradient,
     focal_point: swf::Fixed8,
 ) -> Gradient {
-    // TODO: Support more than MAX_GRADIENT_COLORS.
-    let num_colors = gradient.records.len().min(MAX_GRADIENT_COLORS);
-    let mut colors = Vec::with_capacity(num_colors);
-    let mut ratios = Vec::with_capacity(num_colors);
-    for record in &gradient.records[..num_colors] {
-        let mut color = [
-            f32::from(record.color.r) / 255.0,
-            f32::from(record.color.g) / 255.0,
-            f32::from(record.color.b) / 255.0,
-            f32::from(record.color.a) / 255.0,
-        ];
-        // Convert to linear color space if this is a linear-interpolated gradient.
-        match gradient.interpolation {
-            swf::GradientInterpolation::Rgb => {}
-            swf::GradientInterpolation::LinearRgb => srgb_to_linear(&mut color),
-        }
-        colors.push(color);
-
-        ratios.push(f32::from(record.ratio) / 255.0);
-    }
-
     Gradient {
-        matrix: swf_to_gl_matrix(gradient.matrix.into()),
+        records: gradient.records.clone(),
         gradient_type,
-        ratios,
-        colors,
-        num_colors,
         repeat_mode: gradient.spread,
         focal_point,
         interpolation: gradient.interpolation,
-    }
-}
-
-/// Converts an RGBA color from sRGB space to linear color space.
-fn srgb_to_linear(color: &mut [f32; 4]) {
-    for n in &mut color[..3] {
-        *n = if *n <= 0.04045 {
-            *n / 12.92
-        } else {
-            f32::powf((*n + 0.055) / 1.055, 2.4)
-        };
     }
 }
 
@@ -428,7 +429,7 @@ impl FillVertexConstructor<Vertex> for RuffleVertexCtor {
         Vertex {
             x: vertex.position().x,
             y: vertex.position().y,
-            color: self.color.clone(),
+            color: self.color,
         }
     }
 }
@@ -438,14 +439,7 @@ impl StrokeVertexConstructor<Vertex> for RuffleVertexCtor {
         Vertex {
             x: vertex.position().x,
             y: vertex.position().y,
-            color: self.color.clone(),
+            color: self.color,
         }
     }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Enum)]
-pub enum GradientType {
-    Linear,
-    Radial,
-    Focal,
 }

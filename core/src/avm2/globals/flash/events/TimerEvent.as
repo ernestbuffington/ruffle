@@ -1,4 +1,5 @@
 package flash.events {
+	import __ruffle__.stub_method;
 	public class TimerEvent extends Event{
 		public static const TIMER:String = "timer";
 		public static const TIMER_COMPLETE:String = "timerComplete";
@@ -11,9 +12,11 @@ package flash.events {
 			return new TimerEvent(this.type,this.bubbles,this.cancelable);
 		}
 
-		public function updateAfterEvent():void {
-			// TODO - determine when we should actually force a frame to be rendered.
-			stub_method("flash.events.TimerEvent", "updateAfterEvent");
-		}
+		// Returns a string that contains all the properties of the TimerEvent object.
+        	override public function toString():String {
+           		return this.formatToString("TimerEvent","type","bubbles","cancelable", "eventPhase");
+        	}
+
+		public native function updateAfterEvent():void;
 	}
 }

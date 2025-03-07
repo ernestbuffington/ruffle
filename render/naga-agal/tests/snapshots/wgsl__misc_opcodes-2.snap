@@ -1,0 +1,32 @@
+---
+source: render/naga-agal/tests/wgsl.rs
+expression: output
+---
+struct FragmentOutput {
+    @location(0) member: vec4<f32>,
+}
+
+@group(0) @binding(1) 
+var<uniform> constant_registers: array<vec4<f32>, 28>;
+
+@fragment 
+fn main(@location(0) param: vec4<f32>) -> FragmentOutput {
+    var dest_temp: vec4<f32>;
+    var temporary0_: vec4<f32>;
+    var temporary1_: vec4<f32>;
+
+    let _e3: vec4<f32> = dpdx(param);
+    temporary0_ = _e3;
+    let _e5: vec4<f32> = temporary0_;
+    let _e6: vec4<f32> = dpdy(_e5);
+    temporary1_ = _e6;
+    let _e8: vec4<f32> = temporary1_;
+    if (_e8.xxxx.x < 0f) {
+        discard;
+    }
+    let _e13: vec4<f32> = temporary0_;
+    dest_temp = _e13;
+    let _e14: vec4<f32> = dest_temp;
+    return FragmentOutput(_e14);
+}
+

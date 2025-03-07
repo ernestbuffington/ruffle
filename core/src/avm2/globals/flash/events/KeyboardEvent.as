@@ -6,10 +6,12 @@ package flash.events
         public static const KEY_UP:String = "keyUp";
         private var _charCode:uint;
         private var _keyCode:uint;
+        private var _keyLocation:uint;
         private var _ctrlKey:Boolean;
         private var _altKey:Boolean;
         private var _shiftKey:Boolean;
         private var _controlKey:Boolean;
+        private var _commandKey:Boolean;
 
         public function KeyboardEvent(type:String, 
                                       bubbles:Boolean = true, 
@@ -26,10 +28,12 @@ package flash.events
             super(type,bubbles,cancelable);
             this._charCode = charCodeValue;
             this._keyCode = keyCodeValue;
+            this._keyLocation = keyLocationValue;
             this._ctrlKey = ctrlKeyValue;
             this._altKey = altKeyValue;
             this._shiftKey = shiftKeyValue;
             this._controlKey = controlKeyValue;
+            this._commandKey = commandKeyValue;
         }
 
         public function get charCode():uint {
@@ -44,6 +48,13 @@ package flash.events
         }
         public function set keyCode(val:uint) {
             this._keyCode = val;
+        }
+
+        public function get keyLocation():uint {
+            return this._keyLocation;
+        }
+        public function set keyLocation(val:uint):void {
+            this._keyLocation = val;
         }
 
         public function get ctrlKey():Boolean {
@@ -74,9 +85,22 @@ package flash.events
             this._controlKey = val;
         }
 
+        public function get commandKey():Boolean {
+            return this._commandKey;
+        }
+        public function set commandKey(val:Boolean) {
+            this._commandKey = val;
+        }
+
         override public function clone() : Event
         {
-            return new KeyboardEvent(this.type,this.bubbles,this.cancelable);
+            return new KeyboardEvent(this.type,this.bubbles,this.cancelable,this._charCode,this._keyCode,this._keyLocation,this._ctrlKey,this._altKey,this._shiftKey,this._controlKey,this._commandKey);
         }
+
+        override public function toString(): String {
+            return this.formatToString("KeyboardEvent", "type", "bubbles", "cancelable", "eventPhase", "charCode", "keyCode", "keyLocation", "ctrlKey", "altKey", "shiftKey");
+        }
+
+        public native function updateAfterEvent():void;
     }
 }

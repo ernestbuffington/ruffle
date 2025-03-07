@@ -1,16 +1,13 @@
 use crate::globals::GlobalsUniform;
-use crate::{ColorAdjustments, GradientUniforms, TextureTransforms, Transforms};
+use crate::{GradientUniforms, TextureTransforms, Transforms};
 
 #[derive(Debug)]
 pub struct BindLayouts {
     pub globals: wgpu::BindGroupLayout,
     pub transforms: wgpu::BindGroupLayout,
-    pub color_transforms: wgpu::BindGroupLayout,
     pub bitmap: wgpu::BindGroupLayout,
     pub gradient: wgpu::BindGroupLayout,
     pub blend: wgpu::BindGroupLayout,
-    pub color_matrix_filter: wgpu::BindGroupLayout,
-    pub blur_filter: wgpu::BindGroupLayout,
 }
 
 impl BindLayouts {
@@ -30,22 +27,6 @@ impl BindLayouts {
                 count: None,
             }],
             label: uniform_buffer_layout_label.as_deref(),
-        });
-
-        let color_transforms = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
-                    min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<ColorAdjustments>() as u64,
-                    ),
-                },
-                count: None,
-            }],
-            label: create_debug_label!("Color transforms bind group layout").as_deref(),
         });
 
         let globals_layout_label = create_debug_label!("Globals bind group layout");
@@ -160,50 +141,32 @@ impl BindLayouts {
                     },
                     count: None,
                 },
-            ],
-            label: gradient_bind_layout_label.as_deref(),
-        });
-
-        let color_matrix_filter =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(
-                            std::mem::size_of::<[f32; 20]>() as u64
-                        ),
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
                     },
                     count: None,
-                }],
-                label: create_debug_label!("Color matrix filter binds").as_deref(),
-            });
-
-        let blur_filter = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<[f32; 4]>() as u64),
                 },
-                count: None,
-            }],
-            label: create_debug_label!("Blur filter binds").as_deref(),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+            label: gradient_bind_layout_label.as_deref(),
         });
 
         Self {
             globals,
             transforms,
-            color_transforms,
             bitmap,
             gradient,
             blend,
-            color_matrix_filter,
-            blur_filter,
         }
     }
 }

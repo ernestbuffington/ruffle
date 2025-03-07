@@ -1,12 +1,10 @@
 //! CSS dimension types
-use gc_arena::Collect;
-use std::cmp::{max, min, Ord};
-use std::ops::{Add, AddAssign, Sub};
+use std::cmp::{max, min};
+use std::ops::{Add, AddAssign, Sub, SubAssign};
 use swf::{Rectangle, Twips};
 
 /// A type which represents the top-left position of a layout box.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Collect)]
-#[collect(require_static)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Position<T> {
     x: T,
     y: T,
@@ -80,9 +78,32 @@ where
     }
 }
 
+impl<T> Sub for Position<T>
+where
+    T: Sub<T, Output = T>,
+{
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
+    }
+}
+
+impl<T> SubAssign for Position<T>
+where
+    T: SubAssign,
+{
+    fn sub_assign(&mut self, rhs: Self) {
+        self.x -= rhs.x;
+        self.y -= rhs.y;
+    }
+}
+
 /// A type which represents the size of a layout box.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Collect)]
-#[collect(require_static)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Size<T> {
     width: T,
     height: T,
@@ -133,8 +154,7 @@ impl<T> From<Position<T>> for Size<T> {
 }
 
 /// A type which represents the offset and size of a text box.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Collect)]
-#[collect(require_static)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct BoxBounds<T> {
     offset_x: T,
     extent_x: T,
@@ -212,6 +232,19 @@ where
 #[allow(dead_code)]
 impl<T> BoxBounds<T>
 where
+    T: Copy + std::cmp::PartialOrd,
+{
+    pub fn contains(&self, local_position: Position<T>) -> bool {
+        local_position.x >= self.offset_x
+            && local_position.x <= self.extent_x
+            && local_position.y >= self.offset_y
+            && local_position.y <= self.extent_y
+    }
+}
+
+#[allow(dead_code)]
+impl<T> BoxBounds<T>
+where
     T: Copy,
 {
     pub fn offset_x(&self) -> T {
@@ -263,6 +296,15 @@ where
             extent_x: self.offset_x + new_size.width,
             offset_y: self.offset_y,
             extent_y: self.offset_y + new_size.height,
+        }
+    }
+
+    pub fn with_width(self, new_width: T) -> Self {
+        Self {
+            offset_x: self.offset_x,
+            extent_x: self.offset_x + new_width,
+            offset_y: self.offset_y,
+            extent_y: self.extent_y,
         }
     }
 }
